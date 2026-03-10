@@ -1,0 +1,22 @@
+{
+  "1-vivienen": {
+    "player": "Катя",
+    "character": "Агата",
+    "role": "PC"
+  },
+  "2-v_vladimir": {
+    "player": "Вова",
+    "character": "",
+    "role": "GM"
+  },
+  "3-orangeunicorn": {
+    "player": "Тоша",
+    "character": "Лисса",
+    "role": "PC"
+  },
+  "4-vasia_nastasia": {
+    "player": "Настя",
+    "character": "Анжелика",
+    "role": "PC"
+  }
+}

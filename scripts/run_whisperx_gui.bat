@@ -1,5 +1,7 @@
 @echo off
 setlocal
+chcp 65001 >nul 2>nul
+set "PYTHONIOENCODING=utf-8"
 
 REM ── Self-contained WhisperX GUI launcher ──
 REM Project root = parent of this scripts\ folder.
