@@ -6,3 +6,7 @@ __pycache__/
 
 # Runtime logs
 _run_whisperx_gui.log
+
+# User data
+speaker_map.json
+.claude/
