@@ -14,9 +14,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
+import time
+import warnings
 from pathlib import Path
+
+# Suppress noisy torchcodec / pyannote warnings at import time
+warnings.filterwarnings("ignore", message=".*torchcodec.*")
+warnings.filterwarnings("ignore", message=".*libtorchcodec.*")
+os.environ.setdefault("TORCHAUDIO_NO_BACKEND_CHECK", "1")
 
 EXCLUDE_AUDIO_PREFIXES = ("craig",)
 
@@ -267,6 +276,25 @@ def _format_gpu_status(info: dict) -> tuple[str, str]:
     )
 
 
+def _quick_cuda_test() -> tuple[bool, str]:
+    """Actually allocate a tensor on GPU. Returns (success, message)."""
+    try:
+        import torch
+        t = torch.zeros(1, device="cuda")
+        del t
+        torch.cuda.empty_cache()
+        return True, "CUDA тест пройден — GPU работает"
+    except Exception as e:
+        return False, f"CUDA тест провален: {e}"
+
+
+def _subprocess_kwargs() -> dict:
+    """Extra kwargs to hide console windows on Windows."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 def gui_main() -> int:
     """
     Minimal Windows GUI for double-click runs.
@@ -281,8 +309,9 @@ def gui_main() -> int:
         return 2
 
     root = tk.Tk()
-    root.title("WhisperX → merged.txt")
-    root.geometry("740x720")
+    root.title("WhisperX — Транскрипция сессий")
+    root.geometry("780x780")
+    root.minsize(600, 500)
 
     session_var = tk.StringVar(value="")
     status_var = tk.StringVar(value="Выберите папку сессии (где лежат *.flac).")
@@ -300,28 +329,75 @@ def gui_main() -> int:
 
     speaker_rows: list[dict] = []
     speaker_status_var = tk.StringVar(value="")
+    _running = threading.Event()  # set while worker is active
+
+    # ── Thread-safe logging via queue ─────────────────────────────────────
+
+    _log_queue: queue.Queue[str] = queue.Queue()
 
     def log(msg: str) -> None:
-        txt.insert("end", msg + "\n")
-        txt.see("end")
-        root.update_idletasks()
+        """Thread-safe: puts message in queue, polled by main thread."""
+        _log_queue.put(msg)
 
-    def run_and_log(cmd: list[str], *, cwd: Path | None = None) -> None:
+    def _poll_log_queue() -> None:
+        """Drain the log queue into the Text widget (runs on main thread)."""
+        while True:
+            try:
+                msg = _log_queue.get_nowait()
+            except queue.Empty:
+                break
+            txt.insert("end", msg + "\n")
+            txt.see("end")
+        root.after(100, _poll_log_queue)
+
+    def _set_status(msg: str) -> None:
+        """Thread-safe status bar update."""
+        root.after(0, lambda: status_var.set(msg))
+
+    def _set_progress(value: float, maximum: float = 100) -> None:
+        """Thread-safe progress bar update (0..maximum)."""
+        root.after(0, lambda: (
+            progress_bar.config(maximum=maximum),
+            progress_var.set(value),
+        ))
+
+    def run_and_stream(cmd: list[str], *, cwd: Path | None = None,
+                       status_prefix: str = "") -> str:
+        """Run a subprocess with real-time line streaming into log().
+        Returns combined stdout+stderr as a string (for GPU marker parsing).
+        Raises CalledProcessError on non-zero exit."""
         log(">> " + " ".join(cmd))
-        p = subprocess.run(
+        collected: list[str] = []
+        p = subprocess.Popen(
             cmd,
             cwd=str(cwd) if cwd else None,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_subprocess_kwargs(),
         )
-        if p.stdout:
-            log(p.stdout.rstrip())
-        if p.stderr:
-            log(p.stderr.rstrip())
+        for line in p.stdout:  # type: ignore[union-attr]
+            stripped = line.rstrip()
+            if stripped:
+                log("   " + stripped)
+                collected.append(stripped)
+                # Detect whisperx sub-stages for status bar
+                if status_prefix:
+                    low = stripped.lower()
+                    if "loading" in low and "model" in low:
+                        _set_status(f"{status_prefix} — загрузка модели…")
+                    elif "transcribing" in low or "transcription" in low:
+                        _set_status(f"{status_prefix} — транскрипция…")
+                    elif "alignment" in low or "aligning" in low:
+                        _set_status(f"{status_prefix} — выравнивание…")
+                    elif "diarization" in low or "diarize" in low:
+                        _set_status(f"{status_prefix} — диаризация…")
+        p.wait()
         if p.returncode != 0:
-            raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+            raise subprocess.CalledProcessError(p.returncode, cmd)
+        return "\n".join(collected)
 
     # ── Speaker map helpers ────────────────────────────────────────────────
 
@@ -333,16 +409,18 @@ def gui_main() -> int:
             entry = smap.get(stem, {})
             if not isinstance(entry, dict):
                 entry = {}
-            row_frame = tk.Frame(speaker_table)
-            row_frame.pack(fill="x", pady=1)
+            row_frame = ttk.Frame(speaker_table)
+            row_frame.pack(fill="x", pady=2)
             player_var = tk.StringVar(value=entry.get("player", ""))
             char_var = tk.StringVar(value=entry.get("character", ""))
             role_var = tk.StringVar(value=entry.get("role", "PC"))
-            tk.Label(row_frame, text=stem, width=20, anchor="w").pack(side="left")
-            tk.Entry(row_frame, textvariable=player_var, width=15).pack(side="left", padx=4)
-            tk.Entry(row_frame, textvariable=char_var, width=15).pack(side="left", padx=4)
+            ttk.Label(row_frame, text=stem, width=20, anchor="w").pack(side="left")
+            ttk.Entry(row_frame, textvariable=player_var, width=15,
+                      font=("Segoe UI", 9)).pack(side="left", padx=4)
+            ttk.Entry(row_frame, textvariable=char_var, width=15,
+                      font=("Segoe UI", 9)).pack(side="left", padx=4)
             ttk.Combobox(
-                row_frame, textvariable=role_var, values=["PC", "GM"], width=4, state="readonly"
+                row_frame, textvariable=role_var, values=["PC", "GM"], width=5, state="readonly"
             ).pack(side="left", padx=4)
             speaker_rows.append({
                 "stem": stem,
@@ -408,7 +486,15 @@ def gui_main() -> int:
 
     # ── Start pipeline ─────────────────────────────────────────────────────
 
+    def _fmt_elapsed(seconds: float) -> str:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}м {s:02d}с" if m else f"{s}с"
+
     def start() -> None:
+        """Validate inputs on main thread, then launch worker thread."""
+        if _running.is_set():
+            return
+
         session_dir = Path(session_var.get()).expanduser().resolve()
         if not session_dir.exists():
             messagebox.showerror("Ошибка", "Папка не найдена.")
@@ -423,201 +509,407 @@ def gui_main() -> int:
             _save_speaker_map(existing, save_path)
             log(f"Speaker map сохранён: {save_path}")
 
+        # Snapshot all UI values before spawning thread (tkinter is not thread-safe)
+        params = {
+            "session_dir": session_dir,
+            "merge_only": merge_only_var.get(),
+            "model": model_var.get().strip() or "large-v3",
+            "device": device_var.get().strip() or "cuda",
+            "compute_type": compute_type_var.get().strip() or "float16",
+            "beam_size": max(1, int(beam_size_var.get().strip() or "5")),
+            "do_chunk": chunk_var.get(),
+            "chunk_chars": int(chunk_chars_var.get().strip() or "40000"),
+            "chunk_overlap": float(chunk_overlap_var.get().strip().replace(",", ".") or "0.20"),
+        }
+
+        _running.set()
+        btn_start.config(state="disabled", text="⏳ Работаю…")
+        progress_var.set(0)
+        status_var.set("Запуск…")
+        txt.delete("1.0", "end")
+        threading.Thread(target=_worker, args=(params,), daemon=True).start()
+
+    def _worker(p: dict) -> None:
+        """Heavy pipeline — runs in a background thread."""
+        t_total = time.time()
+        try:
+            _do_pipeline(p)
+            elapsed = _fmt_elapsed(time.time() - t_total)
+            log(f"\n{'═' * 50}")
+            log(f"✅ Всё готово!  Общее время: {elapsed}")
+            log(f"   Результат: {p['session_dir']}\\merged.txt")
+            _set_status(f"✅ Готово за {elapsed}")
+            _set_progress(100, 100)
+            root.after(0, lambda: messagebox.showinfo(
+                "Готово", f"Сделано за {elapsed}:\n{p['session_dir']}\\merged.txt"))
+        except subprocess.CalledProcessError as e:
+            log(f"\n❌ Команда завершилась с ошибкой (код {e.returncode})")
+            _set_status("❌ Ошибка выполнения")
+            root.after(0, lambda: messagebox.showerror(
+                "Ошибка WhisperX", f"Команда завершилась с ошибкой:\n{e}"))
+        except Exception as e:
+            log(f"\n❌ Ошибка: {e}")
+            _set_status(f"❌ {e}")
+            root.after(0, lambda: messagebox.showerror("Ошибка", str(e)))
+        finally:
+            _running.clear()
+            root.after(0, lambda: btn_start.config(state="normal", text="▶ Запустить"))
+
+    def _do_pipeline(p: dict) -> None:
+        """Actual pipeline logic (called from worker thread)."""
+        session_dir = p["session_dir"]
         output_dir = session_dir
         merge_script = (Path(__file__).resolve().parent / "merge_whisperx.py").resolve()
 
-        try:
-            jsons = sorted(output_dir.glob("*.json"))
-            need_whisperx = not merge_only_var.get() and len(jsons) == 0
+        jsons = sorted(output_dir.glob("*.json"))
+        need_whisperx = not p["merge_only"] and len(jsons) == 0
 
-            if need_whisperx:
-                audio_files = [
-                    p
-                    for p in sorted(session_dir.glob("*.flac"))
-                    if not any(p.stem.lower() == x or p.stem.lower().startswith(x + "-") for x in EXCLUDE_AUDIO_PREFIXES)
+        if need_whisperx:
+            audio_files = [
+                af for af in sorted(session_dir.glob("*.flac"))
+                if not any(af.stem.lower() == x or af.stem.lower().startswith(x + "-")
+                           for x in EXCLUDE_AUDIO_PREFIXES)
+            ]
+            if not audio_files:
+                raise RuntimeError("В папке нет *.flac (или всё исключено как craig*).")
+
+            device = p["device"]
+            model = p["model"]
+            compute_type = p["compute_type"]
+            beam_size = p["beam_size"]
+
+            # ── GPU pre-flight check ──────────────────────────────────
+            if device == "cuda":
+                _set_status("Проверка GPU…")
+                log("\n🔍 Проверка GPU перед запуском…")
+                ok, msg = _quick_cuda_test()
+                if ok:
+                    log(f"   ✓ {msg}")
+                else:
+                    log(f"   ⚠️ {msg}")
+                    log("   ⚠️ Переключаюсь на CPU!")
+                    device = "cpu"
+
+            log(f"\n{'═' * 50}")
+            log(f"== Устройство: {device.upper()}  |  model: {model}"
+                f"  |  compute: {compute_type}  |  beam: {beam_size}")
+            log(f"== Файлов: {len(audio_files)}")
+            log(f"{'═' * 50}")
+
+            total_files = len(audio_files)
+            _set_progress(0, total_files)
+            gpu_confirmed = False
+            for idx, audio in enumerate(audio_files, 1):
+                t_file = time.time()
+                prefix = f"[{idx}/{total_files}] {audio.stem}"
+                _set_status(f"{prefix} — запуск…")
+                log(f"\n[{idx}/{total_files}] 🎙 {audio.name}")
+
+                cmd = [
+                    "whisperx", str(audio),
+                    "--model", model,
+                    "--language", "ru",
+                    "--output_dir", str(output_dir),
+                    "--vad_method", "silero",
+                    "--device", device,
+                    "--compute_type", compute_type,
+                    "--beam_size", str(beam_size),
                 ]
-                if not audio_files:
-                    messagebox.showerror("Ошибка", "В папке нет *.flac (или всё исключено как craig*).")
-                    return
+                output = run_and_stream(cmd, cwd=output_dir,
+                                        status_prefix=prefix)
 
-                model = model_var.get().strip() or "large-v2"
-                language = "ru"
-                device = device_var.get().strip() or "cuda"
-                compute_type = compute_type_var.get().strip() or "float16"
-                vad_method = "silero"
-                try:
-                    beam_size = int(beam_size_var.get().strip())
-                except Exception:
-                    beam_size = 5
-                if beam_size <= 0:
-                    beam_size = 5
+                # ── Parse GPU markers from whisperx output ────────
+                low = output.lower()
+                if "cuda" in low or "gpu" in low:
+                    gpu_confirmed = True
+                if device == "cuda" and ("using cpu" in low or "fallback" in low):
+                    log("   ⚠️ WhisperX сообщает о работе на CPU!")
 
-                log(f"\n== Устройство: {device.upper()}"
-                    f"  |  model: {model}  |  compute: {compute_type}  |  beam: {beam_size}")
+                elapsed = _fmt_elapsed(time.time() - t_file)
+                log(f"   ✓ Готово за {elapsed}")
+                _set_progress(idx, total_files)
 
-                for audio in audio_files:
-                    cmd = [
-                        "whisperx",
-                        str(audio),
-                        "--model",
-                        model,
-                        "--language",
-                        language,
-                        "--output_dir",
-                        str(output_dir),
-                        "--vad_method",
-                        vad_method,
-                        "--device",
-                        device,
-                        "--compute_type",
-                        compute_type,
-                        "--beam_size",
-                        str(beam_size),
-                    ]
-                    run_and_log(cmd, cwd=output_dir)
+            # ── Post-transcription GPU summary ────────────────────
+            if device == "cuda":
+                if gpu_confirmed:
+                    log("\n✓ GPU использовался при транскрипции")
+                else:
+                    log("\n⚠️ Не удалось подтвердить использование GPU"
+                        " (WhisperX не вывел маркеров cuda/gpu)")
 
-            # merge
-            jsons = sorted(output_dir.glob("*.json"))
-            if not jsons:
-                messagebox.showerror("Ошибка", "Не найдено ни одного *.json для склейки.")
-                return
+        # ── Merge ─────────────────────────────────────────────────
+        jsons = sorted(output_dir.glob("*.json"))
+        if not jsons:
+            raise RuntimeError("Не найдено ни одного *.json для склейки.")
 
-            cmd = [sys.executable, str(merge_script), *[str(p) for p in jsons]]
-            log("\n== Склейка в merged.txt")
-            run_and_log(cmd, cwd=output_dir)
+        _set_status(f"Склейка {len(jsons)} JSON → merged.txt…")
+        log(f"\n== Склейка {len(jsons)} JSON → merged.txt")
+        t_merge = time.time()
+        cmd = [sys.executable, str(merge_script), *[str(j) for j in jsons]]
+        run_and_stream(cmd, cwd=output_dir)
+        log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_merge)}")
 
-            if chunk_var.get():
-                chunk_script = (Path(__file__).resolve().parent / "chunk_text.py").resolve()
-                merged_txt = output_dir / "merged.txt"
-                if not merged_txt.exists():
-                    messagebox.showerror("Ошибка", "После склейки не найден merged.txt")
-                    return
-                try:
-                    chunk_chars = int(chunk_chars_var.get().strip())
-                except Exception:
-                    chunk_chars = 40000
-                try:
-                    overlap = float(chunk_overlap_var.get().strip().replace(",", "."))
-                except Exception:
-                    overlap = 0.20
+        # ── Chunk ─────────────────────────────────────────────────
+        if p["do_chunk"]:
+            chunk_script = (Path(__file__).resolve().parent / "chunk_text.py").resolve()
+            merged_txt = output_dir / "merged.txt"
+            if not merged_txt.exists():
+                raise RuntimeError("После склейки не найден merged.txt")
 
-                chunk_cmd = [
-                    sys.executable,
-                    str(chunk_script),
-                    str(merged_txt),
-                    "--chunk_chars",
-                    str(chunk_chars),
-                    "--overlap",
-                    str(overlap),
-                ]
-                log("\n== Нарезка на чанки (chunks\\)")
-                run_and_log(chunk_cmd, cwd=output_dir)
+            _set_status("Нарезка на чанки…")
+            log("\n== Нарезка на чанки")
+            t_chunk = time.time()
+            chunk_cmd = [
+                sys.executable, str(chunk_script), str(merged_txt),
+                "--chunk_chars", str(p["chunk_chars"]),
+                "--overlap", str(p["chunk_overlap"]),
+            ]
+            run_and_stream(chunk_cmd, cwd=output_dir)
+            log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_chunk)}")
 
-            messagebox.showinfo("Готово", f"Сделано: {output_dir}\\merged.txt")
-        except subprocess.CalledProcessError as e:
-            messagebox.showerror("Ошибка WhisperX", f"Команда завершилась с ошибкой:\n{e}")
-        except Exception as e:
-            messagebox.showerror("Ошибка", str(e))
+    # ── Theme / colours ──────────────────────────────────────────────────
+
+    BG       = "#1e1e2e"   # main background
+    BG2      = "#2a2a3c"   # card / group background
+    FG       = "#cdd6f4"   # default text
+    FG_DIM   = "#6c7086"   # muted text
+    ACCENT   = "#40b87c"   # green accent (buttons, GPU ok)
+    WARN     = "#f9a825"   # orange warnings
+    ERR      = "#f44336"   # red errors
+    INPUT_BG = "#313244"   # entry / combo background
+    INPUT_FG = "#cdd6f4"
+
+    root.configure(bg=BG)
+
+    style = ttk.Style()
+    style.theme_use("clam")  # best base for custom colours
+
+    style.configure(".", background=BG, foreground=FG, fieldbackground=INPUT_BG,
+                     borderwidth=0, focuscolor=ACCENT)
+    style.configure("TLabel", background=BG, foreground=FG)
+    style.configure("TFrame", background=BG)
+    style.configure("TSeparator", background="#45475a")
+    style.configure("TLabelframe", background=BG2, foreground=FG)
+    style.configure("TLabelframe.Label", background=BG, foreground=FG_DIM, font=("Segoe UI", 9))
+    style.configure("TCheckbutton", background=BG, foreground=FG)
+    style.map("TCheckbutton", background=[("active", BG)])
+    style.configure("TCombobox", fieldbackground=INPUT_BG, foreground=INPUT_FG,
+                     selectbackground=ACCENT, selectforeground="#fff",
+                     arrowcolor=FG_DIM, borderwidth=1)
+    style.map("TCombobox",
+              fieldbackground=[("readonly", INPUT_BG), ("disabled", BG2)],
+              foreground=[("readonly", INPUT_FG), ("disabled", FG_DIM)],
+              selectbackground=[("readonly", INPUT_BG)],
+              selectforeground=[("readonly", INPUT_FG)],
+              arrowcolor=[("readonly", FG_DIM)])
+    # Force the Combobox dropdown (Listbox) colours via option_add
+    root.option_add("*TCombobox*Listbox.background", INPUT_BG)
+    root.option_add("*TCombobox*Listbox.foreground", INPUT_FG)
+    root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+    root.option_add("*TCombobox*Listbox.selectForeground", "#fff")
+    style.configure("TEntry", fieldbackground=INPUT_BG, foreground=INPUT_FG)
+
+    # Accent button (green)
+    style.configure("Accent.TButton", background=ACCENT, foreground="#fff",
+                     font=("Segoe UI", 10, "bold"), padding=(16, 6))
+    style.map("Accent.TButton",
+              background=[("active", "#36a06a"), ("disabled", "#555")])
+
+    # Link-style button (text only)
+    style.configure("Link.TButton", background=BG2, foreground=ACCENT,
+                     font=("Segoe UI", 9), padding=(8, 4), borderwidth=0)
+    style.map("Link.TButton", foreground=[("active", "#5fd9a0")])
+
+    # Small green outlined button
+    style.configure("Outline.TButton", background=BG2, foreground=ACCENT,
+                     font=("Segoe UI", 9), padding=(8, 3), borderwidth=1, relief="solid")
+    style.map("Outline.TButton", foreground=[("active", "#5fd9a0")])
+
+    # Bold header label
+    style.configure("Header.TLabel", font=("Segoe UI", 8, "bold"), foreground=FG_DIM)
+
+    # GPU status bar styles
+    style.configure("GpuOk.TLabel", background="#1a3d2a", foreground=ACCENT,
+                     font=("Segoe UI", 9, "bold"), padding=(10, 6))
+    style.configure("GpuWarn.TLabel", background="#3d3a1a", foreground=WARN,
+                     font=("Segoe UI", 9, "bold"), padding=(10, 6))
+    style.configure("GpuErr.TLabel", background="#3d1a1a", foreground=ERR,
+                     font=("Segoe UI", 9, "bold"), padding=(10, 6))
+
+    # Status text
+    style.configure("Dim.TLabel", foreground=FG_DIM, background=BG)
+
+    # Status bar (bottom, prominent)
+    style.configure("StatusBar.TLabel", background="#181825", foreground=ACCENT,
+                     font=("Segoe UI", 9, "bold"), padding=(10, 6))
+
+    # Progress bar — thick, visible
+    style.configure("pointed.Horizontal.TProgressbar",
+                     troughcolor=INPUT_BG, background=ACCENT,
+                     darkcolor=ACCENT, lightcolor="#5fd9a0", bordercolor=BG2,
+                     thickness=10)
+
+    # Section title
+    style.configure("Title.TLabel", background=BG, foreground=FG,
+                     font=("Segoe UI", 14, "bold"))
 
     # ── Layout ─────────────────────────────────────────────────────────────
 
-    frm = tk.Frame(root)
-    frm.pack(fill="x", padx=10, pady=10)
+    frm = ttk.Frame(root)
+    frm.pack(fill="x", padx=14, pady=(10, 4))
 
-    tk.Label(frm, text="Папка сессии:").pack(anchor="w")
-    row = tk.Frame(frm)
-    row.pack(fill="x")
-    tk.Entry(row, textvariable=session_var).pack(side="left", fill="x", expand=True)
-    tk.Button(row, text="Выбрать…", command=pick_folder).pack(side="left", padx=8)
+    # ── Title ─────────────────────────────────────────────────────────────
 
-    # ── Speaker map section ────────────────────────────────────────────────
+    title_row = ttk.Frame(frm)
+    title_row.pack(fill="x", pady=(0, 6))
+    ttk.Label(title_row, text="WhisperX", style="Title.TLabel").pack(side="left")
+    ttk.Label(title_row, text="  Транскрипция сессий",
+              foreground=FG_DIM, font=("Segoe UI", 10)).pack(side="left", pady=(4, 0))
 
-    speaker_lf = tk.LabelFrame(frm, text="Игроки (speaker map)")
-    speaker_lf.pack(fill="x", pady=(8, 0))
+    ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(0, 8))
 
-    speaker_btn_row = tk.Frame(speaker_lf)
-    speaker_btn_row.pack(fill="x", padx=4, pady=2)
-    tk.Button(speaker_btn_row, text="Загрузить…", command=load_map_file).pack(side="left")
-    tk.Button(speaker_btn_row, text="Сохранить", command=save_map).pack(side="left", padx=4)
-    tk.Label(speaker_btn_row, textvariable=speaker_status_var, fg="#555").pack(side="left", padx=8)
+    # ── Session folder ────────────────────────────────────────────────────
 
-    hdr = tk.Frame(speaker_lf)
-    hdr.pack(fill="x", padx=4)
-    tk.Label(hdr, text="Discord ник", width=20, anchor="w", font=("", 8, "bold")).pack(side="left")
-    tk.Label(hdr, text="Игрок", width=15, anchor="w", font=("", 8, "bold")).pack(side="left", padx=4)
-    tk.Label(hdr, text="Персонаж", width=15, anchor="w", font=("", 8, "bold")).pack(side="left", padx=4)
-    tk.Label(hdr, text="Роль", width=6, anchor="w", font=("", 8, "bold")).pack(side="left", padx=4)
+    ttk.Label(frm, text="Папка сессии:").pack(anchor="w")
+    row = ttk.Frame(frm)
+    row.pack(fill="x", pady=(2, 0))
+    ttk.Entry(row, textvariable=session_var, font=("Segoe UI", 10)).pack(
+        side="left", fill="x", expand=True)
+    ttk.Button(row, text="Выбрать…", command=pick_folder,
+               style="Outline.TButton").pack(side="left", padx=(8, 0))
 
-    speaker_table = tk.Frame(speaker_lf)
-    speaker_table.pack(fill="x", padx=4, pady=(0, 4))
+    # ── Speaker map section ───────────────────────────────────────────────
 
-    # ── GPU status ─────────────────────────────────────────────────────────
+    speaker_lf = ttk.LabelFrame(frm, text="Игроки (speaker map)")
+    speaker_lf.pack(fill="x", pady=(10, 0))
 
-    gpu_lf = tk.LabelFrame(frm, text="Устройство (GPU / CPU)")
-    gpu_lf.pack(fill="x", pady=(8, 0))
+    speaker_btn_row = ttk.Frame(speaker_lf)
+    speaker_btn_row.pack(fill="x", padx=8, pady=(4, 2))
+    ttk.Button(speaker_btn_row, text="Загрузить…", command=load_map_file,
+               style="Outline.TButton").pack(side="left")
+    ttk.Button(speaker_btn_row, text="Сохранить", command=save_map,
+               style="Link.TButton").pack(side="left", padx=(6, 0))
+    ttk.Label(speaker_btn_row, textvariable=speaker_status_var,
+              style="Dim.TLabel").pack(side="left", padx=10)
 
-    gpu_status_text, gpu_status_color = _format_gpu_status(gpu_info)
-    gpu_label = tk.Label(gpu_lf, text=gpu_status_text, fg=gpu_status_color, anchor="w", justify="left")
-    gpu_label.pack(fill="x", padx=6, pady=(2, 0))
+    hdr = ttk.Frame(speaker_lf)
+    hdr.pack(fill="x", padx=8)
+    ttk.Label(hdr, text="Discord ник", width=20, anchor="w", style="Header.TLabel").pack(side="left")
+    ttk.Label(hdr, text="Игрок", width=15, anchor="w", style="Header.TLabel").pack(side="left", padx=4)
+    ttk.Label(hdr, text="Персонаж", width=15, anchor="w", style="Header.TLabel").pack(side="left", padx=4)
+    ttk.Label(hdr, text="Роль", width=6, anchor="w", style="Header.TLabel").pack(side="left", padx=4)
 
-    device_row = tk.Frame(gpu_lf)
-    device_row.pack(fill="x", padx=6, pady=(2, 4))
-    tk.Label(device_row, text="device:").pack(side="left")
-    ttk.Combobox(
-        device_row, textvariable=device_var, values=["cuda", "cpu"], width=8, state="readonly"
-    ).pack(side="left", padx=(4, 0))
+    speaker_table = ttk.Frame(speaker_lf)
+    speaker_table.pack(fill="x", padx=8, pady=(0, 6))
+
+    # ── GPU status ────────────────────────────────────────────────────────
+
+    gpu_lf = ttk.LabelFrame(frm, text="Устройство (GPU / CPU)")
+    gpu_lf.pack(fill="x", pady=(10, 0))
+
+    # Decide style for GPU bar
+    gpu_status_text, _gpu_color = _format_gpu_status(gpu_info)
+    if gpu_info["error"]:
+        _gpu_style = "GpuErr.TLabel"
+    elif not gpu_info["cuda_available"]:
+        _gpu_style = "GpuWarn.TLabel"
+    else:
+        _gpu_style = "GpuOk.TLabel"
+
+    gpu_label = ttk.Label(gpu_lf, text=gpu_status_text, style=_gpu_style, anchor="w")
+    gpu_label.pack(fill="x", padx=8, pady=(6, 2))
+
+    device_row = ttk.Frame(gpu_lf)
+    device_row.pack(fill="x", padx=8, pady=(0, 6))
+    ttk.Label(device_row, text="device:").pack(side="left")
+    ttk.Combobox(device_row, textvariable=device_var, values=["cuda", "cpu"],
+                 width=8, state="readonly").pack(side="left", padx=(4, 0))
 
     def _recheck_gpu() -> None:
         fresh = _detect_gpu()
-        txt_val, col = _format_gpu_status(fresh)
-        gpu_label.config(text=txt_val, fg=col)
-        if fresh["cuda_available"]:
-            device_var.set("cuda")
+        txt_val, _col = _format_gpu_status(fresh)
+        if fresh["error"]:
+            s = "GpuErr.TLabel"
+        elif not fresh["cuda_available"]:
+            s = "GpuWarn.TLabel"
         else:
-            device_var.set("cpu")
+            s = "GpuOk.TLabel"
+        gpu_label.config(text=txt_val, style=s)
+        device_var.set("cuda" if fresh["cuda_available"] else "cpu")
 
-    tk.Button(device_row, text="Перепроверить", command=_recheck_gpu).pack(side="left", padx=8)
+    ttk.Button(device_row, text="Перепроверить", command=_recheck_gpu,
+               style="Link.TButton").pack(side="left", padx=10)
 
-    # ── Options ────────────────────────────────────────────────────────────
+    # ── Options ───────────────────────────────────────────────────────────
 
-    tk.Checkbutton(frm, text="Только склейка (json уже есть)", variable=merge_only_var).pack(anchor="w", pady=(8, 0))
+    ttk.Checkbutton(frm, text="Только склейка (json уже есть)",
+                    variable=merge_only_var).pack(anchor="w", pady=(10, 0))
 
-    model_row = tk.Frame(frm)
-    model_row.pack(fill="x", pady=(8, 0))
-    tk.Label(model_row, text="Whisper model:").pack(side="left")
-    ttk.Combobox(model_row, textvariable=model_var, values=["large-v2", "large-v3"], width=14, state="readonly").pack(
-        side="left", padx=(8, 0)
-    )
-    tk.Label(model_row, text="compute:").pack(side="left", padx=(12, 4))
-    ttk.Combobox(
-        model_row,
-        textvariable=compute_type_var,
-        values=["float16", "float32"],
-        width=10,
-        state="readonly",
-    ).pack(side="left")
-    tk.Label(model_row, text="beam:").pack(side="left", padx=(12, 4))
-    ttk.Combobox(
-        model_row,
-        textvariable=beam_size_var,
-        values=["5", "10", "20"],
-        width=6,
-        state="readonly",
-    ).pack(side="left")
+    model_row = ttk.Frame(frm)
+    model_row.pack(fill="x", pady=(6, 0))
+    ttk.Label(model_row, text="Whisper model:").pack(side="left")
+    ttk.Combobox(model_row, textvariable=model_var, values=["large-v2", "large-v3"],
+                 width=12, state="readonly").pack(side="left", padx=(6, 0))
+    ttk.Label(model_row, text="compute:").pack(side="left", padx=(14, 4))
+    ttk.Combobox(model_row, textvariable=compute_type_var,
+                 values=["float16", "float32"], width=10, state="readonly").pack(side="left")
+    ttk.Label(model_row, text="beam:").pack(side="left", padx=(14, 4))
+    ttk.Combobox(model_row, textvariable=beam_size_var,
+                 values=["5", "10", "20"], width=6, state="readonly").pack(side="left")
 
-    chunk_row = tk.Frame(frm)
-    chunk_row.pack(fill="x", pady=(8, 0))
-    tk.Checkbutton(chunk_row, text="Нарезать на чанки", variable=chunk_var).pack(side="left")
-    tk.Label(chunk_row, text="chunk chars:").pack(side="left", padx=(12, 4))
-    tk.Entry(chunk_row, textvariable=chunk_chars_var, width=8).pack(side="left")
-    tk.Label(chunk_row, text="overlap:").pack(side="left", padx=(12, 4))
-    tk.Entry(chunk_row, textvariable=chunk_overlap_var, width=6).pack(side="left")
+    chunk_row = ttk.Frame(frm)
+    chunk_row.pack(fill="x", pady=(6, 0))
+    ttk.Checkbutton(chunk_row, text="Нарезать на чанки", variable=chunk_var).pack(side="left")
+    ttk.Label(chunk_row, text="chunk chars:").pack(side="left", padx=(14, 4))
+    ttk.Entry(chunk_row, textvariable=chunk_chars_var, width=8).pack(side="left")
+    ttk.Label(chunk_row, text="overlap:").pack(side="left", padx=(14, 4))
+    ttk.Entry(chunk_row, textvariable=chunk_overlap_var, width=6).pack(side="left")
 
-    tk.Button(frm, text="Запустить", command=start).pack(anchor="w", pady=(8, 0))
-    tk.Label(frm, textvariable=status_var, fg="#555").pack(anchor="w", pady=(8, 0))
+    # ── Action button + progress ─────────────────────────────────────────
 
-    txt = tk.Text(root, height=10)
-    txt.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(10, 8))
+
+    btn_start = ttk.Button(frm, text="▶ Запустить", command=start, style="Accent.TButton")
+    btn_start.pack(anchor="w")
+
+    # Progress bar + status label side by side
+    progress_row = ttk.Frame(frm)
+    progress_row.pack(fill="x", pady=(6, 0))
+
+    progress_var = tk.DoubleVar(value=0)
+    progress_bar = ttk.Progressbar(
+        progress_row, variable=progress_var, maximum=100,
+        style="pointed.Horizontal.TProgressbar")
+    progress_bar.pack(fill="x", expand=True)
+
+    # ── Log output (terminal-style) ─────────────────────────────────────
+
+    ttk.Label(root, text="  Лог", style="Dim.TLabel",
+              font=("Segoe UI", 8)).pack(anchor="w", padx=14, pady=(6, 0))
+    log_frame = tk.Frame(root, bg="#11111b", bd=1, relief="flat",
+                          highlightbackground="#45475a", highlightthickness=1)
+    log_frame.pack(fill="both", expand=True, padx=14, pady=(6, 0))
+
+    txt = tk.Text(log_frame, bg="#11111b", fg="#a6adc8",
+                  insertbackground="#a6adc8", selectbackground=ACCENT,
+                  font=("Consolas", 9), borderwidth=0, padx=8, pady=6,
+                  wrap="word")
+    txt.pack(fill="both", expand=True)
+
+    # Mousewheel scrolling (no visible scrollbar — cleaner look)
+    def _on_mousewheel(event):
+        txt.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    txt.bind("<MouseWheel>", _on_mousewheel)
+
+    # ── Status bar (bottom) ──────────────────────────────────────────────
+
+    status_var.set("Готов к запуску")
+    status_bar = ttk.Label(root, textvariable=status_var, style="StatusBar.TLabel",
+                            anchor="w")
+    status_bar.pack(fill="x", side="bottom")
+
+    # Start the log queue polling
+    _poll_log_queue()
 
     root.mainloop()
     return 0
