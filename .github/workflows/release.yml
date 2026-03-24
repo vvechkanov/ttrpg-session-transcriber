@@ -1,0 +1,55 @@
+name: Build & Release EXE
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download Python Embeddable Package
+        shell: pwsh
+        run: |
+          $url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "launcher/python-3.12.8-embed-amd64.zip"
+          Write-Host "Downloaded Python embeddable package"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          cd launcher
+          pyinstaller build.spec
+          $exe = "dist/WhisperX-Transcriber.exe"
+          if (Test-Path $exe) {
+            $size = (Get-Item $exe).Length / 1MB
+            Write-Host "EXE built: $exe ($([math]::Round($size,1)) MB)"
+          } else {
+            Write-Host "ERROR: EXE not found!"
+            exit 1
+          }
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: launcher/dist/WhisperX-Transcriber.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

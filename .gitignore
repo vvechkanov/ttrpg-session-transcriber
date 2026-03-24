@@ -13,3 +13,12 @@ speaker_map.json
 
 # Test output
 Тестовое/
+
+# Launcher build artifacts
+launcher/dist/
+launcher/build/
+launcher/*.zip
+*.exe
+
+# PyInstaller
+*.spec.bak
