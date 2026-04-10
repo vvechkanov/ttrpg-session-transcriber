@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/vvechkanov/ttrpg-session-transcriber/discussions
+    about: For general questions, ideas, or discussion, please use GitHub Discussions instead of opening an issue.
+  - name: Security vulnerability
+    url: https://github.com/vvechkanov/ttrpg-session-transcriber/blob/master/SECURITY.md
+    about: For security vulnerabilities, please follow the instructions in SECURITY.md and email the maintainer privately.
