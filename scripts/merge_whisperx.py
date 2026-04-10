@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-import json, sys
+import json, sys, argparse
 from pathlib import Path
-from itertools import count
+
+# Ensure sibling modules (parse_fvtt_chat) are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_EXCLUDE_PREFIXES = ("craig",)
 DEFAULT_MERGE_GAP_SEC = 1.0
@@ -80,6 +82,7 @@ def merge_adjacent(all_segs: list[dict], *, gap_sec: float = DEFAULT_MERGE_GAP_S
     """
     Glue consecutive segments of the same speaker if the gap is small.
     Greatly reduces "staircase" text for LLM consumption.
+    Never merges segments from different sources (audio vs chat).
     """
     if not all_segs:
         return []
@@ -87,15 +90,16 @@ def merge_adjacent(all_segs: list[dict], *, gap_sec: float = DEFAULT_MERGE_GAP_S
     for seg in all_segs[1:]:
         prev = merged[-1]
         same_speaker = seg["speaker"] == prev["speaker"]
+        same_source = seg.get("source") == prev.get("source")
         close_enough = (seg["start"] - prev["end"]) <= gap_sec
-        if same_speaker and close_enough:
+        if same_speaker and same_source and close_enough:
             prev["text"] = (prev["text"].rstrip() + " " + seg["text"].lstrip()).strip()
             prev["end"] = max(prev["end"], seg["end"])
         else:
             merged.append(seg.copy())
     return merged
 
-def main(paths):
+def main(paths, *, chat_log=None, info_file=None, tz_offset=None):
     paths = [Path(p) for p in paths]
     session_dir = (paths[0].parent if paths else Path.cwd()).resolve()
     speaker_map = load_speaker_map(session_dir)
@@ -103,6 +107,34 @@ def main(paths):
     all_segs = []
     for p in paths:
         all_segs.extend(load_segments(Path(p), speaker_map, DEFAULT_EXCLUDE_PREFIXES))
+
+    # ── Integrate FVTT chat log ──────────────────────────────────────
+    if chat_log:
+        from parse_fvtt_chat import (
+            parse_fvtt_log, parse_info_start_time,
+            chat_to_segments, guess_tz_offset,
+        )
+        chat_log = Path(chat_log)
+        entries = parse_fvtt_log(chat_log)
+        print(f"{'[FVTT chat]':35}  {len(entries):4} entries from {chat_log.name}")
+
+        if info_file:
+            rec_start = parse_info_start_time(Path(info_file))
+        else:
+            # Try auto-detecting info.txt in session dir
+            auto_info = session_dir / "info.txt"
+            if auto_info.exists():
+                rec_start = parse_info_start_time(auto_info)
+            else:
+                sys.exit(">>> No info.txt found — cannot align chat timestamps")
+
+        if tz_offset is None:
+            tz_offset = guess_tz_offset(entries, rec_start)
+            print(f"  Auto-detected timezone: UTC{tz_offset:+.0f}")
+
+        chat_segs = chat_to_segments(entries, rec_start, tz_offset)
+        print(f"  {len(chat_segs)} chat segments within recording range")
+        all_segs.extend(chat_segs)
 
     if not all_segs:
         sys.exit(">>> No segments read – aborting")
@@ -112,14 +144,24 @@ def main(paths):
 
     # write plain text for LLMs (no timecodes)
     txt_file = Path("merged.txt")
+    chat_count = 0
     with txt_file.open("w", encoding="utf-8") as out:
         for seg in all_segs:
-            out.write(f"{seg['speaker']}: {seg['text']}\n\n")
+            if seg.get("source") == "chat":
+                out.write(f"[ЧАТ] {seg['speaker']}: {seg['text']}\n\n")
+                chat_count += 1
+            else:
+                out.write(f"{seg['speaker']}: {seg['text']}\n\n")
 
-    print(f"\nDone. Wrote {len(all_segs)} cues to:")
+    print(f"\nDone. Wrote {len(all_segs)} cues ({chat_count} from chat) to:")
     print(" ", txt_file.resolve())
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit("Usage: merge_whisperx.py transcript1.json …")
-    main(sys.argv[1:])
+    ap = argparse.ArgumentParser(description="Merge WhisperX JSONs + optional FVTT chat log")
+    ap.add_argument("json_files", nargs="+", help="WhisperX JSON transcript files")
+    ap.add_argument("--chat_log", default=None, help="Path to fvtt-log-*.txt chat log")
+    ap.add_argument("--info_file", default=None, help="Path to info.txt (recording start time)")
+    ap.add_argument("--tz_offset", type=float, default=None,
+                    help="Chat log timezone UTC offset (e.g. 1 for UTC+1). Auto-detected if omitted.")
+    args = ap.parse_args()
+    main(args.json_files, chat_log=args.chat_log, info_file=args.info_file, tz_offset=args.tz_offset)

@@ -29,6 +29,9 @@ os.environ.setdefault("TORCHAUDIO_NO_BACKEND_CHECK", "1")
 
 EXCLUDE_AUDIO_PREFIXES = ("craig",)
 
+# Ensure sibling modules (parse_fvtt_chat) are importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 def _project_root() -> Path:
     """Project root = parent of the scripts/ folder that contains this file."""
     return Path(__file__).resolve().parent.parent
@@ -323,6 +326,11 @@ def gui_main() -> int:
     compute_type_var = tk.StringVar(value="float16")
     beam_size_var = tk.StringVar(value="10")
 
+    # ── FVTT chat log vars ─────────────────────────────────────────────
+    chat_log_var = tk.BooleanVar(value=False)
+    chat_log_path_var = tk.StringVar(value="")
+    chat_tz_var = tk.StringVar(value="auto")
+
     # ── GPU diagnostics ───────────────────────────────────────────────────
     gpu_info = _detect_gpu()
     device_var = tk.StringVar(value="cuda" if gpu_info["cuda_available"] else "cpu")
@@ -452,6 +460,29 @@ def gui_main() -> int:
             speaker_status_var.set("Аудиофайлы не найдены")
         _rebuild_speaker_table(stems, smap)
 
+        # ── Auto-detect FVTT chat log ──────────────────────────────────
+        fvtt_logs = sorted(session_dir.glob("fvtt-log-*.txt"))
+        info_path = session_dir / "info.txt"
+        if fvtt_logs:
+            chat_log_path_var.set(str(fvtt_logs[0]))
+            chat_log_var.set(True)
+            # Auto-detect timezone if info.txt is available
+            if info_path.exists():
+                try:
+                    from parse_fvtt_chat import (
+                        parse_fvtt_log, parse_info_start_time, guess_tz_offset,
+                    )
+                    entries = parse_fvtt_log(fvtt_logs[0])
+                    rec_start = parse_info_start_time(info_path)
+                    tz = guess_tz_offset(entries, rec_start)
+                    chat_tz_var.set(str(int(tz)))
+                except Exception:
+                    chat_tz_var.set("auto")
+        else:
+            chat_log_path_var.set("")
+            chat_log_var.set(False)
+            chat_tz_var.set("auto")
+
     def pick_folder() -> None:
         d = filedialog.askdirectory(title="Выберите папку сессии")
         if d:
@@ -520,6 +551,9 @@ def gui_main() -> int:
             "do_chunk": chunk_var.get(),
             "chunk_chars": int(chunk_chars_var.get().strip() or "40000"),
             "chunk_overlap": float(chunk_overlap_var.get().strip().replace(",", ".") or "0.20"),
+            "chat_log_enabled": chat_log_var.get(),
+            "chat_log_path": chat_log_path_var.get().strip(),
+            "chat_tz_offset": chat_tz_var.get().strip(),
         }
 
         _running.set()
@@ -642,10 +676,26 @@ def gui_main() -> int:
         if not jsons:
             raise RuntimeError("Не найдено ни одного *.json для склейки.")
 
-        _set_status(f"Склейка {len(jsons)} JSON → merged.txt…")
-        log(f"\n== Склейка {len(jsons)} JSON → merged.txt")
+        chat_label = ""
+        if p.get("chat_log_enabled") and p.get("chat_log_path"):
+            chat_label = " + чат FVTT"
+        _set_status(f"Склейка {len(jsons)} JSON{chat_label} → merged.txt…")
+        log(f"\n== Склейка {len(jsons)} JSON{chat_label} → merged.txt")
         t_merge = time.time()
         cmd = [sys.executable, str(merge_script), *[str(j) for j in jsons]]
+        if p.get("chat_log_enabled") and p.get("chat_log_path"):
+            cmd += ["--chat_log", p["chat_log_path"]]
+            info_path = Path(p["session_dir"]) / "info.txt"
+            if info_path.exists():
+                cmd += ["--info_file", str(info_path)]
+            tz_val = p.get("chat_tz_offset", "auto")
+            if tz_val and tz_val != "auto":
+                # Parse "UTC+3" or raw number
+                tz_str = str(tz_val).replace("UTC", "").replace("+", "")
+                try:
+                    cmd += ["--tz_offset", str(float(tz_str))]
+                except ValueError:
+                    pass  # auto-detect in merge script
         run_and_stream(cmd, cwd=output_dir)
         log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_merge)}")
 
@@ -844,6 +894,40 @@ def gui_main() -> int:
 
     ttk.Checkbutton(frm, text="Только склейка (json уже есть)",
                     variable=merge_only_var).pack(anchor="w", pady=(10, 0))
+
+    # ── FVTT Chat Log section ──────────────────────────────────────────
+    chat_lf = ttk.LabelFrame(frm, text="Лог из чата (FVTT)")
+    chat_lf.pack(fill="x", pady=(8, 0))
+
+    chat_row1 = ttk.Frame(chat_lf)
+    chat_row1.pack(fill="x", padx=6, pady=(4, 0))
+    ttk.Checkbutton(chat_row1, text="Добавить лог из чата",
+                    variable=chat_log_var).pack(side="left")
+
+    chat_row2 = ttk.Frame(chat_lf)
+    chat_row2.pack(fill="x", padx=6, pady=(2, 0))
+    chat_path_entry = ttk.Entry(chat_row2, textvariable=chat_log_path_var, state="readonly")
+    chat_path_entry.pack(side="left", fill="x", expand=True)
+
+    def pick_chat_log() -> None:
+        f = filedialog.askopenfilename(
+            title="Выберите лог чата FVTT",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if f:
+            chat_log_path_var.set(f)
+            chat_log_var.set(True)
+
+    ttk.Button(chat_row2, text="Выбрать…", command=pick_chat_log,
+               style="Outline.TButton").pack(side="left", padx=(6, 0))
+
+    chat_row3 = ttk.Frame(chat_lf)
+    chat_row3.pack(fill="x", padx=6, pady=(2, 6))
+    ttk.Label(chat_row3, text="Часовой пояс:").pack(side="left")
+    tz_values = [f"UTC{h:+d}" for h in range(-12, 15)]
+    tz_combo = ttk.Combobox(chat_row3, textvariable=chat_tz_var,
+                            values=["auto"] + tz_values, width=10, state="readonly")
+    tz_combo.pack(side="left", padx=(6, 0))
 
     model_row = ttk.Frame(frm)
     model_row.pack(fill="x", pady=(6, 0))
