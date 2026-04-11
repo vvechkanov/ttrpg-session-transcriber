@@ -13,11 +13,13 @@ plugin discovery (ADR-11). Тяжёлые зависимости (faster-whisper
 from sources.base import Source
 from sources.game_log.fvtt_chat import FvttChatSource
 from sources.speech.faster_whisper import FasterWhisperSource
+from sources.speech.gigaam import GigaAMSource
 from sources.speech.whisperx import WhisperXSource
 
 SPEECH_SOURCES: dict[str, type[Source]] = {
     "faster-whisper": FasterWhisperSource,
     "whisperx": WhisperXSource,
+    "gigaam": GigaAMSource,
 }
 
 GAME_LOG_SOURCES: dict[str, type[Source]] = {

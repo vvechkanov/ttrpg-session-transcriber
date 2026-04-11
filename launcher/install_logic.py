@@ -37,13 +37,19 @@ TORCH_INDEX_CPU = "https://download.pytorch.org/whl/cpu"
 
 WHISPERX_PIP = "whisperx @ git+https://github.com/m-bain/whisperX.git"
 
+# sherpa-onnx — runtime для GigaAMSource. Минимальная версия 1.12.0 обязательна:
+# до неё hotwords-биасинг для NeMo transducer моделей тихо игнорировался
+# (см. gigaam-v2.md §6.5.4, PR #3077).
+SHERPA_ONNX_PIP = "sherpa-onnx>=1.12.0,<2.0"
+
 # Weighted step percentages for overall progress
 STEP_WEIGHTS = {
-    "python":   5,
-    "pip":      5,
-    "pytorch":  55,
-    "whisperx": 25,
-    "ffmpeg":   10,
+    "python":   4,
+    "pip":      4,
+    "pytorch":  47,
+    "whisperx": 21,
+    "ffmpeg":   9,
+    "models":   15,
 }
 
 LogFn = Callable[[str], None]
@@ -301,7 +307,7 @@ def install_pytorch(
 def install_whisperx(
     python_exe: Path, on_log: LogFn, on_progress: ProgressFn
 ) -> None:
-    """Install WhisperX from GitHub."""
+    """Install WhisperX + sherpa-onnx (for GigaAM backend)."""
     on_log("Установка WhisperX...")
     on_progress(0)
 
@@ -309,10 +315,20 @@ def install_whisperx(
         python_exe,
         ["install", "--no-cache-dir", WHISPERX_PIP],
         on_log=on_log,
-        on_progress=on_progress,
+        on_progress=lambda p: on_progress(p * 0.85),
+    )
+    on_progress(85)
+    on_log("WhisperX установлен.")
+
+    on_log(f"Установка {SHERPA_ONNX_PIP} (runtime для GigaAM)...")
+    _run_pip(
+        python_exe,
+        ["install", "--no-cache-dir", SHERPA_ONNX_PIP],
+        on_log=on_log,
+        on_progress=lambda p: on_progress(85 + p * 0.15),
     )
     on_progress(100)
-    on_log("WhisperX установлен.")
+    on_log("sherpa-onnx установлен.")
 
 
 def repin_pytorch_cuda(

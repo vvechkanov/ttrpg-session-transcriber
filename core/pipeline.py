@@ -39,6 +39,10 @@ class PipelineParams:
     renderer: str = "plain-text"
     output_filename: str = "merged.txt"
     speaker_map: dict[str, str] | None = None
+    # GigaAM-only (игнорируется остальными speech backend-ами).
+    gigaam_variant: str = "rnnt"  # "rnnt" | "e2e_rnnt"
+    gigaam_precision: str = "fp32"  # "fp32" | "int8"
+    num_threads: int = 4  # CPU threads for sherpa-onnx inference
 
 
 def run(session_dir: Path, params: PipelineParams) -> None:
@@ -121,6 +125,14 @@ def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
             "compute_type": params.compute_type,
             "language": params.language,
             "beam_size": params.beam_size,
+            "speaker_map": params.speaker_map,
+        }
+    if cls.__name__ == "GigaAMSource":
+        return {
+            "variant": params.gigaam_variant,
+            "precision": params.gigaam_precision,
+            "device": params.device,
+            "num_threads": params.num_threads,
             "speaker_map": params.speaker_map,
         }
     raise ValueError(f"unknown speech source class: {cls.__name__}")

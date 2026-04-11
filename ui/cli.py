@@ -36,6 +36,25 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--compute_type", default="float16")
     ap.add_argument("--beam_size", type=int, default=10)
+    # GigaAM-only options (игнорируются другими speech backend-ами).
+    ap.add_argument(
+        "--gigaam_variant",
+        default="rnnt",
+        choices=["rnnt", "e2e_rnnt"],
+        help="GigaAM variant (default: rnnt without built-in ITN).",
+    )
+    ap.add_argument(
+        "--gigaam_precision",
+        default="fp32",
+        choices=["fp32", "int8"],
+        help="GigaAM weights precision (default: fp32).",
+    )
+    ap.add_argument(
+        "--num_threads",
+        type=int,
+        default=4,
+        help="CPU threads for sherpa-onnx inference (GigaAM).",
+    )
     ap.add_argument(
         "--chunk",
         action="store_true",
@@ -111,6 +130,9 @@ def cli_main() -> int:
         language=args.language,
         beam_size=args.beam_size,
         speaker_map=speaker_map or None,
+        gigaam_variant=args.gigaam_variant,
+        gigaam_precision=args.gigaam_precision,
+        num_threads=args.num_threads,
     )
 
     if len(session_dirs) == 1:

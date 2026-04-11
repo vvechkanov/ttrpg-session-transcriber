@@ -14,6 +14,11 @@ from pathlib import Path
 # Tkinter imports are lazy inside gui_main to keep headless CLI working.
 
 from core import PipelineParams, run as core_run
+from core.backend_installers import (
+    BackendId,
+    install_backend,
+    is_backend_installed,
+)
 from core.speaker_map import load_speaker_map as core_load_speaker_map
 
 EXCLUDE_AUDIO_PREFIXES = ("craig",)
@@ -172,6 +177,9 @@ def gui_main() -> int:
     model_var = tk.StringVar(value="large-v3")
     compute_type_var = tk.StringVar(value="float16")
     beam_size_var = tk.StringVar(value="10")
+    # Speech backend picker — GUI по умолчанию faster-whisper; "gigaam" тоже
+    # доступен, но требует установленных моделей (проверяется в start()).
+    speech_backend_var = tk.StringVar(value="faster-whisper")
 
     # ── FVTT chat log vars ─────────────────────────────────────────────
     chat_log_var = tk.BooleanVar(value=False)
@@ -358,6 +366,83 @@ def gui_main() -> int:
         _save_speaker_map(existing, save_path)
         speaker_status_var.set(f"Сохранён: {save_path.name}")
 
+    # ── Lazy backend install modal ────────────────────────────────────────
+
+    def _show_install_modal(backend_id: BackendId) -> bool:
+        """Показать модальное окно установки модели.
+
+        Возвращает True если установка прошла успешно, False — при ошибке
+        или если пользователь закрыл окно. Блокирует основное окно пока
+        установка идёт. См. spec gigaam-v2.md §8.
+        """
+        modal = tk.Toplevel(root)
+        modal.title("Установка модели")
+        modal.geometry("480x220")
+        modal.transient(root)
+        modal.grab_set()
+        modal.resizable(False, False)
+
+        tk.Label(
+            modal,
+            text=f"Установка {backend_id.value}",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w", padx=16, pady=(16, 6))
+
+        status_lbl = tk.Label(
+            modal,
+            text="Подготовка...",
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=440,
+        )
+        status_lbl.pack(fill="x", padx=16, pady=(0, 8))
+
+        pb_var = tk.DoubleVar(value=0.0)
+        pb = ttk.Progressbar(
+            modal,
+            variable=pb_var,
+            maximum=100,
+            length=440,
+        )
+        pb.pack(padx=16, pady=(0, 8))
+
+        result: dict[str, bool] = {"ok": False}
+        progress_q: queue.Queue = queue.Queue()
+
+        def _worker_install() -> None:
+            try:
+                install_backend(
+                    backend_id,
+                    progress=lambda f, m: progress_q.put((f, m)),
+                )
+                result["ok"] = True
+            except Exception as exc:  # noqa: BLE001 — surface to user
+                progress_q.put((-1.0, f"Ошибка: {exc}"))
+            finally:
+                progress_q.put(None)  # sentinel
+
+        threading.Thread(target=_worker_install, daemon=True).start()
+
+        def _poll_install() -> None:
+            try:
+                while True:
+                    item = progress_q.get_nowait()
+                    if item is None:
+                        modal.destroy()
+                        return
+                    fraction, msg = item
+                    if fraction >= 0:
+                        pb_var.set(fraction * 100)
+                    status_lbl.config(text=msg)
+            except queue.Empty:
+                pass
+            modal.after(100, _poll_install)
+
+        modal.after(100, _poll_install)
+        root.wait_window(modal)
+        return result["ok"]
+
     # ── Start pipeline ─────────────────────────────────────────────────────
 
     def _fmt_elapsed(seconds: float) -> str:
@@ -386,6 +471,7 @@ def gui_main() -> int:
         # Snapshot all UI values before spawning thread (tkinter is not thread-safe)
         params = {
             "session_dir": session_dir,
+            "speech_backend": speech_backend_var.get().strip() or "faster-whisper",
             "model": model_var.get().strip() or "large-v3",
             "device": device_var.get().strip() or "cuda",
             "compute_type": compute_type_var.get().strip() or "float16",
@@ -397,6 +483,14 @@ def gui_main() -> int:
             "chat_log_path": chat_log_path_var.get().strip(),
             "chat_tz_offset": chat_tz_var.get().strip(),
         }
+
+        # Lazy-install gate: если выбран backend который требует моделей
+        # и они не установлены — показать модалку перед запуском worker-а.
+        if params["speech_backend"] == "gigaam":
+            if not is_backend_installed(BackendId.GIGAAM_RNNT_FP32):
+                if not _show_install_modal(BackendId.GIGAAM_RNNT_FP32):
+                    log("Установка GigaAM отменена или не удалась — запуск отменён.")
+                    return
 
         _running.set()
         btn_start.config(state="disabled", text="⏳ Работаю…")
@@ -447,7 +541,7 @@ def gui_main() -> int:
             log("ℹ️ Chat log auto-detected by core.discovery — GUI tz override ignored in P2.7")
 
         params = PipelineParams(
-            speech_backend="faster-whisper",  # GUI defaults to faster-whisper; P3 will add a backend picker
+            speech_backend=p.get("speech_backend", "faster-whisper"),
             model=p["model"],
             device=p["device"],
             compute_type=p["compute_type"],

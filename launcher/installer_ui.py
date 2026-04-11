@@ -28,6 +28,22 @@ except ImportError:
         install_whisperx, repin_pytorch_cuda, verify_installation,
     )
 
+# Backend installers (ASR models, e.g. GigaAM). Импортируется после того
+# как core.backend_installers добавлен в проект; оборачиваем try/except
+# чтобы installer UI мог запуститься в окружении без core-слоя.
+try:
+    from core.backend_installers import (
+        BackendId,
+        install_backend,
+        list_backends,
+    )
+    _BACKEND_INSTALLERS_AVAILABLE = True
+except ImportError:
+    BackendId = None  # type: ignore[assignment,misc]
+    install_backend = None  # type: ignore[assignment]
+    list_backends = None  # type: ignore[assignment]
+    _BACKEND_INSTALLERS_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Theme (matches wisper_launcher.py)
 # ---------------------------------------------------------------------------
@@ -48,6 +64,7 @@ STEPS = [
     ("pytorch",  "Установка PyTorch"),
     ("whisperx", "Установка WhisperX"),
     ("ffmpeg",   "Загрузка ffmpeg"),
+    ("models",   "Загрузка моделей"),
 ]
 
 
@@ -79,6 +96,10 @@ class InstallerWindow:
         self._current_step = ""
         self._gpu_mode = "cpu"
         self._error: str | None = None
+
+        # Selected ASR backends (GigaAM и т.д.) — заполняется в _build_ui,
+        # читается в _install_worker на стадии "models".
+        self._backend_checkboxes: dict = {}
 
         self._build_ui()
 
@@ -166,6 +187,40 @@ class InstallerWindow:
             )
             status.pack(side="right")
             self._step_status[step_id] = status
+
+        # ── Backend checkboxes (ASR models) ───────────────────────────────
+        if _BACKEND_INSTALLERS_AVAILABLE and list_backends is not None:
+            backends_frame = tk.Frame(self.root, bg=BG)
+            backends_frame.pack(fill="x", padx=24, pady=(8, 0))
+
+            tk.Label(
+                backends_frame,
+                text="Дополнительные модели ASR:",
+                font=("Segoe UI", 9, "bold"),
+                fg=FG_DIM, bg=BG,
+            ).pack(anchor="w")
+
+            for info in list_backends():
+                var = tk.BooleanVar(value=info.default_selected)
+                self._backend_checkboxes[info.id] = var
+                size_mb = info.approx_download_bytes // 1_000_000
+                cb = tk.Checkbutton(
+                    backends_frame,
+                    text=f"{info.title} ({size_mb} MB)",
+                    variable=var,
+                    bg=BG, fg=FG, selectcolor=BG2,
+                    activebackground=BG, activeforeground=FG,
+                    font=("Segoe UI", 9),
+                )
+                cb.pack(anchor="w", pady=(2, 0))
+                tk.Label(
+                    backends_frame,
+                    text=info.description,
+                    font=("Segoe UI", 8),
+                    fg=FG_DIM, bg=BG,
+                    wraplength=560,
+                    justify="left",
+                ).pack(anchor="w", padx=(20, 0))
 
         # ── Log area ──────────────────────────────────────────────────────
         log_frame = tk.Frame(self.root, bg=INPUT_BG, padx=1, pady=1)
@@ -299,6 +354,42 @@ class InstallerWindow:
                 ffmpeg_dir, self._log, self._step_progress_fn("ffmpeg"),
             )
             self._complete_step("ffmpeg")
+
+            # Step: models (ASR backends like GigaAM)
+            self._begin_step("models")
+            if _BACKEND_INSTALLERS_AVAILABLE and install_backend is not None:
+                selected = [
+                    bid for bid, var in self._backend_checkboxes.items()
+                    if var.get()
+                ]
+                if selected:
+                    step_cb = self._step_progress_fn("models")
+                    for idx, backend_id in enumerate(selected):
+                        self._log(f"Установка {backend_id.value}...")
+
+                        def _prog(
+                            frac: float,
+                            msg: str,
+                            _idx: int = idx,
+                            _total: int = len(selected),
+                            _cb=step_cb,
+                        ) -> None:
+                            stage_pct = (_idx + frac) / _total * 100
+                            _cb(stage_pct)
+                            self._log(msg)
+
+                        try:
+                            install_backend(backend_id, progress=_prog)
+                        except Exception as e:
+                            self._log(
+                                f"ОШИБКА установки {backend_id.value}: {e}"
+                            )
+                            raise
+                else:
+                    self._log("Модели ASR пропущены пользователем.")
+            else:
+                self._log("Backend installers недоступны — пропуск стадии.")
+            self._complete_step("models")
 
             # Verify
             self._log("")
