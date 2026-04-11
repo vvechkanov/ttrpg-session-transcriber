@@ -195,3 +195,66 @@ class TestActionButtons:
             ]
             assert len(output_configure) == 1
             output_configure[0].click()
+
+
+# ── Phase 6/7: running / done / failed state transitions ─────────────
+
+
+@pytest.mark.gui
+class TestProcessingStates:
+    def test_starts_in_idle_state(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        # Stack index 0 = idle page
+        assert screen._stack.currentIndex() == 0  # noqa: SLF001
+
+    def test_set_state_running_switches_to_page_1(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        assert screen._stack.currentIndex() == 1  # noqa: SLF001
+        # Run button is disabled while running
+        assert not screen._run_button.isEnabled()  # noqa: SLF001
+
+    def test_update_stage_advances_progress_bar(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("speech", "gigaam")
+        # speech = idx 1 of 6 → ~33%
+        assert 20 <= screen._progress_bar.value() <= 40  # noqa: SLF001
+
+        screen.update_stage("render", "plain-text")
+        assert screen._progress_bar.value() >= 80  # noqa: SLF001
+
+    def test_update_stage_ignores_unknown(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        before = screen._progress_bar.value()  # noqa: SLF001
+        screen.update_stage("bogus", "ignored")
+        assert screen._progress_bar.value() == before  # noqa: SLF001
+
+    def test_set_state_done_switches_to_page_2(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_done("C:/foo/merged.txt")
+        assert screen._stack.currentIndex() == 2  # noqa: SLF001
+        assert "merged.txt" in screen._done_subtitle.text()  # noqa: SLF001
+        assert screen._run_button.isEnabled()  # noqa: SLF001
+
+    def test_set_state_failed_shows_error(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_failed("CUDA out of memory")
+        assert screen._stack.currentIndex() == 2  # noqa: SLF001
+        assert "CUDA" in screen._done_subtitle.text()  # noqa: SLF001
+        assert "Ошибка" in screen._done_title.text()  # noqa: SLF001
+
+    def test_set_state_idle_returns_to_page_0(self, qtbot):
+        screen = SessionScreen(_fixture_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.set_state_idle()
+        assert screen._stack.currentIndex() == 0  # noqa: SLF001
+        assert screen._run_button.isEnabled()  # noqa: SLF001

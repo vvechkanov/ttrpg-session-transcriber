@@ -1,9 +1,10 @@
 """SessionScreen — центральный экран приложения (Screen 3).
 
-Phase 3 of ``docs/architecture/ui-qt-migration.md``: **только idle
-состояние**, фиктивные данные, никаких реальных модулей. Running/Done
-состояния блока 3 прилетят в Phase 6-7 вместе с `QThread` воркером и
-сигналами прогресса.
+Phases 3-7 of ``docs/architecture/ui-qt-migration.md``:
+
+    * Phase 3 — idle state only with fixture data;
+    * Phase 6 — running state wired to ``RunController`` stage signals;
+    * Phase 7 — done / failed terminal states + source card highlights.
 
 Четыре вертикальных блока (см. ``docs/design/screen-3-session.md`` §3):
 
@@ -36,8 +37,10 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -89,6 +92,25 @@ class SessionScreenData:
     merger: MergerRowData = field(default_factory=MergerRowData)
     #: Блок 4 — вывод
     output: OutputRowData = field(default_factory=OutputRowData)
+
+
+# ── Progress stages (mirrors core.pipeline.PipelineStage) ─────────────
+#
+# Kept here as a const map so SessionScreen doesn't import from
+# core/pipeline directly — the screen stays presentation-only. The
+# host (app.py) translates RunController.stage(str, str) into
+# SessionScreen.update_stage(stage, message).
+
+_STAGE_ORDER: tuple[str, ...] = ("start", "speech", "chat", "merge", "render", "done")
+
+_STAGE_LABELS: dict[str, str] = {
+    "start":  "Запуск…",
+    "speech": "Распознавание речи",
+    "chat":   "Разбор чат-лога",
+    "merge":  "Сведение событий",
+    "render": "Запись файла",
+    "done":   "Готово",
+}
 
 
 # ── Иконки как текстовые заглушки (до Phase 4 иконочного пакета) ───────
@@ -207,7 +229,7 @@ class SessionScreen(QWidget):
         # 4 блока
         self._sources_block = self._build_sources_block()
         self._merger_block = self._build_merger_block()
-        self._processing_block = self._build_processing_block_idle()
+        self._processing_block = self._build_processing_block()
         self._output_block = self._build_output_block()
 
         for block in (
@@ -416,9 +438,16 @@ class SessionScreen(QWidget):
 
         return block
 
-    # ── Block 3: Processing (idle only) ───────────────────────────────
+    # ── Block 3: Processing (idle / running / done) ───────────────────
 
-    def _build_processing_block_idle(self) -> _BlockFrame:
+    def _build_processing_block(self) -> _BlockFrame:
+        """Build the processing block with all three state pages.
+
+        The inner area is a :class:`QStackedWidget` with ``idle`` /
+        ``running`` / ``done`` pages. The header + footer are static
+        (run button is replaced with a status chip + cancel in running
+        state, see :meth:`_update_run_button`).
+        """
         block = _BlockFrame()
         block.setMinimumHeight(380)
         outer = QVBoxLayout(block)
@@ -442,74 +471,19 @@ class SessionScreen(QWidget):
         header_row.addWidget(section_label)
         header_row.addStretch(1)
 
-        run_button = QPushButton("▶  Запустить обработку", block)
-        run_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        run_button.setStyleSheet(
-            f"""
-            QPushButton {{
-                color: {theme.COLOR_ACCENT_FG};
-                background-color: {theme.COLOR_ACCENT};
-                border: none;
-                border-radius: {theme.RADIUS_CARD_PX}px;
-                padding: 12px 24px;
-                font-size: {theme.FONT_SIZE_H3_PX}px;
-                font-weight: 500;
-            }}
-            QPushButton:hover {{
-                background-color: {theme.COLOR_ACCENT_HOVER};
-            }}
-            """
-        )
-        run_button.clicked.connect(self.run_clicked.emit)
-        header_row.addWidget(run_button)
+        self._run_button = QPushButton("▶  Запустить обработку", block)
+        self._run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._run_button.setStyleSheet(self._run_button_style(running=False))
+        self._run_button.clicked.connect(self.run_clicked.emit)
+        header_row.addWidget(self._run_button)
         outer.addLayout(header_row)
 
-        # Idle placeholder в центре — большая круглая кнопка-подсказка
-        idle_container = QVBoxLayout()
-        idle_container.setContentsMargins(0, 0, 0, 0)
-        idle_container.setSpacing(theme.GAP_SMALL_PX)
-        idle_container.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        circle = QLabel("▶", block)
-        circle.setFixedSize(72, 72)
-        circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        circle.setStyleSheet(
-            f"""
-            QLabel {{
-                color: {theme.COLOR_ACCENT};
-                background-color: rgba(212, 132, 59, 0.10);
-                border-radius: 36px;
-                font-size: 32px;
-            }}
-            """
-        )
-        idle_container.addWidget(
-            circle, alignment=Qt.AlignmentFlag.AlignHCenter
-        )
-
-        title_hint = QLabel(
-            "Нажмите «Запустить», чтобы начать", block
-        )
-        title_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_hint.setStyleSheet(
-            f"color: {theme.COLOR_FOREGROUND}; "
-            f"font-size: {theme.FONT_SIZE_H3_PX}px;"
-        )
-        idle_container.addWidget(title_hint)
-
-        sub_hint = QLabel(
-            "Прогресс каждого источника появится здесь", block
-        )
-        sub_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub_hint.setStyleSheet(
-            f"color: {theme.COLOR_MUTED_FG}; "
-            f"font-size: {theme.FONT_SIZE_BODY_PX}px;"
-        )
-        idle_container.addWidget(sub_hint)
-
-        outer.addStretch(1)
-        outer.addLayout(idle_container)
-        outer.addStretch(1)
+        # Stacked pages: idle / running / done
+        self._stack = QStackedWidget(block)
+        self._stack.addWidget(self._build_idle_page(block))
+        self._stack.addWidget(self._build_running_page(block))
+        self._stack.addWidget(self._build_done_page(block))
+        outer.addWidget(self._stack, stretch=1)
 
         # Footer: [x] использовать кэши   [очистить кэш сессии]
         footer_row = QHBoxLayout()
@@ -533,6 +507,221 @@ class SessionScreen(QWidget):
         outer.addLayout(footer_row)
 
         return block
+
+    def _build_idle_page(self, parent: QWidget) -> QWidget:
+        """Page 0 — idle: big circular play-icon hint."""
+        page = QWidget(parent)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.GAP_SMALL_PX)
+        layout.addStretch(1)
+
+        circle = QLabel("▶", page)
+        circle.setFixedSize(72, 72)
+        circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        circle.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {theme.COLOR_ACCENT};
+                background-color: rgba(212, 132, 59, 0.10);
+                border-radius: 36px;
+                font-size: 32px;
+            }}
+            """
+        )
+        layout.addWidget(circle, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        title_hint = QLabel("Нажмите «Запустить», чтобы начать", page)
+        title_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_hint.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_H3_PX}px;"
+        )
+        layout.addWidget(title_hint)
+
+        sub_hint = QLabel("Прогресс каждого источника появится здесь", page)
+        sub_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_hint.setStyleSheet(
+            f"color: {theme.COLOR_MUTED_FG}; "
+            f"font-size: {theme.FONT_SIZE_BODY_PX}px;"
+        )
+        layout.addWidget(sub_hint)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_running_page(self, parent: QWidget) -> QWidget:
+        """Page 1 — running: determinate progress bar + per-stage list."""
+        page = QWidget(parent)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.GAP_MEDIUM_PX)
+        layout.addStretch(1)
+
+        header = QLabel("Обработка сессии", page)
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_H3_PX}px;"
+        )
+        layout.addWidget(header)
+
+        self._progress_bar = QProgressBar(page)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setFixedHeight(8)
+        self._progress_bar.setStyleSheet(
+            f"""
+            QProgressBar {{
+                background-color: {theme.COLOR_MUTED};
+                border: none;
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {theme.COLOR_ACCENT};
+                border-radius: 4px;
+            }}
+            """
+        )
+        layout.addWidget(self._progress_bar)
+
+        self._stage_label = QLabel("Запуск…", page)
+        self._stage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._stage_label.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_BODY_PX}px;"
+        )
+        layout.addWidget(self._stage_label)
+
+        self._stage_message = QLabel("", page)
+        self._stage_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._stage_message.setStyleSheet(
+            f"color: {theme.COLOR_MUTED_FG}; "
+            f"font-size: {theme.FONT_SIZE_MICRO_PX}px;"
+        )
+        layout.addWidget(self._stage_message)
+
+        layout.addStretch(1)
+        return page
+
+    def _build_done_page(self, parent: QWidget) -> QWidget:
+        """Page 2 — done: success tick + output path + open button."""
+        page = QWidget(parent)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.GAP_SMALL_PX)
+        layout.addStretch(1)
+
+        circle = QLabel("✓", page)
+        circle.setFixedSize(72, 72)
+        circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        circle.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {theme.COLOR_ACCENT_FG};
+                background-color: {theme.COLOR_SUCCESS};
+                border-radius: 36px;
+                font-size: 36px;
+            }}
+            """
+        )
+        layout.addWidget(circle, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._done_title = QLabel("Готово", page)
+        self._done_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._done_title.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_H3_PX}px;"
+        )
+        layout.addWidget(self._done_title)
+
+        self._done_subtitle = QLabel("", page)
+        self._done_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._done_subtitle.setStyleSheet(
+            f"color: {theme.COLOR_MUTED_FG}; "
+            f"font-size: {theme.FONT_SIZE_MICRO_PX}px;"
+        )
+        self._done_subtitle.setWordWrap(True)
+        layout.addWidget(self._done_subtitle)
+
+        layout.addStretch(1)
+        return page
+
+    # ── Public state transitions (Phase 6+) ───────────────────────────
+
+    def set_state_idle(self) -> None:
+        """Return block 3 to the idle placeholder."""
+        self._stack.setCurrentIndex(0)
+        self._run_button.setText("▶  Запустить обработку")
+        self._run_button.setEnabled(True)
+        self._run_button.setStyleSheet(self._run_button_style(running=False))
+
+    def set_state_running(self) -> None:
+        """Switch block 3 into the running state and reset progress."""
+        self._stack.setCurrentIndex(1)
+        self._progress_bar.setValue(0)
+        self._stage_label.setText(_STAGE_LABELS["start"])
+        self._stage_message.setText("")
+        self._run_button.setText("● Идёт обработка…")
+        self._run_button.setEnabled(False)
+        self._run_button.setStyleSheet(self._run_button_style(running=True))
+
+    def update_stage(self, stage: str, message: str = "") -> None:
+        """Update running panel for a pipeline stage event.
+
+        Host wires ``RunController.stage`` → this slot.
+        """
+        if stage not in _STAGE_ORDER:
+            return
+        idx = _STAGE_ORDER.index(stage)
+        # Progress: evenly distributed across stages (0..1)
+        value = int(round((idx + 1) / len(_STAGE_ORDER) * 100))
+        self._progress_bar.setValue(value)
+        self._stage_label.setText(_STAGE_LABELS.get(stage, stage))
+        self._stage_message.setText(message)
+
+    def set_state_done(self, output_path: str) -> None:
+        """Switch block 3 to the terminal success page."""
+        self._stack.setCurrentIndex(2)
+        self._done_title.setText("Готово")
+        self._done_subtitle.setText(output_path)
+        self._run_button.setText("↻  Запустить снова")
+        self._run_button.setEnabled(True)
+        self._run_button.setStyleSheet(self._run_button_style(running=False))
+
+    def set_state_failed(self, error_text: str) -> None:
+        """Switch block 3 to the terminal failure page (reuses done page)."""
+        self._stack.setCurrentIndex(2)
+        self._done_title.setText("Ошибка обработки")
+        self._done_subtitle.setText(error_text)
+        self._run_button.setText("↻  Попробовать снова")
+        self._run_button.setEnabled(True)
+        self._run_button.setStyleSheet(self._run_button_style(running=False))
+
+    @staticmethod
+    def _run_button_style(*, running: bool) -> str:
+        bg = theme.COLOR_MUTED if running else theme.COLOR_ACCENT
+        hover_bg = theme.COLOR_MUTED if running else theme.COLOR_ACCENT_HOVER
+        fg = theme.COLOR_MUTED_FG if running else theme.COLOR_ACCENT_FG
+        return f"""
+            QPushButton {{
+                color: {fg};
+                background-color: {bg};
+                border: none;
+                border-radius: {theme.RADIUS_CARD_PX}px;
+                padding: 12px 24px;
+                font-size: {theme.FONT_SIZE_H3_PX}px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_bg};
+            }}
+            QPushButton:disabled {{
+                color: {theme.COLOR_MUTED_FG};
+                background-color: {theme.COLOR_MUTED};
+            }}
+        """
 
     # ── Block 4: Output ───────────────────────────────────────────────
 

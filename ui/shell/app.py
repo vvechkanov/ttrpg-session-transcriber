@@ -1,30 +1,32 @@
-"""Minimal PySide6 entry point for Session Transcriber.
+"""PySide6 entry point for Session Transcriber.
 
-This is infrastructure scaffolding for the Qt migration (ADR-017).
-Phase 3 of the migration plan lands the real Session Detail screen
-as the central widget — still with fictional data, still no pipeline.
-Signals from :class:`SessionScreen` are wired up to log messages and
-open the demo SettingsDrawer; real handlers arrive in Phase 4+.
+This is the main host for the Qt migration (ADR-017). By Phase 6 it
+wires the :class:`SessionScreen` central widget to a real
+:class:`RunController` that launches ``core.pipeline.run`` in a
+background thread and streams stage progress back to the screen.
+
+Phase 9 will replace the hardcoded fixture with a folder picker
+selecting a real ``session_dir``. Until then, the ``Run`` button
+surfaces a warning if no session has been loaded.
 
 Run:
     python -m ui.shell.app
-
-Do NOT add pipeline business logic here. Background threads, real
-modules and the actual run button belong to Phase 5-6 and will live
-in their own modules under ``ui/shell/`` (``run_controller.py`` et al).
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
+from core.pipeline import PipelineParams
 from ui.shell import theme
 from ui.shell._demo_stub_panel import DemoStubPanel
+from ui.shell.run_controller import RunController, RunRequest
 from ui.shell.screens import SessionScreen, SessionScreenData
 from ui.shell.settings_drawer import SettingsDrawer
 from ui.widgets import SourceCardData
@@ -106,11 +108,22 @@ class MainWindow(QMainWindow):
             f"QMainWindow {{ background-color: {theme.COLOR_BACKGROUND}; }}"
         )
 
+        #: Current session folder. ``None`` until Phase 9 folder picker
+        #: lands; ``_on_run_clicked`` warns and bails if unset.
+        self._session_dir: Path | None = None
+
         self._session_screen = SessionScreen(_build_demo_session_data(), parent=self)
         self.setCentralWidget(self._session_screen)
 
         # SettingsDrawer — overlay, parent=self, НЕ в layout.
         self._settings_drawer = SettingsDrawer(self)
+
+        # Run controller (QThread worker for core.pipeline.run)
+        self._run_controller = RunController(parent=self)
+        self._run_controller.started.connect(self._on_run_started)
+        self._run_controller.stage.connect(self._on_run_stage)
+        self._run_controller.finished.connect(self._on_run_finished)
+        self._run_controller.failed.connect(self._on_run_failed)
 
         # ── Signal wiring ─────────────────────────────────────────
         self._session_screen.source_configure_requested.connect(
@@ -153,7 +166,52 @@ class MainWindow(QMainWindow):
         _log.info("[Phase 3 stub] Add source requested")
 
     def _on_run_clicked(self) -> None:
-        _log.info("[Phase 3 stub] Run clicked — real pipeline arrives in Phase 6")
+        """Kick off pipeline run via :class:`RunController`.
+
+        Phase 6: controller wired, but ``_session_dir`` is only set by
+        Phase 9's folder picker. Until then, we show a friendly warning
+        instead of exploding the user's screen.
+        """
+        if self._run_controller.is_running:
+            _log.info("Run clicked while already running — ignored")
+            return
+        if self._session_dir is None:
+            QMessageBox.information(
+                self,
+                "Нет сессии",
+                "Сначала откройте папку сессии. "
+                "Диалог выбора появится в Phase 9.",
+            )
+            return
+
+        params = PipelineParams(
+            speech_backend="gigaam",
+            merger="script",
+            renderer="plain-text",
+            output_filename="merged.txt",
+        )
+        request = RunRequest(session_dir=self._session_dir, params=params)
+        self._session_screen.set_state_running()
+        started = self._run_controller.start(request)
+        if not started:
+            self._session_screen.set_state_idle()
+
+    # ── Run controller slots ─────────────────────────────────────────
+
+    def _on_run_started(self) -> None:
+        _log.info("Pipeline run started on %s", self._session_dir)
+
+    def _on_run_stage(self, stage: str, message: str) -> None:
+        _log.info("Pipeline stage: %s (%s)", stage, message)
+        self._session_screen.update_stage(stage, message)
+
+    def _on_run_finished(self, output_path: str) -> None:
+        _log.info("Pipeline finished: %s", output_path)
+        self._session_screen.set_state_done(output_path)
+
+    def _on_run_failed(self, error_text: str) -> None:
+        _log.error("Pipeline failed: %s", error_text)
+        self._session_screen.set_state_failed(error_text)
 
     def _open_demo_drawer(self, *, title: str, subtitle: str) -> None:
         panel = DemoStubPanel()
