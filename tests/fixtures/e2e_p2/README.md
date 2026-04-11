@@ -53,7 +53,12 @@ Run: `pytest tests/test_e2e_tier2_semantic.py -v -m slow`
 ### Tier 3 — Strict diff (manual, one-shot PR validation)
 
 **NOT pytest.** Manual procedure for P2.x PR validation: compare new pipeline
-vs legacy on a real session to confirm byte-level or near-byte-level equivalence.
+output against a frozen legacy baseline (`merged_legacy.txt` captured on master
+before the six-layer refactor, if available) on a real session.
+
+The legacy launcher script was removed in P2.10, so this tier is only meaningful
+if you captured a `merged.txt` from master prior to the refactor. Otherwise
+rely on Tier 2 semantic equivalence.
 
 #### Tier 3 procedure
 
@@ -75,21 +80,10 @@ vs legacy on a real session to confirm byte-level or near-byte-level equivalence
    "
    ```
 
-3. Run the LEGACY pipeline on the same session:
-   ```
-   venv\Scripts\python scripts\wisper_launcher.py games\bogomols\YOUR_SESSION \
-     --model large-v3 --device cpu --compute_type int8 --beam_size 1 \
-     --language ru --merge --output_dir games\bogomols\YOUR_SESSION
-   ```
-
-4. Diff the outputs:
-   ```
-   diff games/bogomols/YOUR_SESSION/merged.txt games/bogomols/YOUR_SESSION/merged_new.txt
-   ```
-
-If byte-match fails due to CTranslate2 non-determinism on CPU, relax to
-"same token count ±1%". The purpose is to document the delta for the PR reviewer,
-not to gate the merge.
+3. Diff `merged_new.txt` against a pre-P2 captured `merged_legacy.txt`
+   (if you have one). If byte-match fails due to CTranslate2 non-determinism
+   on CPU, relax to "same token count ±1%". The purpose is to document the
+   delta for the PR reviewer, not to gate the merge.
 
 ## Regeneration procedure
 

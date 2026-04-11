@@ -316,13 +316,8 @@ def gui_main() -> int:
             # Auto-detect timezone if info.txt is available
             if info_path.exists():
                 try:
-                    # TODO(P2.10): switch to sources.game_log.fvtt_chat
-                    from parse_fvtt_chat import (
-                        parse_fvtt_log, parse_info_start_time, guess_tz_offset,
-                    )
-                    entries = parse_fvtt_log(fvtt_logs[0])
-                    rec_start = parse_info_start_time(info_path)
-                    tz = guess_tz_offset(entries, rec_start)
+                    from core.fvtt_helpers import detect_fvtt_tz_offset
+                    tz = detect_fvtt_tz_offset(fvtt_logs[0], info_path)
                     chat_tz_var.set(str(int(tz)))
                 except Exception:
                     chat_tz_var.set("auto")

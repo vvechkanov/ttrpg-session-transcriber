@@ -55,7 +55,7 @@ class FvttChatSource(Source):
 
         Таймштампы — в секундах от начала записи (Craig ``info.txt``).
         """
-        entries = _parse_fvtt_log(self.chat_log_path)
+        entries = parse_fvtt_log(self.chat_log_path)
         if not entries:
             return []
 
@@ -70,11 +70,11 @@ class FvttChatSource(Source):
                 )
             info_path = candidate
 
-        rec_start = _parse_info_start_time(info_path)
+        rec_start = parse_info_start_time(info_path)
 
         tz_offset = self.tz_offset
         if tz_offset is None:
-            tz_offset = _guess_tz_offset(entries, rec_start)
+            tz_offset = guess_tz_offset(entries, rec_start)
 
         messages: list[ChatMessage] = []
         for entry in entries:
@@ -102,7 +102,7 @@ def _to_chat_message(entry: dict, at: float) -> ChatMessage:
 # ── Port функций из scripts/parse_fvtt_chat.py ───────────────────────────
 
 
-def _parse_fvtt_log(path: Path) -> list[dict]:
+def parse_fvtt_log(path: Path) -> list[dict]:
     """Port ``parse_fvtt_log``: читает fvtt-log-*.txt в список entry-dict-ов.
 
     Формат entry: ``{"datetime": datetime (naive, local), "speaker": str, "text": str}``.
@@ -136,7 +136,7 @@ def _parse_fvtt_log(path: Path) -> list[dict]:
     return entries
 
 
-def _parse_info_start_time(path: Path) -> datetime:
+def parse_info_start_time(path: Path) -> datetime:
     """Port ``parse_info_start_time``: извлекает ``Start time:`` из Craig info.txt."""
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         stripped = line.strip()
@@ -147,7 +147,7 @@ def _parse_info_start_time(path: Path) -> datetime:
     raise ValueError(f"'Start time:' not found in {path}")
 
 
-def _guess_tz_offset(entries: list[dict], recording_start_utc: datetime) -> float:
+def guess_tz_offset(entries: list[dict], recording_start_utc: datetime) -> float:
     """Port ``guess_tz_offset``: перебирает UTC offset -12..+14 и выбирает лучший.
 
     "Лучший" — такой, при котором первый chat entry оказывается сразу

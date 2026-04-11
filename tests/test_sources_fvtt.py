@@ -128,33 +128,33 @@ class TestFvttChatSourceInternals:
     """Tests for internal parsing helpers (imported directly)."""
 
     def test_parse_fvtt_log_returns_entries(self):
-        from sources.game_log.fvtt_chat import _parse_fvtt_log
-        entries = _parse_fvtt_log(FVTT_TINY)
+        from sources.game_log.fvtt_chat import parse_fvtt_log
+        entries = parse_fvtt_log(FVTT_TINY)
         assert len(entries) >= 3  # 3 non-trivial entries (+ one is skipped)
         assert all("datetime" in e for e in entries)
         assert all("speaker" in e for e in entries)
         assert all("text" in e for e in entries)
 
     def test_parse_info_start_time(self, tmp_path):
-        from sources.game_log.fvtt_chat import _parse_info_start_time
+        from sources.game_log.fvtt_chat import parse_info_start_time
         info = tmp_path / "info.txt"
         info.write_text("Start time: 2025-07-11T15:00:00Z\n", encoding="utf-8")
-        dt = _parse_info_start_time(info)
+        dt = parse_info_start_time(info)
         assert dt.year == 2025
         assert dt.month == 7
         assert dt.day == 11
         assert dt.hour == 15
 
     def test_parse_info_start_time_missing_key_raises(self, tmp_path):
-        from sources.game_log.fvtt_chat import _parse_info_start_time
+        from sources.game_log.fvtt_chat import parse_info_start_time
         info = tmp_path / "info.txt"
         info.write_text("No relevant content here\n", encoding="utf-8")
         with pytest.raises(ValueError, match="Start time"):
-            _parse_info_start_time(info)
+            parse_info_start_time(info)
 
     def test_guess_tz_offset_empty_entries(self):
-        from sources.game_log.fvtt_chat import _guess_tz_offset
+        from sources.game_log.fvtt_chat import guess_tz_offset
         from datetime import timezone
         rec_start = datetime(2025, 7, 11, 15, 0, 0, tzinfo=timezone.utc)
-        offset = _guess_tz_offset([], rec_start)
+        offset = guess_tz_offset([], rec_start)
         assert offset == 0.0

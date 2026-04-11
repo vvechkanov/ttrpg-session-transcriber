@@ -70,9 +70,7 @@ def _extract_project() -> None:
 
     P2: the six-layer package structure (ui, core, sources, mergers,
     renderers, domain) plus scripts (chunk_text.py post-processor) and
-    prompts. Legacy wisper_launcher.py / merge_whisperx.py /
-    parse_fvtt_chat.py are removed in P2.10; until then they ship as
-    dead code inside scripts/.
+    prompts.
     """
     for folder in _PROJECT_DIRS:
         src = BUNDLE_DIR / folder
