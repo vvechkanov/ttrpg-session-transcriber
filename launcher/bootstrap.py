@@ -153,18 +153,30 @@ def _launch_runtime() -> None:
             str(ffmpeg_bin) + (os.pathsep + existing_path if existing_path else "")
         )
 
-    startupinfo = None
+    # Flags for launching a GUI child process from a windowed bootstrap.
+    #
+    # IMPORTANT: do NOT pass ``STARTUPINFO`` with ``STARTF_USESHOWWINDOW``.
+    # That flag ships ``wShowWindow=SW_HIDE (0)`` into ``CreateProcess``,
+    # which Windows applies to the child's *first* ``ShowWindow`` call —
+    # so the PySide6 main window is created hidden and the user sees
+    # nothing. ``STARTF_USESHOWWINDOW`` is the right choice for hiding
+    # cli tools like ffmpeg, not for launching GUI apps.
+    #
+    # ``DETACHED_PROCESS`` gives the child its own process group so the
+    # bootstrap can exit immediately without leaving the runtime tied
+    # to our (already-gone) console. ``CREATE_NEW_PROCESS_GROUP`` is
+    # added for the same reason — Ctrl-C in a dev console won't
+    # propagate into the runtime.
     creationflags = 0
     if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        creationflags = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
 
     subprocess.Popen(
         [str(exe_path)],
         cwd=str(exe_path.parent),
         env=env,
-        startupinfo=startupinfo,
         creationflags=creationflags,
         close_fds=True,
     )
@@ -279,17 +291,19 @@ def _relaunch_from_temp(original_exe: Path) -> None:
     tmp_exe = tmp_root / "uninstall.exe"
     shutil.copy2(str(original_exe), str(tmp_exe))
 
+    # The relaunched bootstrap is itself a GUI app (tkinter
+    # UninstallerWindow). Same rules as ``_launch_runtime``: no
+    # ``STARTF_USESHOWWINDOW``, otherwise the tkinter window opens
+    # hidden and the user sees nothing happen after clicking Uninstall.
     creationflags = 0
-    startupinfo = None
     if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        creationflags = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
 
     subprocess.Popen(
         [str(tmp_exe), "--uninstall", _FROM_TEMP_FLAG, str(original_exe)],
         cwd=str(tmp_root),
-        startupinfo=startupinfo,
         creationflags=creationflags,
         close_fds=True,
     )
