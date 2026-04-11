@@ -37,16 +37,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--compute_type", default="float16")
     ap.add_argument("--beam_size", type=int, default=10)
     # GigaAM-only options (игнорируются другими speech backend-ами).
+    # NB: choices сужены до единственной сконфигурированной комбинации —
+    # ``rnnt+fp32``. Остальные варианты не имеют URL-ов в _bundle_files()
+    # и будут расширяться по мере добавления новых bundle-ов.
     ap.add_argument(
         "--gigaam_variant",
         default="rnnt",
-        choices=["rnnt", "e2e_rnnt"],
+        choices=["rnnt"],
         help="GigaAM variant (default: rnnt without built-in ITN).",
     )
     ap.add_argument(
         "--gigaam_precision",
         default="fp32",
-        choices=["fp32", "int8"],
+        choices=["fp32"],
         help="GigaAM weights precision (default: fp32).",
     )
     ap.add_argument(

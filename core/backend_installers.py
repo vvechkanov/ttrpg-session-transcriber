@@ -41,22 +41,17 @@ class BackendInfo:
 
 
 # Hardcoded registry — в стиле SPEECH_SOURCES (ADR-11).
-#
-# Примечание: ``default_selected=False`` пока ``_bundle_files`` не заполнен
-# реальными URL — см. TODO(python-dev) в
-# ``sources/speech/_gigaam_download.py::_bundle_files``. Когда URL появятся,
-# поменять на ``True`` согласно gigaam-v2.md §5.
 BACKENDS: dict[BackendId, BackendInfo] = {
     BackendId.GIGAAM_RNNT_FP32: BackendInfo(
         id=BackendId.GIGAAM_RNNT_FP32,
         title="GigaAM-v3 RNNT (русский)",
         description=(
-            "Русскоязычный ASR для TTRPG. ~900 MB. Без встроенной "
-            "пунктуации — терминология бросков и характеристик "
-            "сохраняется как есть. [Установка пока недоступна — см. TODO]"
+            "Русскоязычный ASR для TTRPG (Sber GigaAM-v3). ~900 MB. "
+            "Без встроенной пунктуации — терминология бросков и "
+            "характеристик сохраняется как есть."
         ),
         approx_download_bytes=950_000_000,
-        default_selected=False,
+        default_selected=True,
     ),
 }
 

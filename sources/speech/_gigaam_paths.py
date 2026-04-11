@@ -23,6 +23,18 @@ if TYPE_CHECKING:
 GIGAAM_SCHEMA_VERSION = 1
 
 
+def _current_os_name() -> str:
+    """Indirection over ``os.name`` for testability.
+
+    Tests monkey-patch this helper instead of ``os.name`` directly —
+    mutating global ``os.name`` on Windows breaks ``pathlib.Path()``
+    which picks ``WindowsPath``/``PosixPath`` flavour from it at every
+    instantiation (and then pytest's own error-reporting crashes with
+    ``NotImplementedError: cannot instantiate 'PosixPath' on your system``).
+    """
+    return os.name
+
+
 def default_models_root() -> Path:
     """Корневой каталог моделей для пользовательской установки.
 
@@ -30,7 +42,7 @@ def default_models_root() -> Path:
     Linux/macOS: ``$XDG_DATA_HOME/ttrpg-transcriber/models`` или
     ``~/.local/share/ttrpg-transcriber/models``.
     """
-    if os.name == "nt":
+    if _current_os_name() == "nt":
         base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
     else:
         base = Path(
