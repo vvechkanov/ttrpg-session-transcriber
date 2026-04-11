@@ -36,12 +36,14 @@ class WhisperXSource(Source):
         device: str = "cuda",
         compute_type: str = "float16",
         language: str = "ru",
+        beam_size: int = 10,
         speaker_map: dict[str, str] | None = None,
     ) -> None:
         self.model = model
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.beam_size = beam_size
         self.speaker_map = speaker_map or {}
 
     def extract(self, session_dir: Path) -> list[SpeechSegment]:
@@ -55,9 +57,7 @@ class WhisperXSource(Source):
 
         all_segments: list[SpeechSegment] = []
         for audio_path in audio_files:
-            # Verbatim из scripts/wisper_launcher.py:642-651 (gui_main path).
-            # Beam size не прокидываем: в GUI-версии оно бралось из params,
-            # а в P2 sources layer мы беремся за дефолтные whisperx-значения.
+            # Verbatim port of scripts/wisper_launcher.py:642-651 (gui_main path).
             cmd = [
                 "whisperx",
                 str(audio_path),
@@ -73,18 +73,17 @@ class WhisperXSource(Source):
                 self.device,
                 "--compute_type",
                 self.compute_type,
+                "--beam_size",
+                str(self.beam_size),
             ]
             subprocess.run(cmd, cwd=str(transcripts_dir), check=True)
 
             # whisperx пишет "<stem>.json" в output_dir.
             produced = transcripts_dir / f"{audio_path.stem}.json"
             if not produced.exists():
-                # Fallback: иногда whisperx кладёт JSON в cwd а не output_dir.
-                alt = session_dir / f"{audio_path.stem}.json"
-                if alt.exists():
-                    produced = alt
-                else:
-                    continue
+                raise RuntimeError(
+                    f"whisperx did not create expected JSON: {produced}"
+                )
 
             speaker = resolve_speaker(audio_path.stem, self.speaker_map)
             track_segments = _load_whisperx_json(produced, speaker)
