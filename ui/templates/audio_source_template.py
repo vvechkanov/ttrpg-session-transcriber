@@ -339,7 +339,9 @@ class AudioSourceSettingsPanel(QWidget):
             role_cell = QComboBox(table)
             role_cell.addItems(_ROLE_OPTIONS)
             role_cell.setCurrentText(entry.get("role", "PC"))
-            role_cell.currentIndexChanged.connect(self.changed.emit)
+            role_cell.currentIndexChanged.connect(
+                lambda _idx: self.changed.emit()
+            )
 
             table.setItem(row_idx, 0, player)
             table.setItem(row_idx, 1, character)
@@ -370,7 +372,9 @@ class AudioSourceSettingsPanel(QWidget):
                 0,
             )
             self._precision_combo.setCurrentIndex(idx)
-            self._precision_combo.currentIndexChanged.connect(self.changed.emit)
+            self._precision_combo.currentIndexChanged.connect(
+                lambda _idx: self.changed.emit()
+            )
             box.add(_form_row("Precision:", self._precision_combo, parent=box))
 
             variant_label = QLabel(
@@ -382,19 +386,27 @@ class AudioSourceSettingsPanel(QWidget):
             )
             box.add(variant_label)
         else:  # whisper
+            default_model = "bzikst/faster-whisper-large-v3-ru-podlodka"
             self._model_edit = QLineEdit(box)
+            # Use the module's current value verbatim (including an
+            # explicit empty string, so ``validate()`` can flag it); the
+            # default model only kicks in as placeholder-level UX hint.
             self._model_edit.setText(
-                str(getattr(self._module, "model", ""))
-                or "bzikst/faster-whisper-large-v3-ru-podlodka"
+                str(getattr(self._module, "model", default_model))
             )
-            self._model_edit.textChanged.connect(self.changed.emit)
+            self._model_edit.setPlaceholderText(default_model)
+            self._model_edit.textChanged.connect(
+                lambda _text: self.changed.emit()
+            )
             box.add(_form_row("Модель:", self._model_edit, parent=box))
 
             self._language_edit = QLineEdit(box)
             self._language_edit.setText(
                 str(getattr(self._module, "language", "ru"))
             )
-            self._language_edit.textChanged.connect(self.changed.emit)
+            self._language_edit.textChanged.connect(
+                lambda _text: self.changed.emit()
+            )
             box.add(_form_row("Язык:", self._language_edit, parent=box))
         return box
 
@@ -426,7 +438,9 @@ class AudioSourceSettingsPanel(QWidget):
             0,
         )
         self._device_combo.setCurrentIndex(idx)
-        self._device_combo.currentIndexChanged.connect(self.changed.emit)
+        self._device_combo.currentIndexChanged.connect(
+            lambda _idx: self.changed.emit()
+        )
         box.add(_form_row("Устройство:", self._device_combo, parent=box))
 
         # num_threads (gigaam only)
@@ -436,7 +450,9 @@ class AudioSourceSettingsPanel(QWidget):
             self._threads_spin.setValue(
                 int(getattr(self._module, "num_threads", 4) or 4)
             )
-            self._threads_spin.valueChanged.connect(self.changed.emit)
+            self._threads_spin.valueChanged.connect(
+                lambda _value: self.changed.emit()
+            )
             box.add(_form_row("Потоки CPU:", self._threads_spin, parent=box))
         else:
             # faster-whisper: compute_type
@@ -447,7 +463,9 @@ class AudioSourceSettingsPanel(QWidget):
             idx = self._compute_combo.findData(current)
             if idx >= 0:
                 self._compute_combo.setCurrentIndex(idx)
-            self._compute_combo.currentIndexChanged.connect(self.changed.emit)
+            self._compute_combo.currentIndexChanged.connect(
+                lambda _idx: self.changed.emit()
+            )
             box.add(_form_row("Compute type:", self._compute_combo, parent=box))
 
         return box

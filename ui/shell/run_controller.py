@@ -2,7 +2,7 @@
 
 ``core.pipeline.run`` is synchronous and CPU/GPU-bound. Running it on
 the GUI thread would freeze the Qt event loop. :class:`RunController`
-wraps it in a ``QThread`` worker and publishes four Qt signals:
+wraps it in a ``QThread`` subclass and publishes four Qt signals:
 
     * ``started()``              — pipeline entered ``start`` stage;
     * ``stage(name, message)``   — stage tick (``speech`` / ``chat`` /
@@ -10,12 +10,26 @@ wraps it in a ``QThread`` worker and publishes four Qt signals:
     * ``finished(output_path)``  — pipeline returned cleanly;
     * ``failed(error_text)``     — pipeline raised an exception.
 
-The controller owns a single worker at a time. ``start(...)`` is a
+The controller owns a single thread at a time. ``start(...)`` is a
 no-op while ``is_running`` is True — callers must wait for
 ``finished`` / ``failed`` before launching a new run. ``cancel()``
 does a best-effort ``QThread.requestInterruption`` — the pipeline
 itself does NOT check for interruption flags today, so cancel only
 wins at stage boundaries (stretch goal for Phase 7+).
+
+Design note (Phase 10 final test hardening):
+
+    The original implementation used the canonical Qt pattern of a
+    ``QObject`` worker moved into a ``QThread`` via
+    ``moveToThread`` + auto-connected queued signals. On PySide6
+    6.11 + Windows this pattern segfaulted at worker teardown when
+    the parent controller was garbage-collected between the worker's
+    ``finished`` emission and the main-thread slot dispatch. The
+    workaround is to subclass ``QThread`` directly — no separate
+    ``QObject`` worker, no ``moveToThread`` — and emit signals from
+    the thread's own ``run`` method. Qt's automatic-connection type
+    still picks ``QueuedConnection`` for cross-thread receivers, so
+    slot bodies fire on the main thread as before.
 """
 
 from __future__ import annotations
@@ -39,35 +53,32 @@ class RunRequest:
     params: PipelineParams
 
 
-class _Worker(QObject):
-    """QObject living inside a ``QThread``; runs one pipeline job.
+class _PipelineThread(QThread):
+    """Dedicated ``QThread`` that runs one pipeline job.
 
-    Kept private — ``RunController`` is the only caller that spawns it.
-    The worker uses queued ``Signal`` emits (auto via ``moveToThread``)
-    so UI slots always fire on the main thread.
+    Kept private — :class:`RunController` is the only caller.
+    All signals emitted from ``run`` cross thread boundaries to the
+    controller's slots via automatic queued connections.
     """
 
-    started = Signal()
+    started_signal = Signal()
     stage = Signal(str, str)
-    finished = Signal(str)
+    finished_signal = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, request: RunRequest) -> None:
-        super().__init__()
+    def __init__(self, request: RunRequest, parent: QObject | None = None) -> None:
+        super().__init__(parent)
         self._request = request
 
-    def run(self) -> None:
-        """Execute the pipeline; emit progress through signals.
+    def run(self) -> None:  # noqa: D401 — Qt override
+        """Execute the pipeline; emit progress through signals."""
 
-        Slot invoked by ``QThread.started`` — wired up in
-        :meth:`RunController.start`.
-        """
         def _stage_cb(stage: PipelineStage, message: str) -> None:
             # Qt auto-converts Literal to str on signal edge
             self.stage.emit(stage, message)
 
         try:
-            self.started.emit()
+            self.started_signal.emit()
             pipeline_run(
                 self._request.session_dir,
                 self._request.params,
@@ -76,7 +87,7 @@ class _Worker(QObject):
             output_path = (
                 self._request.session_dir / self._request.params.output_filename
             )
-            self.finished.emit(str(output_path))
+            self.finished_signal.emit(str(output_path))
         except Exception as exc:  # noqa: BLE001 — UI boundary: everything → text
             logger.exception("Pipeline run failed")
             self.failed.emit(str(exc))
@@ -104,8 +115,7 @@ class RunController(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._thread: QThread | None = None
-        self._worker: _Worker | None = None
+        self._thread: _PipelineThread | None = None
 
     @property
     def is_running(self) -> bool:
@@ -122,24 +132,22 @@ class RunController(QObject):
             logger.warning("RunController.start called while already running")
             return False
 
-        thread = QThread(self)
-        worker = _Worker(request)
-        worker.moveToThread(thread)
+        thread = _PipelineThread(request, parent=self)
 
-        thread.started.connect(worker.run)
-        worker.started.connect(self.started.emit)
-        worker.stage.connect(self.stage.emit)
-        worker.finished.connect(self.finished.emit)
-        worker.failed.connect(self.failed.emit)
+        # Forward thread-side signals to the controller's public signals
+        # via explicit slot methods rather than ``.emit`` bound references
+        # (PySide6 6.11 regression — segfaults when cross-thread queued
+        # connections target a C++ method pointer whose owning QObject
+        # is finalising on the main thread).
+        thread.started_signal.connect(self._forward_started)
+        thread.stage.connect(self._forward_stage)
+        thread.finished_signal.connect(self._forward_finished)
+        thread.failed.connect(self._forward_failed)
 
-        # Teardown: both success and error paths quit the thread.
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
+        # Teardown hook — Qt's QThread.finished fires once run() returns.
         thread.finished.connect(self._on_thread_finished)
 
         self._thread = thread
-        self._worker = worker
         thread.start()
         return True
 
@@ -155,9 +163,22 @@ class RunController(QObject):
         if self._thread is not None and self._thread.isRunning():
             self._thread.requestInterruption()
 
+    # ── Signal forwarding slots ──────────────────────────────────────
+
+    def _forward_started(self) -> None:
+        self.started.emit()
+
+    def _forward_stage(self, name: str, message: str) -> None:
+        self.stage.emit(name, message)
+
+    def _forward_finished(self, output_path: str) -> None:
+        self.finished.emit(output_path)
+
+    def _forward_failed(self, error_text: str) -> None:
+        self.failed.emit(error_text)
+
     def _on_thread_finished(self) -> None:
-        """Drop references to the worker/thread once the QThread exits."""
-        if self._thread is not None:
-            self._thread.deleteLater()
-        self._thread = None
-        self._worker = None
+        """Release the thread once it has cleanly exited ``run``."""
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.deleteLater()

@@ -58,12 +58,12 @@ class DemoStubPanel(QWidget):
         layout.addWidget(subtitle)
 
         self._checkbox = QCheckBox("Пример чекбокса", self)
-        self._checkbox.toggled.connect(self.changed.emit)
+        self._checkbox.toggled.connect(lambda _checked: self.changed.emit())
         layout.addWidget(self._checkbox)
 
         self._line = QLineEdit(self)
         self._line.setPlaceholderText("Пример текстового поля")
-        self._line.textChanged.connect(self.changed.emit)
+        self._line.textChanged.connect(lambda _text: self.changed.emit())
         layout.addWidget(self._line)
 
         layout.addStretch(1)

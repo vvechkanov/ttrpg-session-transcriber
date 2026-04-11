@@ -96,9 +96,17 @@ class TestContract:
         assert callable(tmpl.make_settings_panel)
 
     def test_resolver_finds_audio_source_template(self):
+        """Resolver returns the audio_source template module.
+
+        We compare by ``__name__`` rather than identity — another test
+        (``test_core_ui_registry::TestLazyImport``) deliberately wipes
+        ``ui.templates.*`` from ``sys.modules`` before exercising the
+        lazy-import code path, which invalidates identity comparison
+        but is otherwise benign.
+        """
         cfg = UIConfig(template="audio_source")
         module = resolve_template(cfg)
-        assert module is tmpl
+        assert module.__name__ == tmpl.__name__
         assert callable(module.make_settings_panel)
 
 
