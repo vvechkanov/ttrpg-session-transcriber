@@ -58,17 +58,28 @@ class TestResolveTemplate:
         # сообщение перечисляет известные template id
         assert "audio_source" in msg
 
-    def test_known_but_missing_template_raises_module_not_found(self):
-        """В фазе 1 ни одного реального шаблона ещё нет.
+    def test_audio_source_resolves_to_template_module(self):
+        """После Phase 4 audio_source_template существует и резолвится.
+
+        Требует PySide6 для импорта шаблона — пропускаем если его нет.
+        """
+        pytest.importorskip("PySide6")
+        cfg = UIConfig(template="audio_source")
+        module = resolve_template(cfg)
+        assert callable(getattr(module, "make_home_card", None))
+        assert callable(getattr(module, "make_settings_panel", None))
+        assert callable(getattr(module, "make_runtime_panel", None))
+
+    def test_unregistered_stub_templates_still_raise(self):
+        """Phase 8 stubs: chat_source / merger / renderer — пока нет файлов.
 
         Резолвер зарегистрированного id должен пытаться импортировать
-        модуль и падать с понятной ошибкой, а не возвращать None.
-        После фазы 4 этот тест нужно будет поменять на assert-что-модуль
-        успешно импортируется.
+        модуль и падать с ``ModuleNotFoundError`` до Phase 8.
         """
-        cfg = UIConfig(template="audio_source")
-        with pytest.raises(ModuleNotFoundError):
-            resolve_template(cfg)
+        for template_id in ("chat_source", "merger", "renderer"):
+            cfg = UIConfig(template=template_id)
+            with pytest.raises(ModuleNotFoundError):
+                resolve_template(cfg)
 
 
 class TestLazyImport:

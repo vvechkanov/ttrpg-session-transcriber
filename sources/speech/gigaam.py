@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import InstallProgress, Source
@@ -98,6 +99,22 @@ class GigaAMSource(Source):
     """
 
     name = "gigaam"
+
+    #: Module UI Contract binding (ADR-016). Hosts (``ui.shell``) resolve
+    #: this to ``ui/templates/audio_source_template.py`` and render the
+    #: module's home-card / settings panel / runtime panel. The ``params``
+    #: dict tells the shared audio template which backend-specific form to
+    #: render. This attribute does NOT import anything from ``ui/``.
+    ui_config = UIConfig(
+        template="audio_source",
+        params={
+            "backend": "gigaam",
+            "precision_options": ("fp32", "int8"),
+            "variant_options": ("rnnt", "e2e_rnnt"),
+            "device_options": ("cpu", "cuda"),
+            "show_hotwords": True,
+        },
+    )
 
     def __init__(
         self,

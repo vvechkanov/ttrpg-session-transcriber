@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import Source
@@ -27,6 +28,21 @@ class FasterWhisperSource(Source):
     """Speech source на основе faster-whisper Python API."""
 
     name = "faster-whisper"
+
+    #: Module UI Contract binding (ADR-016). Shared ``audio_source``
+    #: template with GigaAM; the ``backend`` param selects the
+    #: Whisper-specific form (model string + language + compute_type
+    #: instead of variant/precision/num_threads). This attribute does
+    #: NOT import anything from ``ui/``.
+    ui_config = UIConfig(
+        template="audio_source",
+        params={
+            "backend": "whisper",
+            "device_options": ("cpu", "cuda"),
+            "compute_type_options": ("int8", "int8_float16", "float16", "float32"),
+            "show_hotwords": False,
+        },
+    )
 
     def __init__(
         self,
