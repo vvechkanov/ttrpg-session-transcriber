@@ -437,8 +437,84 @@ def gui_main() -> int:
             root.after(0, lambda: btn_start.config(state="normal", text="▶ Запустить"))
 
     def _do_pipeline(p: dict) -> None:
-        """Actual pipeline logic — wired up in P2.7 commit 3."""
-        raise NotImplementedError("wired up in P2.7 commit 3")
+        """Actual pipeline logic (called from worker thread).
+
+        Calls core.run() with a logging handler piping core.*/sources.*/
+        mergers.*/renderers.* records into the GUI log widget queue.
+        """
+        session_dir = p["session_dir"]
+
+        # Chat log auto-detection happens inside core.pipeline.run() via
+        # core.discovery.find_fvtt_chat_log. GUI's chat_log_enabled/
+        # chat_log_path/chat_tz_offset are ignored in P2.7 — log an info
+        # line if the user set them so they know why.
+        if p.get("chat_log_enabled"):
+            log("ℹ️ Chat log auto-detected by core.discovery — GUI tz override ignored in P2.7")
+
+        params = PipelineParams(
+            speech_backend="faster-whisper",  # GUI defaults to faster-whisper; P3 will add a backend picker
+            model=p["model"],
+            device=p["device"],
+            compute_type=p["compute_type"],
+            language="ru",
+            beam_size=p["beam_size"],
+            speaker_map=core_load_speaker_map(session_dir) or None,
+        )
+
+        _set_status("Обработка сессии…")
+        log(f"\n{'═' * 50}")
+        log(f"== Устройство: {params.device.upper()}  |  model: {params.model}"
+            f"  |  compute: {params.compute_type}  |  beam: {params.beam_size}")
+        log(f"{'═' * 50}")
+
+        # Install logging handler for real-time log streaming from core.
+        handler = _QueueLogHandler(_log_queue)
+        core_logger = logging.getLogger("core")
+        sources_logger = logging.getLogger("sources")
+        mergers_logger = logging.getLogger("mergers")
+        renderers_logger = logging.getLogger("renderers")
+        all_loggers = (core_logger, sources_logger, mergers_logger, renderers_logger)
+        prior_levels: dict[logging.Logger, int] = {}
+        for lg in all_loggers:
+            prior_levels[lg] = lg.level
+            lg.setLevel(logging.INFO)
+            lg.addHandler(handler)
+
+        t_pipeline = time.time()
+        try:
+            core_run(session_dir, params)
+        finally:
+            for lg in all_loggers:
+                lg.removeHandler(handler)
+                lg.setLevel(prior_levels[lg])
+        log(f"   ✓ core.run() готов за {_fmt_elapsed(time.time() - t_pipeline)}")
+
+        # ── Chunk post-step (unchanged from legacy) ───────────────
+        if p.get("do_chunk"):
+            chunk_script = (
+                Path(__file__).resolve().parents[1] / "scripts" / "chunk_text.py"
+            )
+            merged_txt = session_dir / "merged.txt"
+            if not merged_txt.exists():
+                raise RuntimeError("После склейки не найден merged.txt")
+            if not chunk_script.exists():
+                log(f"⚠️ chunk_text.py not found at {chunk_script}, пропускаю нарезку")
+                return
+
+            _set_status("Нарезка на чанки…")
+            log("\n== Нарезка на чанки")
+            t_chunk = time.time()
+            chunk_cmd = [
+                sys.executable,
+                str(chunk_script),
+                str(merged_txt),
+                "--chunk_chars",
+                str(p["chunk_chars"]),
+                "--overlap",
+                str(p["chunk_overlap"]),
+            ]
+            run_and_stream(chunk_cmd, cwd=session_dir)
+            log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_chunk)}")
 
     # ── Theme / colours ──────────────────────────────────────────────────
 
