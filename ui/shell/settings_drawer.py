@@ -52,23 +52,27 @@ from PySide6.QtWidgets import (
 )
 
 from core.ui_contract import SettingsPanelProtocol
+from ui.shell import theme
 
-# ── Design tokens (см. Figma v1 theme.css) ─────────────────────────────
-_COLOR_CARD = "#FFFFFF"
-_COLOR_FOREGROUND = "#2D2520"
-_COLOR_MUTED_FG = "#6B625A"
-_COLOR_ACCENT = "#D4843B"
-_COLOR_ACCENT_FG = "#FFFFFF"
-_COLOR_SECONDARY = "#F5F2EF"
-_COLOR_MUTED = "#E8E4DF"
-_COLOR_BORDER = "rgba(107, 98, 90, 0.15)"
-# foreground @ 25% alpha = 2D2520 → rgba(45,37,32,0.25)
-_COLOR_BACKDROP = "rgba(45, 37, 32, 0.25)"
+# ── Design tokens (alias'ы на ``ui.shell.theme``) ──────────────────────
+# Оставляю короткие имена для читаемости inline-QSS ниже. Единственный
+# источник правды — ``ui/shell/theme.py``; если дизайнер правит v1
+# theme.css, правим туда.
+_COLOR_CARD = theme.COLOR_CARD
+_COLOR_FOREGROUND = theme.COLOR_FOREGROUND
+_COLOR_MUTED_FG = theme.COLOR_MUTED_FG
+_COLOR_ACCENT = theme.COLOR_ACCENT
+_COLOR_ACCENT_HOVER = theme.COLOR_ACCENT_HOVER
+_COLOR_ACCENT_FG = theme.COLOR_ACCENT_FG
+_COLOR_SECONDARY = theme.COLOR_SECONDARY
+_COLOR_MUTED = theme.COLOR_MUTED
+_COLOR_BORDER = theme.COLOR_BORDER
+_COLOR_BACKDROP = theme.COLOR_BACKDROP
 
-_RADIUS_PX = 10
-_HEADER_PAD_PX = 24
-_FOOTER_PAD_PX = 20
-_CONTENT_PAD_PX = 24
+_RADIUS_PX = theme.RADIUS_CARD_PX
+_HEADER_PAD_PX = theme.PAD_CONTENT_PX
+_FOOTER_PAD_PX = theme.PAD_COMPACT_PX
+_CONTENT_PAD_PX = theme.PAD_CONTENT_PX
 
 
 class _DrawerBackdrop(QWidget):
@@ -356,7 +360,7 @@ class SettingsDrawer(QFrame):
                     font-weight: 500;
                 }}
                 QPushButton:hover {{
-                    background-color: #C27431;
+                    background-color: {_COLOR_ACCENT_HOVER};
                 }}
             """
         return f"""
