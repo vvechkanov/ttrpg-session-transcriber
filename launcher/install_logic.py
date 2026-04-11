@@ -39,7 +39,28 @@ from urllib.request import Request, urlopen
 # Constants
 # ---------------------------------------------------------------------------
 
-FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+#: FFmpeg build URL. We deliberately use BtbN/FFmpeg-Builds — a GitHub
+#: release hosted on GitHub's global CDN — instead of gyan.dev which
+#: runs on a single author's home server and is slow/unreliable.
+#:
+#: The ``shared`` variant (~70 MB) is half the size of the full static
+#: build because it keeps ``av*.dll`` alongside ``ffmpeg.exe`` instead
+#: of statically linking everything into one 150+ MB binary. We don't
+#: care about single-file portability (we ship a folder anyway), so
+#: shared wins on download size and speed.
+#:
+#: Layout inside the zip matches gyan.dev exactly:
+#:     ffmpeg-n7.1-latest-win64-gpl-shared-7.1/
+#:         bin/ffmpeg.exe + av*.dll
+#:         doc/
+#:         presets/
+#:
+#: so :func:`download_ffmpeg` (which picks the single top-level dir
+#: and moves it into ``dest_dir``) works without code changes.
+FFMPEG_URL = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+    "ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
+)
 
 #: GitHub repository that hosts the release assets (installer EXE +
 #: PySide6 runtime zip). Tag format: ``v{VERSION}``; asset filename:
