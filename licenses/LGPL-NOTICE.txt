@@ -1,0 +1,40 @@
+Session Transcriber — Third-Party Library Notice
+==================================================
+
+This application is built with the PySide6 / Qt 6 framework, which is
+licensed under the GNU Lesser General Public License version 3 (LGPLv3)
+with additional terms where applicable.
+
+  Project: Qt for Python (PySide6)
+  Upstream: https://doc.qt.io/qtforpython/
+  License:  GNU LGPLv3
+            https://www.gnu.org/licenses/lgpl-3.0.html
+  Source:   https://code.qt.io/cgit/pyside/pyside-setup.git/
+
+The Qt dynamic libraries (Qt6Core.dll, Qt6Gui.dll, Qt6Widgets.dll, …)
+are distributed in this application folder as **separate files** that
+you may replace with compatible builds of your own. Because Session
+Transcriber links to Qt dynamically, you are free, under the terms of
+the LGPL, to substitute an alternative build of the Qt libraries and
+re-run the application.
+
+No modifications have been made to the upstream PySide6 / Qt 6 sources.
+
+------------------------------------------------------------------------
+
+Other third-party components that may be bundled or installed at first
+run include:
+
+  * Python 3.11 / 3.12                  — PSF License
+  * faster-whisper                       — MIT
+  * GigaAM-v3 weights                    — Apache-2.0 / MIT-compatible
+  * sherpa-onnx                          — Apache-2.0
+  * PyTorch / torchaudio                 — BSD-3-Clause
+
+ML runtime dependencies (PyTorch, faster-whisper, GigaAM, sherpa-onnx)
+are installed on demand into %APPDATA%\\ttrpg-transcriber and are NOT
+part of this bundle. Their licenses are delivered with those packages
+on first install.
+
+For the full text of each license referenced above, see the upstream
+project links or contact the Session Transcriber maintainers.

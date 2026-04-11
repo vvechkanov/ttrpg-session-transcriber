@@ -224,14 +224,14 @@ else:
 
 (Заполняется по ходу выполнения.)
 
-- [ ] Phase 0 — infrastructure
-- [ ] Phase 1 — `core/ui_contract.py` + `core/ui_registry.py`
-- [ ] Phase 2 — `settings_drawer.py`
-- [ ] Phase 3 — `session_screen.py` idle
-- [ ] Phase 4 — `audio_source_template.py`
-- [ ] Phase 5 — wire GigaAMSource.ui_config
-- [ ] Phase 6 — runtime panel + QThread + signals
-- [ ] Phase 7 — running/done states
-- [ ] Phase 8 — chat/merger/renderer template stubs
-- [ ] Phase 9 — feature parity + retire gui.py
-- [ ] Phase 10 — PyInstaller build
+- [x] Phase 0 — infrastructure
+- [x] Phase 1 — `core/ui_contract.py` + `core/ui_registry.py`
+- [x] Phase 2 — `settings_drawer.py`
+- [x] Phase 3 — `session_screen.py` idle
+- [x] Phase 4 — `audio_source_template.py`
+- [x] Phase 5 — wire GigaAMSource.ui_config
+- [x] Phase 6 — runtime panel + QThread + signals
+- [x] Phase 7 — running/done states
+- [x] Phase 8 — chat/merger/renderer template stubs
+- [x] Phase 9 — feature parity + retire gui.py (now `gui_legacy.py`)
+- [x] Phase 10 — PyInstaller `build.spec` + LGPL notice
