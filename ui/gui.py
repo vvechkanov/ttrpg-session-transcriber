@@ -1,66 +1,27 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Batch-run whisperx on a folder of per-speaker Craig tracks (e.g. *.flac),
-then (optionally) merge produced *.json into a single merged.txt (LLM-friendly).
-
-Typical usage:
-  python wisper_launcher.py .\\games\\bogomols\\11.07.2025 --device cuda --compute_type float16 --hf_token YOUR_TOKEN --merge
-"""
+"""GUI entry point (tkinter). Depends only on core."""
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
+import logging
 import queue
 import subprocess
 import sys
 import threading
 import time
-import warnings
 from pathlib import Path
 
-# Suppress noisy torchcodec / pyannote warnings at import time
-warnings.filterwarnings("ignore", message=".*torchcodec.*")
-warnings.filterwarnings("ignore", message=".*libtorchcodec.*")
-os.environ.setdefault("TORCHAUDIO_NO_BACKEND_CHECK", "1")
+# Tkinter imports are lazy inside gui_main to keep headless CLI working.
+
+from core import PipelineParams, run as core_run
+from core.speaker_map import load_speaker_map as core_load_speaker_map
 
 EXCLUDE_AUDIO_PREFIXES = ("craig",)
 
-# Ensure sibling modules (parse_fvtt_chat) are importable
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def _project_root() -> Path:
-    """Project root = parent of the scripts/ folder that contains this file."""
-    return Path(__file__).resolve().parent.parent
-
-
-def _inject_local_paths_into_env() -> None:
-    """
-    Make the launcher robust even when started not via our .bat wrappers.
-    Ensures:
-    - ffmpeg is discoverable  (<project_root>/tools/ffmpeg/bin)
-    - whisperx.exe is discoverable (<project_root>/venv/Scripts)
-    - PYTHONIOENCODING=utf-8 so Cyrillic output doesn't crash on Windows
-    """
-    root = _project_root()
-
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-
-    parts: list[str] = []
-
-    venv_scripts = root / "venv" / "Scripts"
-    if venv_scripts.is_dir():
-        parts.append(str(venv_scripts))
-
-    ffmpeg_bin = root / "tools" / "ffmpeg" / "bin"
-    if ffmpeg_bin.is_dir():
-        parts.append(str(ffmpeg_bin))
-
-    if parts:
-        os.environ["PATH"] = ";".join(parts + [os.environ.get("PATH", "")])
+    """Project root = parent of the ui/ folder that contains this file."""
+    return Path(__file__).resolve().parents[1]
 
 
 def _scan_audio_files(session_dir: Path, pattern: str = "*.flac") -> list[str]:
@@ -84,8 +45,12 @@ def _find_speaker_map(session_dir: Path) -> Path | None:
     return None
 
 
-def _load_speaker_map(path: Path) -> dict:
-    """Load speaker_map.json, return empty dict on failure."""
+def _load_speaker_map_raw(path: Path) -> dict:
+    """Load speaker_map.json, return empty dict on failure.
+
+    Returns the NESTED dict (stem -> {player, character, role}), not the flat
+    mapping produced by ``core.speaker_map.load_speaker_map``.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
@@ -101,136 +66,19 @@ def _save_speaker_map(data: dict, path: Path) -> None:
     )
 
 
-def run(cmd: list[str], *, dry_run: bool = False) -> None:
-    printable = " ".join([str(c) for c in cmd])
-    print(">>", printable)
-    if dry_run:
-        return
-    subprocess.run(cmd, check=True)
+class _QueueLogHandler(logging.Handler):
+    """Piping logging.LogRecord into the GUI log widget queue."""
 
+    def __init__(self, q: "queue.Queue[str]") -> None:
+        super().__init__(level=logging.INFO)
+        self.queue = q
+        self.setFormatter(logging.Formatter("%(message)s"))
 
-def main() -> int:
-    _inject_local_paths_into_env()
-    # Double-click UX: no args -> small UI to choose a folder and run.
-    if len(sys.argv) == 1:
-        return gui_main()
-
-    ap = argparse.ArgumentParser(prog="wisper_launcher.py")
-    ap.add_argument("session_dir", help="Folder with Craig per-speaker audio tracks (flac/wav/mp3)")
-    ap.add_argument("--pattern", default="*.flac", help="Which audio files to process (default: *.flac)")
-
-    ap.add_argument("--model", default="large-v3")
-    ap.add_argument("--language", default="ru")
-    ap.add_argument("--device", default=None, help="e.g. cuda / cpu (default: whisperx default)")
-    ap.add_argument("--compute_type", default=None, help="e.g. float16 / int8 (default: whisperx default)")
-    ap.add_argument("--beam_size", type=int, default=10, help="Beam size for decoding (default: 10)")
-    ap.add_argument("--vad_method", default="silero", choices=["pyannote", "silero"], help="VAD method (default: silero)")
-    ap.add_argument("--hf_token", default=None, help="HuggingFace token (needed for diarization)")
-    ap.add_argument("--diarize", action="store_true", help="Enable whisperx diarization")
-
-    ap.add_argument("--output_dir", default=None, help="Where to write whisperx outputs (default: session_dir)")
-    ap.add_argument("--merge", action="store_true", help="After transcription, run merge_whisperx.py")
-    ap.add_argument("--merge_only", action="store_true", help="Skip whisperx and only merge existing json files")
-    ap.add_argument("--chunk", action="store_true", help="After merge, split merged.txt into overlapping chunks")
-    ap.add_argument("--chunk_chars", type=int, default=40000, help="Chunk target size in characters (default: 40000)")
-    ap.add_argument("--chunk_overlap", type=float, default=0.20, help="Chunk overlap ratio (default: 0.20)")
-    ap.add_argument("--dry_run", action="store_true", help="Print commands without executing")
-
-    args = ap.parse_args()
-
-    session_dir = Path(args.session_dir).expanduser().resolve()
-    if not session_dir.exists():
-        print(f">>> session_dir not found: {session_dir}", file=sys.stderr)
-        return 2
-
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else session_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    produced_jsons: list[Path] = []
-
-    if not args.merge_only:
-        audio_files = [
-            p
-            for p in sorted(session_dir.glob(args.pattern))
-            if not any(p.stem.lower() == x or p.stem.lower().startswith(x + "-") for x in EXCLUDE_AUDIO_PREFIXES)
-        ]
-        if not audio_files:
-            print(f">>> No files matched: {session_dir}\\{args.pattern} (excluding: {EXCLUDE_AUDIO_PREFIXES})", file=sys.stderr)
-            return 2
-
-        for audio in audio_files:
-            cmd: list[str] = ["whisperx", str(audio)]
-            cmd += ["--model", args.model]
-            cmd += ["--language", args.language]
-            cmd += ["--output_dir", str(output_dir)]
-            cmd += ["--vad_method", args.vad_method]
-
-            if args.device:
-                cmd += ["--device", args.device]
-            if args.compute_type:
-                cmd += ["--compute_type", args.compute_type]
-            if args.beam_size:
-                cmd += ["--beam_size", str(args.beam_size)]
-            if args.diarize:
-                cmd += ["--diarize"]
-            if args.hf_token:
-                cmd += ["--hf_token", args.hf_token]
-
-            run(cmd, dry_run=args.dry_run)
-
-            # whisperx writes "<stem>.json" in output_dir by default
-            produced = output_dir / f"{audio.stem}.json"
-            if args.dry_run:
-                produced_jsons.append(produced)
-            elif produced.exists():
-                produced_jsons.append(produced)
-            else:
-                # don't fail hard: whisperx might be configured differently; we'll fallback to scanning later
-                print(f">>> warning: expected json not found yet: {produced}")
-
-    if args.merge:
-        merge_script = (Path(__file__).resolve().parent / "merge_whisperx.py").resolve()
-        if not merge_script.exists():
-            print(f">>> merge script not found: {merge_script}", file=sys.stderr)
-            return 2
-
-        jsons = produced_jsons or sorted(output_dir.glob("*.json"))
-        if not jsons:
-            print(f">>> no json files found in: {output_dir}", file=sys.stderr)
-            return 2
-
-        # Run merge in output_dir so merged.md / merged.srt land there
-        cmd = [sys.executable, str(merge_script), *[str(p) for p in jsons]]
-        print(f"\n== Merging {len(jsons)} transcripts into {output_dir}\\merged.txt")
-        if args.dry_run:
-            print(">> (cwd)", str(output_dir))
-            print(">>", " ".join(cmd))
-        else:
-            subprocess.run(cmd, cwd=str(output_dir), check=True)
-
-        if args.chunk:
-            chunk_script = (Path(__file__).resolve().parent / "chunk_text.py").resolve()
-            merged_txt = output_dir / "merged.txt"
-            if not merged_txt.exists():
-                print(f">>> merged.txt not found for chunking: {merged_txt}", file=sys.stderr)
-                return 2
-            chunk_cmd = [
-                sys.executable,
-                str(chunk_script),
-                str(merged_txt),
-                "--chunk_chars",
-                str(args.chunk_chars),
-                "--overlap",
-                str(args.chunk_overlap),
-            ]
-            print(f"\n== Chunking merged.txt into: {output_dir}\\chunks")
-            if args.dry_run:
-                print(">> (cwd)", str(output_dir))
-                print(">>", " ".join(chunk_cmd))
-            else:
-                subprocess.run(chunk_cmd, cwd=str(output_dir), check=True)
-
-    return 0
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put(self.format(record))
+        except Exception:
+            pass
 
 
 def _detect_gpu() -> dict:
@@ -318,7 +166,6 @@ def gui_main() -> int:
 
     session_var = tk.StringVar(value="")
     status_var = tk.StringVar(value="Выберите папку сессии (где лежат *.flac).")
-    merge_only_var = tk.BooleanVar(value=False)
     chunk_var = tk.BooleanVar(value=True)
     chunk_chars_var = tk.StringVar(value="40000")
     chunk_overlap_var = tk.StringVar(value="0.20")
@@ -450,7 +297,7 @@ def gui_main() -> int:
     def _on_folder_changed(session_dir: Path) -> None:
         stems = _scan_audio_files(session_dir)
         map_path = _find_speaker_map(session_dir)
-        smap = _load_speaker_map(map_path) if map_path else {}
+        smap = _load_speaker_map_raw(map_path) if map_path else {}
         if map_path:
             loc = "папки сессии" if map_path.parent.resolve() == session_dir.resolve() else "папки проекта"
             speaker_status_var.set(f"Загружен из {loc}")
@@ -469,12 +316,8 @@ def gui_main() -> int:
             # Auto-detect timezone if info.txt is available
             if info_path.exists():
                 try:
-                    from parse_fvtt_chat import (
-                        parse_fvtt_log, parse_info_start_time, guess_tz_offset,
-                    )
-                    entries = parse_fvtt_log(fvtt_logs[0])
-                    rec_start = parse_info_start_time(info_path)
-                    tz = guess_tz_offset(entries, rec_start)
+                    from core.fvtt_helpers import detect_fvtt_tz_offset
+                    tz = detect_fvtt_tz_offset(fvtt_logs[0], info_path)
                     chat_tz_var.set(str(int(tz)))
                 except Exception:
                     chat_tz_var.set("auto")
@@ -495,7 +338,7 @@ def gui_main() -> int:
             filetypes=[("JSON", "*.json"), ("All files", "*.*")],
         )
         if f:
-            smap = _load_speaker_map(Path(f))
+            smap = _load_speaker_map_raw(Path(f))
             if not smap:
                 messagebox.showwarning("Пусто", "Файл пуст или повреждён.")
                 return
@@ -510,7 +353,7 @@ def gui_main() -> int:
             return
         save_path = _project_root() / "speaker_map.json"
         # Merge with existing data to preserve entries for absent players
-        existing = _load_speaker_map(save_path) if save_path.exists() else {}
+        existing = _load_speaker_map_raw(save_path) if save_path.exists() else {}
         existing.update(data)
         _save_speaker_map(existing, save_path)
         speaker_status_var.set(f"Сохранён: {save_path.name}")
@@ -535,7 +378,7 @@ def gui_main() -> int:
         speaker_data = _collect_speaker_data()
         if speaker_data:
             save_path = _project_root() / "speaker_map.json"
-            existing = _load_speaker_map(save_path) if save_path.exists() else {}
+            existing = _load_speaker_map_raw(save_path) if save_path.exists() else {}
             existing.update(speaker_data)
             _save_speaker_map(existing, save_path)
             log(f"Speaker map сохранён: {save_path}")
@@ -543,7 +386,6 @@ def gui_main() -> int:
         # Snapshot all UI values before spawning thread (tkinter is not thread-safe)
         params = {
             "session_dir": session_dir,
-            "merge_only": merge_only_var.get(),
             "model": model_var.get().strip() or "large-v3",
             "device": device_var.get().strip() or "cuda",
             "compute_type": compute_type_var.get().strip() or "float16",
@@ -590,131 +432,83 @@ def gui_main() -> int:
             root.after(0, lambda: btn_start.config(state="normal", text="▶ Запустить"))
 
     def _do_pipeline(p: dict) -> None:
-        """Actual pipeline logic (called from worker thread)."""
+        """Actual pipeline logic (called from worker thread).
+
+        Calls core.run() with a logging handler piping core.*/sources.*/
+        mergers.*/renderers.* records into the GUI log widget queue.
+        """
         session_dir = p["session_dir"]
-        output_dir = session_dir
-        merge_script = (Path(__file__).resolve().parent / "merge_whisperx.py").resolve()
 
-        jsons = sorted(output_dir.glob("*.json"))
-        need_whisperx = not p["merge_only"] and len(jsons) == 0
+        # Chat log auto-detection happens inside core.pipeline.run() via
+        # core.discovery.find_fvtt_chat_log. GUI's chat_log_enabled/
+        # chat_log_path/chat_tz_offset are ignored in P2.7 — log an info
+        # line if the user set them so they know why.
+        if p.get("chat_log_enabled"):
+            log("ℹ️ Chat log auto-detected by core.discovery — GUI tz override ignored in P2.7")
 
-        if need_whisperx:
-            audio_files = [
-                af for af in sorted(session_dir.glob("*.flac"))
-                if not any(af.stem.lower() == x or af.stem.lower().startswith(x + "-")
-                           for x in EXCLUDE_AUDIO_PREFIXES)
-            ]
-            if not audio_files:
-                raise RuntimeError("В папке нет *.flac (или всё исключено как craig*).")
+        params = PipelineParams(
+            speech_backend="faster-whisper",  # GUI defaults to faster-whisper; P3 will add a backend picker
+            model=p["model"],
+            device=p["device"],
+            compute_type=p["compute_type"],
+            language="ru",
+            beam_size=p["beam_size"],
+            speaker_map=core_load_speaker_map(session_dir) or None,
+        )
 
-            device = p["device"]
-            model = p["model"]
-            compute_type = p["compute_type"]
-            beam_size = p["beam_size"]
+        _set_status("Обработка сессии…")
+        log(f"\n{'═' * 50}")
+        log(f"== Устройство: {params.device.upper()}  |  model: {params.model}"
+            f"  |  compute: {params.compute_type}  |  beam: {params.beam_size}")
+        log(f"{'═' * 50}")
 
-            # ── GPU pre-flight check ──────────────────────────────────
-            if device == "cuda":
-                _set_status("Проверка GPU…")
-                log("\n🔍 Проверка GPU перед запуском…")
-                ok, msg = _quick_cuda_test()
-                if ok:
-                    log(f"   ✓ {msg}")
-                else:
-                    log(f"   ⚠️ {msg}")
-                    log("   ⚠️ Переключаюсь на CPU!")
-                    device = "cpu"
+        # Install logging handler for real-time log streaming from core.
+        handler = _QueueLogHandler(_log_queue)
+        core_logger = logging.getLogger("core")
+        sources_logger = logging.getLogger("sources")
+        mergers_logger = logging.getLogger("mergers")
+        renderers_logger = logging.getLogger("renderers")
+        all_loggers = (core_logger, sources_logger, mergers_logger, renderers_logger)
+        prior_levels: dict[logging.Logger, int] = {}
+        for lg in all_loggers:
+            prior_levels[lg] = lg.level
+            lg.setLevel(logging.INFO)
+            lg.addHandler(handler)
 
-            log(f"\n{'═' * 50}")
-            log(f"== Устройство: {device.upper()}  |  model: {model}"
-                f"  |  compute: {compute_type}  |  beam: {beam_size}")
-            log(f"== Файлов: {len(audio_files)}")
-            log(f"{'═' * 50}")
+        t_pipeline = time.time()
+        try:
+            core_run(session_dir, params)
+        finally:
+            for lg in all_loggers:
+                lg.removeHandler(handler)
+                lg.setLevel(prior_levels[lg])
+        log(f"   ✓ core.run() готов за {_fmt_elapsed(time.time() - t_pipeline)}")
 
-            total_files = len(audio_files)
-            _set_progress(0, total_files)
-            gpu_confirmed = False
-            for idx, audio in enumerate(audio_files, 1):
-                t_file = time.time()
-                prefix = f"[{idx}/{total_files}] {audio.stem}"
-                _set_status(f"{prefix} — запуск…")
-                log(f"\n[{idx}/{total_files}] 🎙 {audio.name}")
-
-                cmd = [
-                    "whisperx", str(audio),
-                    "--model", model,
-                    "--language", "ru",
-                    "--output_dir", str(output_dir),
-                    "--vad_method", "silero",
-                    "--device", device,
-                    "--compute_type", compute_type,
-                    "--beam_size", str(beam_size),
-                ]
-                output = run_and_stream(cmd, cwd=output_dir,
-                                        status_prefix=prefix)
-
-                # ── Parse GPU markers from whisperx output ────────
-                low = output.lower()
-                if "cuda" in low or "gpu" in low:
-                    gpu_confirmed = True
-                if device == "cuda" and ("using cpu" in low or "fallback" in low):
-                    log("   ⚠️ WhisperX сообщает о работе на CPU!")
-
-                elapsed = _fmt_elapsed(time.time() - t_file)
-                log(f"   ✓ Готово за {elapsed}")
-                _set_progress(idx, total_files)
-
-            # ── Post-transcription GPU summary ────────────────────
-            if device == "cuda":
-                if gpu_confirmed:
-                    log("\n✓ GPU использовался при транскрипции")
-                else:
-                    log("\n⚠️ Не удалось подтвердить использование GPU"
-                        " (WhisperX не вывел маркеров cuda/gpu)")
-
-        # ── Merge ─────────────────────────────────────────────────
-        jsons = sorted(output_dir.glob("*.json"))
-        if not jsons:
-            raise RuntimeError("Не найдено ни одного *.json для склейки.")
-
-        chat_label = ""
-        if p.get("chat_log_enabled") and p.get("chat_log_path"):
-            chat_label = " + чат FVTT"
-        _set_status(f"Склейка {len(jsons)} JSON{chat_label} → merged.txt…")
-        log(f"\n== Склейка {len(jsons)} JSON{chat_label} → merged.txt")
-        t_merge = time.time()
-        cmd = [sys.executable, str(merge_script), *[str(j) for j in jsons]]
-        if p.get("chat_log_enabled") and p.get("chat_log_path"):
-            cmd += ["--chat_log", p["chat_log_path"]]
-            info_path = Path(p["session_dir"]) / "info.txt"
-            if info_path.exists():
-                cmd += ["--info_file", str(info_path)]
-            tz_val = p.get("chat_tz_offset", "auto")
-            if tz_val and tz_val != "auto":
-                # Parse "UTC+3" or raw number
-                tz_str = str(tz_val).replace("UTC", "").replace("+", "")
-                try:
-                    cmd += ["--tz_offset", str(float(tz_str))]
-                except ValueError:
-                    pass  # auto-detect in merge script
-        run_and_stream(cmd, cwd=output_dir)
-        log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_merge)}")
-
-        # ── Chunk ─────────────────────────────────────────────────
-        if p["do_chunk"]:
-            chunk_script = (Path(__file__).resolve().parent / "chunk_text.py").resolve()
-            merged_txt = output_dir / "merged.txt"
+        # ── Chunk post-step (unchanged from legacy) ───────────────
+        if p.get("do_chunk"):
+            chunk_script = (
+                Path(__file__).resolve().parents[1] / "scripts" / "chunk_text.py"
+            )
+            merged_txt = session_dir / "merged.txt"
             if not merged_txt.exists():
                 raise RuntimeError("После склейки не найден merged.txt")
+            if not chunk_script.exists():
+                log(f"⚠️ chunk_text.py not found at {chunk_script}, пропускаю нарезку")
+                return
 
             _set_status("Нарезка на чанки…")
             log("\n== Нарезка на чанки")
             t_chunk = time.time()
             chunk_cmd = [
-                sys.executable, str(chunk_script), str(merged_txt),
-                "--chunk_chars", str(p["chunk_chars"]),
-                "--overlap", str(p["chunk_overlap"]),
+                sys.executable,
+                str(chunk_script),
+                str(merged_txt),
+                "--chunk_chars",
+                str(p["chunk_chars"]),
+                "--overlap",
+                str(p["chunk_overlap"]),
             ]
-            run_and_stream(chunk_cmd, cwd=output_dir)
+            run_and_stream(chunk_cmd, cwd=session_dir)
             log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_chunk)}")
 
     # ── Theme / colours ──────────────────────────────────────────────────
@@ -890,11 +684,6 @@ def gui_main() -> int:
     ttk.Button(device_row, text="Перепроверить", command=_recheck_gpu,
                style="Link.TButton").pack(side="left", padx=10)
 
-    # ── Options ───────────────────────────────────────────────────────────
-
-    ttk.Checkbutton(frm, text="Только склейка (json уже есть)",
-                    variable=merge_only_var).pack(anchor="w", pady=(10, 0))
-
     # ── FVTT Chat Log section ──────────────────────────────────────────
     chat_lf = ttk.LabelFrame(frm, text="Лог из чата (FVTT)")
     chat_lf.pack(fill="x", pady=(8, 0))
@@ -997,7 +786,3 @@ def gui_main() -> int:
 
     root.mainloop()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

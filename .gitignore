@@ -22,3 +22,9 @@ launcher/*.zip
 
 # PyInstaller
 *.spec.bak
+
+# E2E fixture generation artifacts (canonical baseline is expected_merged.txt)
+tests/fixtures/e2e_p2/session/merged.txt
+tests/fixtures/e2e_p2/session/transcripts/
+tests/fixtures/e2e_p2/session/merged_tier2_test.txt
+tests/fixtures/e2e_p2/session/merged_tier2_format_test.txt

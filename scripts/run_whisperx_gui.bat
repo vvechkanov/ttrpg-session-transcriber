@@ -7,8 +7,8 @@ REM ── Self-contained WhisperX GUI launcher ──
 REM Project root = parent of this scripts\ folder.
 for %%A in ("%~dp0..") do set "ROOT=%%~fA"
 
-if not exist "%ROOT%\scripts\wisper_launcher.py" (
-  echo ERROR: wisper_launcher.py not found at %ROOT%\scripts\
+if not exist "%ROOT%\ui\__main__.py" (
+  echo ERROR: ui package not found at %ROOT%\ui\
   echo Did you move this .bat out of the scripts\ folder?
   pause
   exit /b 2
@@ -42,7 +42,9 @@ set "LOG=%ROOT%\_run_whisperx_gui.log"
 del "%LOG%" >nul 2>nul
 
 REM Launch the GUI; log output for debugging
-"%PYW%" "%ROOT%\scripts\wisper_launcher.py" > "%LOG%" 2>&1
+pushd "%ROOT%"
+"%PYW%" -m ui > "%LOG%" 2>&1
+popd
 if errorlevel 1 (
   echo.
   echo ERROR: WhisperX launcher failed. Log:

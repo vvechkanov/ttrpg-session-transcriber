@@ -71,15 +71,26 @@ for dll_dir in ['DLLs']:
 
 # --- Collect data files ---
 
-datas = [
-    # Scripts
-    (os.path.join(project_root, 'scripts', '*.py'), 'scripts'),
-    # Prompts
-    (os.path.join(project_root, 'prompts', '*.md'), 'prompts'),
-    # Python embeddable package (must be placed manually before building)
-    (os.path.join(SPECPATH, 'python-3.12.8-embed-amd64.zip'),
-     os.path.join('runtime')),
-]
+_RUNTIME_PACKAGES = ('ui', 'core', 'sources', 'mergers', 'renderers', 'domain')
+
+datas = []
+for pkg in _RUNTIME_PACKAGES:
+    # Recursive glob so subpackages like sources/speech, sources/game_log are included
+    pkg_root = os.path.join(project_root, pkg)
+    if os.path.isdir(pkg_root):
+        for dirpath, _dirnames, filenames in os.walk(pkg_root):
+            rel = os.path.relpath(dirpath, project_root)
+            py_files = [os.path.join(dirpath, f) for f in filenames if f.endswith('.py')]
+            for src in py_files:
+                datas.append((src, rel))
+
+# Non-package files (scripts, prompts, runtime zip)
+datas.append((os.path.join(project_root, 'scripts', '*.py'), 'scripts'))
+datas.append((os.path.join(project_root, 'prompts', '*.md'), 'prompts'))
+datas.append((
+    os.path.join(SPECPATH, 'python-3.12.8-embed-amd64.zip'),
+    os.path.join('runtime'),
+))
 
 # Add tkinter files
 datas.extend(tkinter_data)
