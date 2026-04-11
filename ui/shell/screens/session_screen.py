@@ -379,6 +379,8 @@ class SessionScreen(QWidget):
         cards_row.setSpacing(theme.GAP_MEDIUM_PX)
 
         # В Phase 3 SourceCard хранит фикстуру; индекс идёт из enumerate.
+        # Phase 7: trackable list so update_stage can drive per-card state.
+        self._source_cards: list[SourceCard] = []
         for idx, card_data in enumerate(self._data.sources):
             icon_glyph = "🎙" if "удио" in card_data.title else "💬"
             card = SourceCard(
@@ -390,6 +392,7 @@ class SessionScreen(QWidget):
                 lambda i=idx: self.source_configure_requested.emit(i)
             )
             cards_row.addWidget(card, stretch=1)
+            self._source_cards.append(card)
 
         # Dashed-placeholder «+»
         placeholder = AddSourcePlaceholder(parent=block)
@@ -651,11 +654,13 @@ class SessionScreen(QWidget):
     # ── Public state transitions (Phase 6+) ───────────────────────────
 
     def set_state_idle(self) -> None:
-        """Return block 3 to the idle placeholder."""
+        """Return block 3 to the idle placeholder and clear card states."""
         self._stack.setCurrentIndex(0)
         self._run_button.setText("▶  Запустить обработку")
         self._run_button.setEnabled(True)
         self._run_button.setStyleSheet(self._run_button_style(running=False))
+        for card in self._source_cards:
+            card.set_visual_state("idle")
 
     def set_state_running(self) -> None:
         """Switch block 3 into the running state and reset progress."""
@@ -666,11 +671,16 @@ class SessionScreen(QWidget):
         self._run_button.setText("● Идёт обработка…")
         self._run_button.setEnabled(False)
         self._run_button.setStyleSheet(self._run_button_style(running=True))
+        # Every source card dims to idle until its specific stage fires.
+        for card in self._source_cards:
+            card.set_visual_state("idle")
 
     def update_stage(self, stage: str, message: str = "") -> None:
         """Update running panel for a pipeline stage event.
 
-        Host wires ``RunController.stage`` → this slot.
+        Host wires ``RunController.stage`` → this slot. Also drives
+        per-card visual state: ``speech`` highlights the audio card,
+        ``chat`` highlights the chat card, ``done`` marks both as done.
         """
         if stage not in _STAGE_ORDER:
             return
@@ -681,6 +691,32 @@ class SessionScreen(QWidget):
         self._stage_label.setText(_STAGE_LABELS.get(stage, stage))
         self._stage_message.setText(message)
 
+        # Card-level highlighting (Phase 7). Mapping is heuristic: the
+        # first "аудио"-titled card is the speech source; the first
+        # "чат"/"chat"-titled card is the game-log source. When there
+        # are multiple, the first match wins. Mismatches silently
+        # fall through — pipeline progress is still visible in block 3.
+        if stage == "speech":
+            self._mark_card("аудио", "running")
+        elif stage == "chat":
+            if message and message != "no chat log":
+                self._mark_card("чат", "running")
+        elif stage == "merge":
+            self._mark_card("аудио", "done")
+            self._mark_card("чат", "done")
+        elif stage == "done":
+            for card in self._source_cards:
+                card.set_visual_state("done")
+
+    def _mark_card(self, title_fragment: str, state: str) -> None:
+        """Find the first card whose title contains ``title_fragment``
+        (case-insensitive) and switch it into the given visual state."""
+        needle = title_fragment.lower()
+        for card in self._source_cards:
+            if needle in card._data.title.lower():  # noqa: SLF001
+                card.set_visual_state(state)  # type: ignore[arg-type]
+                return
+
     def set_state_done(self, output_path: str) -> None:
         """Switch block 3 to the terminal success page."""
         self._stack.setCurrentIndex(2)
@@ -689,6 +725,8 @@ class SessionScreen(QWidget):
         self._run_button.setText("↻  Запустить снова")
         self._run_button.setEnabled(True)
         self._run_button.setStyleSheet(self._run_button_style(running=False))
+        for card in self._source_cards:
+            card.set_visual_state("done")
 
     def set_state_failed(self, error_text: str) -> None:
         """Switch block 3 to the terminal failure page (reuses done page)."""
@@ -698,6 +736,8 @@ class SessionScreen(QWidget):
         self._run_button.setText("↻  Попробовать снова")
         self._run_button.setEnabled(True)
         self._run_button.setStyleSheet(self._run_button_style(running=False))
+        for card in self._source_cards:
+            card.set_visual_state("error", message="● прервано")
 
     @staticmethod
     def _run_button_style(*, running: bool) -> str:

@@ -258,3 +258,74 @@ class TestProcessingStates:
         screen.set_state_idle()
         assert screen._stack.currentIndex() == 0  # noqa: SLF001
         assert screen._run_button.isEnabled()  # noqa: SLF001
+
+
+# ── Phase 7: per-card highlighting from stage events ────────────────
+
+
+def _mixed_source_data() -> SessionScreenData:
+    """Fixture with one audio + one chat source, matching real sessions."""
+    return SessionScreenData(
+        project_name="Foo",
+        session_name="Bar",
+        sources=(
+            SourceCardData(title="Аудио", subtitle="gigaam", files=("1.flac",)),
+            SourceCardData(title="Foundry VTT чат", subtitle="", files=("c.db",)),
+        ),
+    )
+
+
+@pytest.mark.gui
+class TestPerCardStates:
+    def test_speech_stage_highlights_audio_card(self, qtbot):
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("speech", "gigaam")
+
+        audio_card = screen._source_cards[0]  # noqa: SLF001
+        chat_card = screen._source_cards[1]  # noqa: SLF001
+        assert audio_card.visual_state == "running"
+        assert chat_card.visual_state == "idle"
+
+    def test_chat_stage_highlights_chat_card(self, qtbot):
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("chat", "chat-log.db")
+
+        assert screen._source_cards[1].visual_state == "running"  # noqa: SLF001
+
+    def test_chat_stage_no_chat_log_does_not_highlight(self, qtbot):
+        """Pipeline emits chat/"no chat log" when there's no chat file."""
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("chat", "no chat log")
+
+        assert screen._source_cards[1].visual_state == "idle"  # noqa: SLF001
+
+    def test_done_stage_marks_all_cards_done(self, qtbot):
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("done", "merged.txt")
+
+        for card in screen._source_cards:  # noqa: SLF001
+            assert card.visual_state == "done"
+
+    def test_failed_marks_all_cards_error(self, qtbot):
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_failed("boom")
+        for card in screen._source_cards:  # noqa: SLF001
+            assert card.visual_state == "error"
+
+    def test_set_state_idle_clears_card_states(self, qtbot):
+        screen = SessionScreen(_mixed_source_data())
+        qtbot.addWidget(screen)
+        screen.set_state_running()
+        screen.update_stage("speech", "gigaam")
+        screen.set_state_idle()
+        for card in screen._source_cards:  # noqa: SLF001
+            assert card.visual_state == "idle"

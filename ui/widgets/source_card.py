@@ -1,20 +1,20 @@
-"""SourceCard — идентичная Figma v1 карточка источника для блока 1
-Session Detail.
+"""SourceCard — Figma v1 карточка источника для блока 1 Session Detail.
 
-Phase 3 scope (см. ADR-017 / ui-qt-migration §Phase 3): **только idle
-состояние**. Running/done состояния (подсветка accent-рамкой, статус
-``в работе``, ``dimmed``) добавятся в Phase 6-7 отдельным PR, когда
-появятся реальные сигналы прогресса.
+Phase 3 landed the idle state; Phase 7 adds **visual running / done /
+failed** states driven by :meth:`SourceCard.set_visual_state`. The card
+stays presentational — the host (``SessionScreen``) decides which card
+is "live" based on ``RunController`` stage events and calls
+``set_visual_state("running"/"done"/"error")``.
 
-Карточка — чисто презентационная: никаких сигналов в реальные модули,
-никакого бэкенда. Данные приходят через конструктор, кнопка
-``[Настроить]`` эмитит ``configure_clicked``. Хост (``SessionScreen``)
-решает, что с этим делать — в Phase 3 пока что просто логирует, а в
-Phase 4 начнёт открывать ``SettingsDrawer`` с реальным темплейтом.
+Visual semantics (matches Figma v1 §Screen 3 running state):
+    * ``idle``    — default border, chip = status_text;
+    * ``running`` — accent-coloured border, chip = "в работе";
+    * ``done``    — success-coloured border, chip = "готово";
+    * ``error``   — error-coloured border, chip = error message.
 
-Не путать со «stub panel»: ``_demo_stub_panel.py`` — это форма внутри
-drawer'а, а ``SourceCard`` — это карточка на главном экране. Разные
-паттерны, разный lifecycle.
+The data payload (:class:`SourceCardData`) is unchanged for phase 3
+compatibility — ``status`` still controls the idle chip. Visual state
+is orthogonal and stored in the widget, not in the dataclass.
 """
 
 from __future__ import annotations
@@ -38,9 +38,16 @@ from ui.shell import theme
 
 #: Статус карточки — определяет цвет и текст чипа справа внизу.
 #: ``ready`` → зелёный «готов», ``warning`` → жёлтый «нужны файлы»,
-#: ``error`` → красный «ошибка». Running/running-подсветка добавятся
-#: в Phase 6-7 отдельным типом ``running``.
+#: ``error`` → красный «ошибка».
 CardStatus = Literal["ready", "warning", "error"]
+
+#: Визуальное состояние карточки при рантайме pipeline (Phase 7).
+#: Хост вызывает :meth:`SourceCard.set_visual_state` при получении
+#: stage-событий от ``RunController``: когда источник активно
+#: обрабатывается — ``running``; когда успех — ``done``; ошибка —
+#: ``error``. ``idle`` возвращает карточку к презентации из
+#: ``SourceCardData.status``.
+CardVisualState = Literal["idle", "running", "done", "error"]
 
 
 @dataclass(frozen=True)
@@ -100,9 +107,10 @@ class SourceCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self._data = data
+        self._visual_state: CardVisualState = "idle"
 
         self.setObjectName("sourceCard")
-        self.setStyleSheet(self._card_stylesheet())
+        self.setStyleSheet(self._card_stylesheet("idle"))
         self.setFrameShape(QFrame.Shape.NoFrame)
         self._apply_drop_shadow()
 
@@ -189,9 +197,9 @@ class SourceCard(QFrame):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(theme.GAP_SMALL_PX)
 
-        chip = QLabel(f"● {self._data.status_text}", self)
-        chip.setStyleSheet(self._chip_stylesheet(self._data.status))
-        row.addWidget(chip)
+        self._status_chip = QLabel(f"● {self._data.status_text}", self)
+        self._status_chip.setStyleSheet(self._chip_stylesheet(self._data.status))
+        row.addWidget(self._status_chip)
         row.addStretch(1)
 
         self._configure_button = QPushButton("Настроить", self)
@@ -203,14 +211,72 @@ class SourceCard(QFrame):
 
         return row
 
+    # ── Runtime state (Phase 7) ────────────────────────────────────────
+
+    @property
+    def visual_state(self) -> CardVisualState:
+        """Current runtime visual state (see :data:`CardVisualState`)."""
+        return self._visual_state
+
+    def set_visual_state(
+        self,
+        state: CardVisualState,
+        *,
+        message: str | None = None,
+    ) -> None:
+        """Switch the card's runtime visualisation.
+
+        Args:
+            state: one of ``idle`` / ``running`` / ``done`` / ``error``.
+            message: optional override for the status chip text. When
+                ``None``, the chip falls back to a sensible default
+                (``"в работе"`` / ``"готово"`` / ``"ошибка"``) or the
+                idle ``SourceCardData.status_text``.
+        """
+        self._visual_state = state
+        self.setStyleSheet(self._card_stylesheet(state))
+
+        chip_text, chip_style_state = self._chip_for_state(state, message)
+        self._status_chip.setText(chip_text)
+        self._status_chip.setStyleSheet(
+            self._chip_stylesheet_for_visual(chip_style_state)
+        )
+
+    def _chip_for_state(
+        self, state: CardVisualState, message: str | None
+    ) -> tuple[str, str]:
+        """Resolve (chip_text, style_status) for the given visual state."""
+        if state == "running":
+            return (message or "● в работе", "running")
+        if state == "done":
+            return (message or "● готово", "success")
+        if state == "error":
+            return (message or "● ошибка", "error")
+        # idle — fall back to the dataclass status
+        return (f"● {self._data.status_text}", self._data.status)
+
     # ── Styling ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _card_stylesheet() -> str:
+    def _card_stylesheet(state: CardVisualState = "idle") -> str:
+        # Outer border colour changes by state; everything else stays
+        # the same so the card silhouette doesn't jitter.
+        if state == "running":
+            border = theme.COLOR_ACCENT
+            border_width = "2px"
+        elif state == "done":
+            border = theme.COLOR_SUCCESS
+            border_width = "2px"
+        elif state == "error":
+            border = "#B93834"
+            border_width = "2px"
+        else:
+            border = theme.COLOR_BORDER
+            border_width = "1px"
         return f"""
             QFrame#sourceCard {{
                 background-color: {theme.COLOR_CARD};
-                border: 1px solid {theme.COLOR_BORDER};
+                border: {border_width} solid {border};
                 border-radius: {theme.RADIUS_CARD_PX}px;
             }}
         """
@@ -226,6 +292,34 @@ class SourceCard(QFrame):
             bg = "rgba(185, 56, 52, 0.12)"
             fg = "#B93834"
         else:
+            bg = "rgba(90, 138, 62, 0.12)"
+            fg = theme.COLOR_SUCCESS
+        return (
+            f"QLabel {{"
+            f" color: {fg};"
+            f" background-color: {bg};"
+            f" border-radius: {theme.RADIUS_CHIP_PX}px;"
+            f" padding: 4px 10px;"
+            f" font-size: {theme.FONT_SIZE_MICRO_PX}px;"
+            f" }}"
+        )
+
+    @staticmethod
+    def _chip_stylesheet_for_visual(status: str) -> str:
+        """Extended chip palette covering runtime states (Phase 7)."""
+        if status == "running":
+            bg = "rgba(212, 132, 59, 0.14)"
+            fg = theme.COLOR_ACCENT
+        elif status == "success":
+            bg = "rgba(90, 138, 62, 0.14)"
+            fg = theme.COLOR_SUCCESS
+        elif status == "error":
+            bg = "rgba(185, 56, 52, 0.14)"
+            fg = "#B93834"
+        elif status == "warning":
+            bg = "rgba(217, 156, 49, 0.12)"
+            fg = "#A06A1A"
+        else:  # "ready" or any CardStatus
             bg = "rgba(90, 138, 62, 0.12)"
             fg = theme.COLOR_SUCCESS
         return (
