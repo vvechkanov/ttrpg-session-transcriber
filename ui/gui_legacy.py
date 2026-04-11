@@ -1,4 +1,15 @@
-"""GUI entry point (tkinter). Depends only on core."""
+"""DEPRECATED legacy tkinter GUI entry point.
+
+This module is preserved as a read-only backup of the pre-ADR-017 tkinter
+UI during the PySide6 migration cut-over. It is **no longer imported** by
+``ui.__init__`` and will be deleted once the PySide6 shell
+(:mod:`ui.shell.app`) has proven itself in production (targeted: 1-2
+releases after v2.0). Do not add new code here.
+
+To launch the current UI:
+
+    python -m ui.shell.app
+"""
 
 from __future__ import annotations
 

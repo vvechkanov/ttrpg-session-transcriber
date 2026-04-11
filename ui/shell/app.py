@@ -1,13 +1,11 @@
 """PySide6 entry point for Session Transcriber.
 
-This is the main host for the Qt migration (ADR-017). By Phase 6 it
-wires the :class:`SessionScreen` central widget to a real
-:class:`RunController` that launches ``core.pipeline.run`` in a
-background thread and streams stage progress back to the screen.
-
-Phase 9 will replace the hardcoded fixture with a folder picker
-selecting a real ``session_dir``. Until then, the ``Run`` button
-surfaces a warning if no session has been loaded.
+By Phase 9 this is the user-facing host for the whole application:
+a folder picker populates :class:`SessionScreen` with real per-session
+data, settings drawers resolve real templates through
+:func:`core.ui_registry.resolve_template`, and the Run button kicks
+off ``core.pipeline.run`` on a background :class:`RunController`
+thread with live stage progress.
 
 Run:
     python -m ui.shell.app
@@ -20,10 +18,19 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PySide6.QtGui import QAction, QFont, QFontDatabase
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMainWindow,
+    QMessageBox,
+)
 
+from core.discovery import find_fvtt_chat_log
 from core.pipeline import PipelineParams
+from core.ui_registry import resolve_template
+from sources import SPEECH_SOURCES
+from sources.game_log.fvtt_chat import FvttChatSource
 from ui.shell import theme
 from ui.shell._demo_stub_panel import DemoStubPanel
 from ui.shell.run_controller import RunController, RunRequest
@@ -50,54 +57,111 @@ def _pick_ui_font() -> QFont:
     return QFont()
 
 
-def _build_demo_session_data() -> SessionScreenData:
-    """Фикстура Session Detail для Phase 3.
+_AUDIO_EXTENSIONS: tuple[str, ...] = (".flac", ".wav", ".mp3", ".ogg", ".m4a", ".opus")
 
-    Эти данные — чистая презентация. В Phase 5+ хост начнёт собирать
-    ``SessionScreenData`` из реального списка модулей pipeline через
-    template registry. До тех пор здесь жёстко зашитый сценарий
-    «Storm King's Thunder / Сессия 14» — тот же, что в Figma v1.
-    """
+
+def _empty_session_data() -> SessionScreenData:
+    """Placeholder shown before the user opens a folder."""
     return SessionScreenData(
-        project_name="Storm King's Thunder",
-        session_name="Сессия 14 — Битва на мосту",
-        sources=(
-            SourceCardData(
-                title="Аудио",
-                subtitle="GigaAM-v3 RNNT · русский",
-                files=(
-                    "1-Andrey.flac",
-                    "2-Boris.flac",
-                    "3-Carol.flac",
-                    "4-Dmitry.flac",
-                    "5-Eve.flac",
-                    "6-Frank.flac",
-                ),
-                status="ready",
-                status_text="готов",
-            ),
-            SourceCardData(
-                title="Foundry VTT чат",
-                subtitle="",
-                files=("chat-log-2026-04-10.db",),
-                files_hint="1423 реплики · 12 участников",
-                status="ready",
-                status_text="готов",
-            ),
-        ),
+        project_name="Нет сессии",
+        session_name="Откройте папку через меню «Файл → Открыть…»",
+        sources=(),
     )
 
 
+def _scan_audio_files(session_dir: Path) -> tuple[str, ...]:
+    """Port of the same helper in ``audio_source_template``.
+
+    Local copy to keep ``app.py`` independent of the audio template's
+    private helpers; both implementations stay trivial.
+    """
+    files: list[str] = []
+    for p in sorted(session_dir.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in _AUDIO_EXTENSIONS:
+            continue
+        if p.stem.lower().startswith("craig"):
+            continue
+        files.append(p.name)
+    return tuple(files)
+
+
+def _build_session_from_dir(session_dir: Path) -> tuple[
+    SessionScreenData,
+    "list[object]",
+]:
+    """Construct screen data + list of pipeline modules for a real session.
+
+    The module list parallels ``SessionScreenData.sources`` — index N of
+    the screen cards maps to index N of modules, so
+    ``source_configure_requested(index)`` can pick up the right module
+    instance to feed the settings template.
+    """
+    audio_files = _scan_audio_files(session_dir)
+
+    # Default speech backend — GigaAMSource. Users can change it in the
+    # drawer (precision/device/variant) after opening it.
+    gigaam_cls = SPEECH_SOURCES["gigaam"]
+    try:
+        gigaam_module = gigaam_cls()
+    except Exception:  # pragma: no cover — constructor should be light
+        _log.exception("Failed to build GigaAMSource; using stub")
+        gigaam_module = gigaam_cls  # type: ignore[assignment]
+
+    sources: list[SourceCardData] = [
+        SourceCardData(
+            title="Аудио",
+            subtitle="GigaAM-v3 RNNT · русский",
+            files=audio_files,
+            status="ready" if audio_files else "warning",
+            status_text="готов" if audio_files else "нет файлов",
+        )
+    ]
+    modules: list[object] = [gigaam_module]
+
+    chat_log = find_fvtt_chat_log(session_dir)
+    if chat_log is not None:
+        try:
+            line_count = chat_log.read_text(encoding="utf-8", errors="ignore").count("\n")
+        except OSError:
+            line_count = 0
+        chat_module = FvttChatSource(chat_log_path=chat_log)
+        sources.append(
+            SourceCardData(
+                title="Foundry VTT чат",
+                subtitle="fvtt-chat parser",
+                files=(chat_log.name,),
+                files_hint=f"{line_count} строк",
+                status="ready",
+                status_text="готов",
+            )
+        )
+        modules.append(chat_module)
+
+    data = SessionScreenData(
+        project_name=session_dir.parent.name or session_dir.name,
+        session_name=session_dir.name,
+        sources=tuple(sources),
+    )
+    return data, modules
+
+
 class MainWindow(QMainWindow):
-    """Session Transcriber main window.
+    """Session Transcriber main window (Phase 9).
 
-    Central widget — :class:`SessionScreen` (Screen 3 / Session Detail).
-    Phase 3: только idle state, фикстура, нет реального pipeline.
-
-    SettingsDrawer создаётся один раз и переиспользуется. На клик по
-    любой кнопке ``[Настроить]`` хост открывает demo-заглушку; в Phase
-    4+ этот слот начнёт резолвить реальный темплейт модуля через
-    ``core.ui_registry.resolve_template``.
+    Responsibilities:
+        * folder picker (``File → Open session…``) sets the current
+          ``session_dir`` and rebuilds :class:`SessionScreen` from real
+          pipeline modules (:mod:`sources` / :mod:`mergers` /
+          :mod:`renderers`);
+        * forwards source/merger/output configure clicks to
+          :func:`core.ui_registry.resolve_template` and opens the
+          matching ``make_settings_panel`` inside
+          :class:`SettingsDrawer`;
+        * runs :func:`core.pipeline.run` on a background
+          :class:`RunController` thread and routes stage progress back
+          to the screen.
     """
 
     def __init__(self) -> None:
@@ -108,11 +172,15 @@ class MainWindow(QMainWindow):
             f"QMainWindow {{ background-color: {theme.COLOR_BACKGROUND}; }}"
         )
 
-        #: Current session folder. ``None`` until Phase 9 folder picker
-        #: lands; ``_on_run_clicked`` warns and bails if unset.
+        #: Current session folder. ``None`` until the user opens one.
         self._session_dir: Path | None = None
+        #: Pipeline modules parallel to ``_session_screen._data.sources``.
+        self._source_modules: list[object] = []
+        #: Merger + renderer module instances — single-instance in MVP.
+        self._merger_module = self._default_merger()
+        self._renderer_module = self._default_renderer()
 
-        self._session_screen = SessionScreen(_build_demo_session_data(), parent=self)
+        self._session_screen = SessionScreen(_empty_session_data(), parent=self)
         self.setCentralWidget(self._session_screen)
 
         # SettingsDrawer — overlay, parent=self, НЕ в layout.
@@ -125,7 +193,29 @@ class MainWindow(QMainWindow):
         self._run_controller.finished.connect(self._on_run_finished)
         self._run_controller.failed.connect(self._on_run_failed)
 
+        self._build_menu_bar()
+
         # ── Signal wiring ─────────────────────────────────────────
+        self._wire_session_screen_signals()
+
+    # ── Menu bar ─────────────────────────────────────────────────────
+
+    def _build_menu_bar(self) -> None:
+        menu = self.menuBar()
+        file_menu = menu.addMenu("&Файл")
+
+        open_action = QAction("Открыть сессию…", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._on_open_session)
+        file_menu.addAction(open_action)
+
+        file_menu.addSeparator()
+        quit_action = QAction("Выход", self)
+        quit_action.setShortcut("Ctrl+Q")
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+    def _wire_session_screen_signals(self) -> None:
         self._session_screen.source_configure_requested.connect(
             self._on_source_configure
         )
@@ -138,40 +228,145 @@ class MainWindow(QMainWindow):
         self._session_screen.add_source_requested.connect(self._on_add_source)
         self._session_screen.run_clicked.connect(self._on_run_clicked)
 
-    # ── Slots: Phase 3 stubs ─────────────────────────────────────────
+    # ── Session loading ─────────────────────────────────────────────
+
+    def _on_open_session(self) -> None:
+        """Prompt for a folder and rebuild the SessionScreen from it."""
+        picked = QFileDialog.getExistingDirectory(
+            self,
+            "Выберите папку сессии",
+            str(self._session_dir) if self._session_dir else "",
+        )
+        if not picked:
+            return
+        self._load_session(Path(picked))
+
+    def _load_session(self, session_dir: Path) -> None:
+        if not session_dir.is_dir():
+            QMessageBox.warning(
+                self, "Папка не найдена", f"{session_dir} не существует."
+            )
+            return
+
+        try:
+            data, modules = _build_session_from_dir(session_dir)
+        except Exception as exc:  # noqa: BLE001 — UI boundary
+            _log.exception("Failed to build session view")
+            QMessageBox.critical(
+                self,
+                "Ошибка загрузки сессии",
+                f"{session_dir}\n\n{exc}",
+            )
+            return
+
+        self._session_dir = session_dir
+        self._source_modules = modules
+        self._replace_session_screen(data)
+
+    def _replace_session_screen(self, data: SessionScreenData) -> None:
+        """Swap the central widget for a fresh SessionScreen.
+
+        PySide6 QMainWindow takes ownership of the new central widget
+        and deletes the old one, so signal reconnection is mandatory.
+        """
+        new_screen = SessionScreen(data, parent=self)
+        self.setCentralWidget(new_screen)
+        self._session_screen = new_screen
+        self._wire_session_screen_signals()
+
+    # ── Settings drawer routing (Phase 9: real templates) ─────────
 
     def _on_source_configure(self, index: int) -> None:
-        """Temporary: открывает demo drawer. Phase 4+ → real template."""
-        data = self._session_screen._data  # noqa: SLF001 — короткий путь до Phase 4
-        if 0 <= index < len(data.sources):
-            card = data.sources[index]
-            self._open_demo_drawer(
-                title=f"Настройки · {card.title}",
-                subtitle=card.subtitle,
-            )
+        if not (0 <= index < len(self._source_modules)):
+            self._open_demo_drawer(title="Настройки источника", subtitle="")
+            return
+        module = self._source_modules[index]
+        card = self._session_screen._data.sources[index]  # noqa: SLF001
+        self._open_module_drawer(
+            module=module,
+            title=f"Настройки · {card.title}",
+            subtitle=card.subtitle,
+        )
 
     def _on_merger_configure(self) -> None:
-        self._open_demo_drawer(
+        self._open_module_drawer(
+            module=self._merger_module,
             title="Настройки мержера",
-            subtitle="timeline-v1",
+            subtitle="script / timeline-v1",
         )
 
     def _on_output_configure(self) -> None:
-        self._open_demo_drawer(
+        self._open_module_drawer(
+            module=self._renderer_module,
             title="Настройки вывода",
-            subtitle="merged.txt",
+            subtitle="plain-text / merged.txt",
         )
 
     def _on_add_source(self) -> None:
-        _log.info("[Phase 3 stub] Add source requested")
+        QMessageBox.information(
+            self,
+            "Добавление источника",
+            "Мульти-источник поддерживается через ui_config на классах "
+            "модулей. Интерактивное добавление через GUI планируется "
+            "позже.",
+        )
+
+    def _open_module_drawer(
+        self, *, module: object, title: str, subtitle: str
+    ) -> None:
+        """Resolve the module's ui_config template and open its drawer."""
+        ui_config = getattr(module, "ui_config", None)
+        if ui_config is None:
+            self._open_demo_drawer(title=title, subtitle=subtitle)
+            return
+        try:
+            template = resolve_template(ui_config)
+        except Exception:  # noqa: BLE001 — UI boundary
+            _log.exception("Failed to resolve template for %r", module)
+            self._open_demo_drawer(title=title, subtitle=subtitle)
+            return
+
+        state = self._build_state_for(module, template)
+        try:
+            panel = template.make_settings_panel(
+                parent=None,
+                module=module,
+                state=state,
+                params=ui_config.params,
+            )
+        except Exception:  # noqa: BLE001 — UI boundary
+            _log.exception("make_settings_panel failed for %r", module)
+            self._open_demo_drawer(title=title, subtitle=subtitle)
+            return
+
+        self._settings_drawer.open_with_panel(panel, title=title, subtitle=subtitle)
+
+    def _build_state_for(self, module: object, template) -> object | None:
+        """Construct the template's ``state`` dataclass with session_dir.
+
+        Each template exposes a ``*State`` dataclass with a
+        ``session_dir`` field. We look for the first such class in the
+        template module and instantiate it. Returns ``None`` if nothing
+        matches — templates accept that as "no state".
+        """
+        for attr in dir(template):
+            if not attr.endswith("State"):
+                continue
+            candidate = getattr(template, attr)
+            if not isinstance(candidate, type):
+                continue
+            try:
+                return candidate(session_dir=self._session_dir)
+            except TypeError:
+                try:
+                    return candidate()
+                except TypeError:
+                    continue
+        return None
+
+    # ── Run pipeline ─────────────────────────────────────────────────
 
     def _on_run_clicked(self) -> None:
-        """Kick off pipeline run via :class:`RunController`.
-
-        Phase 6: controller wired, but ``_session_dir`` is only set by
-        Phase 9's folder picker. Until then, we show a friendly warning
-        instead of exploding the user's screen.
-        """
         if self._run_controller.is_running:
             _log.info("Run clicked while already running — ignored")
             return
@@ -179,22 +374,51 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Нет сессии",
-                "Сначала откройте папку сессии. "
-                "Диалог выбора появится в Phase 9.",
+                "Сначала откройте папку сессии через «Файл → Открыть…».",
             )
             return
 
-        params = PipelineParams(
-            speech_backend="gigaam",
-            merger="script",
-            renderer="plain-text",
-            output_filename="merged.txt",
-        )
+        params = self._build_pipeline_params()
         request = RunRequest(session_dir=self._session_dir, params=params)
         self._session_screen.set_state_running()
         started = self._run_controller.start(request)
         if not started:
             self._session_screen.set_state_idle()
+
+    def _build_pipeline_params(self) -> PipelineParams:
+        """Build PipelineParams from the current modules' user-visible state.
+
+        GigaAMSource exposes ``variant / precision / device /
+        num_threads``. We mirror them into PipelineParams. The CLI /
+        legacy path always used the dataclass defaults; users who
+        tweaked the drawer get their changes applied here.
+        """
+        speech_module = None
+        for m in self._source_modules:
+            name = getattr(m, "name", None)
+            if name == "gigaam":
+                speech_module = m
+                break
+        if speech_module is not None:
+            variant = getattr(speech_module, "variant", "rnnt")
+            precision = getattr(speech_module, "precision", "fp32")
+            return PipelineParams(
+                speech_backend="gigaam",
+                gigaam_variant=getattr(variant, "value", variant),
+                gigaam_precision=getattr(precision, "value", precision),
+                device=getattr(speech_module, "device", "cpu"),
+                num_threads=getattr(speech_module, "num_threads", 4),
+                merger="script",
+                renderer="plain-text",
+                output_filename="merged.txt",
+            )
+        return PipelineParams(
+            speech_backend="gigaam",
+            merger="script",
+            renderer="plain-text",
+            output_filename="merged.txt",
+            device="cpu",
+        )
 
     # ── Run controller slots ─────────────────────────────────────────
 
@@ -216,10 +440,28 @@ class MainWindow(QMainWindow):
     def _open_demo_drawer(self, *, title: str, subtitle: str) -> None:
         panel = DemoStubPanel()
         self._settings_drawer.open_with_panel(
-            panel,
-            title=title,
-            subtitle=subtitle or "demo stub (заменится в Phase 4)",
+            panel, title=title, subtitle=subtitle or "—"
         )
+
+    # ── Defaults for merger / renderer ───────────────────────────────
+
+    @staticmethod
+    def _default_merger() -> object:
+        from mergers import MERGERS
+        cls = MERGERS["script"]
+        try:
+            return cls()
+        except Exception:  # pragma: no cover
+            return cls  # type: ignore[return-value]
+
+    @staticmethod
+    def _default_renderer() -> object:
+        from renderers import RENDERERS
+        cls = RENDERERS["plain-text"]
+        try:
+            return cls()
+        except Exception:  # pragma: no cover
+            return cls  # type: ignore[return-value]
 
 
 def main() -> int:
