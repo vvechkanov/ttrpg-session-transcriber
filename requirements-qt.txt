@@ -1,0 +1,14 @@
+# Qt GUI runtime + dev dependencies for the PySide6 migration.
+#
+# The project otherwise bootstraps via scripts/install_whisperx_windows.ps1
+# (PyTorch + whisperx from source). There is no pyproject.toml yet, so Qt
+# deps are declared here until ADR-017 completes and we consolidate.
+#
+# Install:
+#   venv\Scripts\pip.exe install -r requirements-qt.txt
+
+# Runtime
+PySide6>=6.6,<7
+
+# Dev / test
+pytest-qt>=4.4,<5
