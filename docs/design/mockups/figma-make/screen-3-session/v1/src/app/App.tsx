@@ -3,43 +3,157 @@ import { ChevronRight, AudioWaveform, MessageSquare, Play, Clock, Check, Loader2
 import { HelpTooltip } from './components/HelpTooltip';
 import { SidePanel } from './components/SidePanel';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { AudioGigaamSettingsPanel } from './components/AudioGigaamSettingsPanel';
+import { FasterWhisperSettingsPanel } from './components/FasterWhisperSettingsPanel';
 
 type ViewState = 'idle' | 'running' | 'done';
 type PanelType = 'audio-settings' | 'chat-settings' | 'merger-settings' | 'output-settings' | 'add-source' | null;
+type AudioSettingsVariant = 'clean' | 'new-speakers' | 'dirty';
+type WhisperSettingsVariant = 'default' | 'new-speakers-custom' | 'advanced-open';
+type AudioBackend = 'gigaam' | 'whisper';
 
 export default function App() {
   const [state, setState] = useState<ViewState>('idle');
   const [openPanel, setOpenPanel] = useState<PanelType>(null);
   const [showClearCacheDialog, setShowClearCacheDialog] = useState(false);
+  const [audioBackend, setAudioBackend] = useState<AudioBackend>('gigaam');
+  const [audioSettingsVariant, setAudioSettingsVariant] = useState<AudioSettingsVariant>('clean');
+  const [whisperSettingsVariant, setWhisperSettingsVariant] = useState<WhisperSettingsVariant>('default');
+  const [isAudioSettingsDirty, setIsAudioSettingsDirty] = useState(false);
 
   return (
     <div className="min-h-screen bg-background">
       {/* State switcher for demo */}
-      <div className="fixed top-4 right-4 flex gap-2 z-50">
-        <button
-          onClick={() => setState('idle')}
-          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-            state === 'idle' ? 'bg-accent text-accent-foreground' : 'bg-card text-foreground hover:bg-secondary'
-          }`}
-        >
-          Idle
-        </button>
-        <button
-          onClick={() => setState('running')}
-          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-            state === 'running' ? 'bg-accent text-accent-foreground' : 'bg-card text-foreground hover:bg-secondary'
-          }`}
-        >
-          Running
-        </button>
-        <button
-          onClick={() => setState('done')}
-          className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-            state === 'done' ? 'bg-accent text-accent-foreground' : 'bg-card text-foreground hover:bg-secondary'
-          }`}
-        >
-          Done
-        </button>
+      <div className="fixed top-4 right-4 flex flex-col gap-2 z-50">
+        <div className="flex gap-2 bg-card p-1 rounded-lg shadow-lg">
+          <button
+            onClick={() => setState('idle')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              state === 'idle' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+            }`}
+          >
+            Idle
+          </button>
+          <button
+            onClick={() => setState('running')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              state === 'running' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+            }`}
+          >
+            Running
+          </button>
+          <button
+            onClick={() => setState('done')}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              state === 'done' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+            }`}
+          >
+            Done
+          </button>
+        </div>
+
+        <div className="bg-card p-2 rounded-lg shadow-lg space-y-2">
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setAudioBackend('gigaam');
+                setIsAudioSettingsDirty(false);
+              }}
+              className={`flex-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                audioBackend === 'gigaam' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+              }`}
+            >
+              GigaAM
+            </button>
+            <button
+              onClick={() => {
+                setAudioBackend('whisper');
+                setIsAudioSettingsDirty(false);
+              }}
+              className={`flex-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${
+                audioBackend === 'whisper' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+              }`}
+            >
+              Whisper
+            </button>
+          </div>
+
+          {audioBackend === 'gigaam' && (
+            <div className="flex gap-2 pt-2 border-t border-border">
+              <button
+                onClick={() => {
+                  setAudioSettingsVariant('clean');
+                  setIsAudioSettingsDirty(false);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  audioSettingsVariant === 'clean' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                Clean
+              </button>
+              <button
+                onClick={() => {
+                  setAudioSettingsVariant('new-speakers');
+                  setIsAudioSettingsDirty(false);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  audioSettingsVariant === 'new-speakers' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                New
+              </button>
+              <button
+                onClick={() => {
+                  setAudioSettingsVariant('dirty');
+                  setIsAudioSettingsDirty(true);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  audioSettingsVariant === 'dirty' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                Dirty
+              </button>
+            </div>
+          )}
+
+          {audioBackend === 'whisper' && (
+            <div className="flex gap-2 pt-2 border-t border-border">
+              <button
+                onClick={() => {
+                  setWhisperSettingsVariant('default');
+                  setIsAudioSettingsDirty(false);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  whisperSettingsVariant === 'default' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                Default
+              </button>
+              <button
+                onClick={() => {
+                  setWhisperSettingsVariant('new-speakers-custom');
+                  setIsAudioSettingsDirty(true);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  whisperSettingsVariant === 'new-speakers-custom' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                Custom
+              </button>
+              <button
+                onClick={() => {
+                  setWhisperSettingsVariant('advanced-open');
+                  setIsAudioSettingsDirty(false);
+                }}
+                className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                  whisperSettingsVariant === 'advanced-open' ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-secondary'
+                }`}
+              >
+                Advanced
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Main content */}
@@ -487,15 +601,36 @@ export default function App() {
       {/* Side Panels */}
       <SidePanel
         isOpen={openPanel === 'audio-settings'}
-        onClose={() => setOpenPanel(null)}
-        title="Настройки аудио"
+        onClose={() => {
+          setOpenPanel(null);
+          setIsAudioSettingsDirty(false);
+        }}
+        title="Настройки · Аудио"
+        subtitle={
+          audioBackend === 'gigaam'
+            ? 'GigaAM-v3 RNNT · русский'
+            : 'faster-whisper · large-v3 · многоязычная'
+        }
+        icon="audio"
+        showFooter={true}
+        isDirty={isAudioSettingsDirty}
+        onSave={() => {
+          console.log('Audio settings saved');
+          setIsAudioSettingsDirty(false);
+          setOpenPanel(null);
+        }}
       >
-        <div className="space-y-6">
-          <p className="text-sm text-muted-foreground">
-            Настройки источника аудио появятся здесь. Можно будет выбрать модель распознавания речи,
-            язык, параметры качества и производительности.
-          </p>
-        </div>
+        {audioBackend === 'gigaam' ? (
+          <AudioGigaamSettingsPanel
+            variant={audioSettingsVariant}
+            onDirtyChange={setIsAudioSettingsDirty}
+          />
+        ) : (
+          <FasterWhisperSettingsPanel
+            variant={whisperSettingsVariant}
+            onDirtyChange={setIsAudioSettingsDirty}
+          />
+        )}
       </SidePanel>
 
       <SidePanel
