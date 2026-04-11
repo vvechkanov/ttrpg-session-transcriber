@@ -19,14 +19,15 @@ from core.backend_installers import (
     install_backend,
     is_backend_installed,
 )
-from core.speaker_map import load_speaker_map as core_load_speaker_map
+from core.speaker_map import (
+    SPEAKER_MAP_FILENAME,
+    load_speaker_map as core_load_speaker_map,
+    load_speaker_map_raw,
+    migrate_legacy_speaker_map,
+    save_speaker_map_raw,
+)
 
 EXCLUDE_AUDIO_PREFIXES = ("craig",)
-
-
-def _project_root() -> Path:
-    """Project root = parent of the ui/ folder that contains this file."""
-    return Path(__file__).resolve().parents[1]
 
 
 def _scan_audio_files(session_dir: Path, pattern: str = "*.flac") -> list[str]:
@@ -35,39 +36,6 @@ def _scan_audio_files(session_dir: Path, pattern: str = "*.flac") -> list[str]:
         p.stem
         for p in session_dir.glob(pattern)
         if not any(p.stem.lower() == x or p.stem.lower().startswith(x + "-") for x in EXCLUDE_AUDIO_PREFIXES)
-    )
-
-
-def _find_speaker_map(session_dir: Path) -> Path | None:
-    """Find speaker_map.json: first in session dir, then in project root."""
-    candidates = [
-        session_dir / "speaker_map.json",
-        _project_root() / "speaker_map.json",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
-
-
-def _load_speaker_map_raw(path: Path) -> dict:
-    """Load speaker_map.json, return empty dict on failure.
-
-    Returns the NESTED dict (stem -> {player, character, role}), not the flat
-    mapping produced by ``core.speaker_map.load_speaker_map``.
-    """
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_speaker_map(data: dict, path: Path) -> None:
-    """Save speaker map data as JSON."""
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
 
 
@@ -304,11 +272,19 @@ def gui_main() -> int:
 
     def _on_folder_changed(session_dir: Path) -> None:
         stems = _scan_audio_files(session_dir)
-        map_path = _find_speaker_map(session_dir)
-        smap = _load_speaker_map_raw(map_path) if map_path else {}
-        if map_path:
-            loc = "папки сессии" if map_path.parent.resolve() == session_dir.resolve() else "папки проекта"
-            speaker_status_var.set(f"Загружен из {loc}")
+        # One-shot migration: copy legacy <repo_root>/speaker_map.json into
+        # the session folder on first load. Legacy file is left intact.
+        migrated = migrate_legacy_speaker_map(session_dir)
+        if migrated is not None:
+            log(f"Мигрирован legacy speaker_map → {migrated}")
+        smap = load_speaker_map_raw(session_dir)
+        session_map_path = session_dir / SPEAKER_MAP_FILENAME
+        if session_map_path.exists():
+            speaker_status_var.set("Загружен из папки сессии")
+        elif smap:
+            # No file in session_dir but loader returned data → it came from
+            # the legacy project-root fallback inside load_speaker_map_raw.
+            speaker_status_var.set("Загружен из папки проекта (legacy)")
         elif stems:
             speaker_status_var.set("speaker_map.json не найден — заполните поля")
         else:
@@ -345,26 +321,44 @@ def gui_main() -> int:
             title="Выберите speaker_map.json",
             filetypes=[("JSON", "*.json"), ("All files", "*.*")],
         )
-        if f:
-            smap = _load_speaker_map_raw(Path(f))
-            if not smap:
-                messagebox.showwarning("Пусто", "Файл пуст или повреждён.")
-                return
-            stems = [r["stem"] for r in speaker_rows] or list(smap.keys())
-            _rebuild_speaker_table(stems, smap)
-            speaker_status_var.set(f"Загружен: {Path(f).name}")
+        if not f:
+            return
+        # User picked an arbitrary path → read it directly (not via the
+        # session-aware core helper). The picked file is treated as a
+        # one-off import; saving will still go to session_dir.
+        try:
+            smap = json.loads(Path(f).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            smap = {}
+        if not isinstance(smap, dict) or not smap:
+            messagebox.showwarning("Пусто", "Файл пуст или повреждён.")
+            return
+        stems = [r["stem"] for r in speaker_rows] or list(smap.keys())
+        _rebuild_speaker_table(stems, smap)
+        speaker_status_var.set(f"Загружен: {Path(f).name}")
 
     def save_map() -> None:
         data = _collect_speaker_data()
         if not data:
             messagebox.showwarning("Пусто", "Нет данных для сохранения — заполните хотя бы одно поле.")
             return
-        save_path = _project_root() / "speaker_map.json"
-        # Merge with existing data to preserve entries for absent players
-        existing = _load_speaker_map_raw(save_path) if save_path.exists() else {}
+        session_dir_str = session_var.get().strip()
+        if not session_dir_str:
+            messagebox.showwarning(
+                "Нет папки сессии",
+                "Сначала выберите папку сессии — speaker_map сохраняется туда.",
+            )
+            return
+        session_dir = Path(session_dir_str).expanduser().resolve()
+        if not session_dir.is_dir():
+            messagebox.showerror("Ошибка", f"Папка не найдена: {session_dir}")
+            return
+        # Merge with existing data in session_dir to preserve entries for
+        # absent players. Canonical location is <session_dir>/speaker_map.json.
+        existing = load_speaker_map_raw(session_dir)
         existing.update(data)
-        _save_speaker_map(existing, save_path)
-        speaker_status_var.set(f"Сохранён: {save_path.name}")
+        save_path = save_speaker_map_raw(session_dir, existing)
+        speaker_status_var.set(f"Сохранён: {save_path}")
 
     # ── Lazy backend install modal ────────────────────────────────────────
 
@@ -459,13 +453,13 @@ def gui_main() -> int:
             messagebox.showerror("Ошибка", "Папка не найдена.")
             return
 
-        # Auto-save speaker map if any fields are filled
+        # Auto-save speaker map if any fields are filled. Canonical location
+        # is <session_dir>/speaker_map.json (same place CLI reads from).
         speaker_data = _collect_speaker_data()
         if speaker_data:
-            save_path = _project_root() / "speaker_map.json"
-            existing = _load_speaker_map_raw(save_path) if save_path.exists() else {}
+            existing = load_speaker_map_raw(session_dir)
             existing.update(speaker_data)
-            _save_speaker_map(existing, save_path)
+            save_path = save_speaker_map_raw(session_dir, existing)
             log(f"Speaker map сохранён: {save_path}")
 
         # Snapshot all UI values before spawning thread (tkinter is not thread-safe)
