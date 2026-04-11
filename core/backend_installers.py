@@ -14,6 +14,10 @@ import enum
 from dataclasses import dataclass
 
 from sources.base import Installable, InstallProgress
+from sources.speech.faster_whisper import (
+    FasterWhisperInstallParams,
+    FasterWhisperSource,
+)
 from sources.speech.gigaam import (
     GigaAMInstallParams,
     GigaAMPrecision,
@@ -21,12 +25,16 @@ from sources.speech.gigaam import (
     GigaAMVariant,
 )
 
+#: HF repo ID русской faster-whisper модели от bzikst.
+_FW_LARGE_V3_RU = "bzikst/faster-whisper-large-v3-ru-podlodka"
+
 
 class BackendId(str, enum.Enum):
     """Идентификаторы установщиков, которые знает UI."""
 
     GIGAAM_RNNT_FP32 = "gigaam-rnnt-fp32"
-    # Будущее: GIGAAM_E2E_RNNT_FP32, GIGAAM_RNNT_INT8 и т.д.
+    FASTER_WHISPER_LARGE_V3_RU = "faster-whisper-large-v3-ru"
+    # Будущее: GIGAAM_E2E_RNNT_FP32, GIGAAM_RNNT_INT8, WHISPERX_LARGE_V3 и т.д.
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,19 @@ BACKENDS: dict[BackendId, BackendInfo] = {
         ),
         approx_download_bytes=950_000_000,
         default_selected=True,
+    ),
+    BackendId.FASTER_WHISPER_LARGE_V3_RU: BackendInfo(
+        id=BackendId.FASTER_WHISPER_LARGE_V3_RU,
+        title="faster-whisper large-v3 (русский, bzikst)",
+        description=(
+            "Файнтюн Whisper large-v3 на русском для TTRPG от bzikst. "
+            "~3.2 GB (90 MB Python wheel-ы + 3.09 GB веса модели). "
+            "Устанавливается в изолированный каталог (tracked install) — "
+            "никакого глобального site-packages или HF cache."
+        ),
+        # 90 MB wheels + 3087 MB model.bin + ~3 MB tokenizer/config
+        approx_download_bytes=3_180_000_000,
+        default_selected=False,
     ),
 }
 
@@ -86,6 +107,17 @@ def install_backend(
     source.install(params, progress=progress)
 
 
+def uninstall_backend(backend_id: BackendId) -> None:
+    """Удалить установленный bundle указанного backend-а.
+
+    Идемпотентна: no-op, если backend не установлен. Удаляет строго
+    каталог backend-а (tracked install invariant) — никаких сайд-эффектов
+    с системными кешами, никаких ``pip uninstall``.
+    """
+    source, params = _resolve(backend_id)
+    source.uninstall(params)
+
+
 def _resolve(backend_id: BackendId) -> tuple[Installable, object]:
     """Вернуть ``(source, params)`` для указанного backend-а.
 
@@ -102,5 +134,9 @@ def _resolve(backend_id: BackendId) -> tuple[Installable, object]:
             variant=GigaAMVariant.RNNT,
             precision=GigaAMPrecision.FP32,
         )
+        return source, params
+    if backend_id == BackendId.FASTER_WHISPER_LARGE_V3_RU:
+        source = FasterWhisperSource(model=_FW_LARGE_V3_RU)
+        params = FasterWhisperInstallParams(model=_FW_LARGE_V3_RU)
         return source, params
     raise ValueError(f"unknown backend: {backend_id}")

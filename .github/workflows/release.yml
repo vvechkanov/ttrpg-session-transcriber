@@ -9,7 +9,15 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ────────────────────────────────────────────────────────────────────
+  # Job 1 — Build the PySide6 runtime (session-transcriber.exe).
+  #
+  # Root build.spec produces a folder layout at
+  # ``dist/session-transcriber/`` with ``session-transcriber.exe``
+  # plus Qt DLLs (LGPL compliance requires exposed libraries).
+  # The whole folder is zipped and uploaded as ``session-transcriber.zip``.
+  # ────────────────────────────────────────────────────────────────────
+  build-runtime:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -20,34 +28,115 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download Python Embeddable Package
+      - name: Install PyInstaller + PySide6
         shell: pwsh
         run: |
-          $url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip"
-          Invoke-WebRequest -Uri $url -OutFile "launcher/python-3.12.8-embed-amd64.zip"
-          Write-Host "Downloaded Python embeddable package"
+          pip install --upgrade pip
+          pip install pyinstaller PySide6
+
+      - name: Build session-transcriber runtime
+        shell: pwsh
+        run: |
+          pyinstaller build.spec --noconfirm --clean
+          if (-not (Test-Path "dist/session-transcriber/session-transcriber.exe")) {
+            Write-Host "ERROR: session-transcriber.exe not found!"
+            exit 1
+          }
+          $size = (Get-ChildItem "dist/session-transcriber" -Recurse |
+                   Measure-Object -Sum Length).Sum / 1MB
+          Write-Host "Runtime built: $([math]::Round($size, 1)) MB total"
+
+      - name: Zip session-transcriber folder
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "dist/session-transcriber" `
+            -DestinationPath "session-transcriber.zip" `
+            -Force
+          $size = (Get-Item "session-transcriber.zip").Length / 1MB
+          Write-Host "session-transcriber.zip: $([math]::Round($size, 1)) MB"
+
+      - name: Upload runtime zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-transcriber-zip
+          path: session-transcriber.zip
+          retention-days: 1
+
+  # ────────────────────────────────────────────────────────────────────
+  # Job 2 — Build the bootstrap installer (WhisperX-Transcriber.exe).
+  #
+  # This EXE is what the user downloads from the GitHub Release page.
+  # On first run it installs ffmpeg + ASR bundles into
+  # ``%APPDATA%/ttrpg-transcriber`` and downloads the runtime zip
+  # built by Job 1 via the GitHub release CDN (install_logic.py:
+  # ``download_runtime_zip``).
+  # ────────────────────────────────────────────────────────────────────
+  build-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Install PyInstaller
-        run: pip install pyinstaller
+        run: pip install --upgrade pip pyinstaller
 
-      - name: Build EXE
+      - name: Build WhisperX-Transcriber bootstrap EXE
         shell: pwsh
         run: |
           cd launcher
-          pyinstaller build.spec
+          pyinstaller build.spec --noconfirm --clean
           $exe = "dist/WhisperX-Transcriber.exe"
           if (Test-Path $exe) {
             $size = (Get-Item $exe).Length / 1MB
-            Write-Host "EXE built: $exe ($([math]::Round($size,1)) MB)"
+            Write-Host "Bootstrap EXE built: $([math]::Round($size, 1)) MB"
           } else {
-            Write-Host "ERROR: EXE not found!"
+            Write-Host "ERROR: Bootstrap EXE not found!"
             exit 1
           }
+
+      - name: Upload bootstrap EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisperx-transcriber-exe
+          path: launcher/dist/WhisperX-Transcriber.exe
+          retention-days: 1
+
+  # ────────────────────────────────────────────────────────────────────
+  # Job 3 — Create the GitHub Release with both artifacts.
+  #
+  # This must run AFTER both build jobs so both artifacts exist.
+  # ``download_runtime_zip`` on the client side expects the zip at
+  # ``github.com/<repo>/releases/download/v<ver>/session-transcriber.zip``
+  # so the asset name here MUST stay ``session-transcriber.zip``.
+  # ────────────────────────────────────────────────────────────────────
+  release:
+    needs: [build-runtime, build-installer]
+    runs-on: windows-latest
+    steps:
+      - name: Download runtime zip
+        uses: actions/download-artifact@v4
+        with:
+          name: session-transcriber-zip
+          path: artifacts
+
+      - name: Download bootstrap EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: whisperx-transcriber-exe
+          path: artifacts
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: launcher/dist/WhisperX-Transcriber.exe
+          files: |
+            artifacts/WhisperX-Transcriber.exe
+            artifacts/session-transcriber.zip
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}

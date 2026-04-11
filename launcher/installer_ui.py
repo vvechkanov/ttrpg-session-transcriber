@@ -1,36 +1,54 @@
-"""
-Installer UI — beautiful tkinter window showing installation progress.
+"""Installer UI — tkinter window showing installation progress.
 
-Matches the dark theme from wisper_launcher.py.
-Runs install_logic functions in a background thread.
+Post-Epic-A/B/C the installer has exactly three stages:
+
+    1. **ffmpeg**  — download and extract ffmpeg to
+       ``DATA_DIR/tools/ffmpeg``.
+    2. **models**  — call
+       :func:`core.backend_installers.install_backend` for every
+       backend the user ticked (GigaAM by default, faster-whisper
+       opt-in). Epic A tracked install writes to
+       ``DATA_DIR/models/<backend>/<slug>/``.
+    3. **runtime** — download ``session-transcriber.zip`` from the
+       matching GitHub Release tag and unpack it into
+       ``DATA_DIR/session-transcriber/``. That directory contains
+       ``session-transcriber.exe`` (the PySide6 shell) which is what
+       the bootstrap EXE Popen-s after installation.
+
+No more pip, no more embedded Python, no more PyTorch/WhisperX
+installs — those stacks live inside the ASR backend bundles now
+(see ``sources/speech/_fw_download.py`` wheel unpacking and the
+generic ``sources/speech/_bundle_download.py``).
 """
 
 from __future__ import annotations
 
 import queue
 import threading
-import traceback
 import tkinter as tk
-from tkinter import ttk
+import traceback
 from pathlib import Path
+from tkinter import ttk
 from typing import Callable
 
 try:
     from launcher.install_logic import (
-        STEP_WEIGHTS, detect_gpu, download_embedded_python, download_ffmpeg,
-        extract_embedded_python, install_pip, install_pytorch,
-        install_whisperx, repin_pytorch_cuda, verify_installation,
+        STEP_WEIGHTS,
+        detect_gpu,
+        download_ffmpeg,
+        download_runtime_zip,
     )
-except ImportError:
-    from install_logic import (
-        STEP_WEIGHTS, detect_gpu, download_embedded_python, download_ffmpeg,
-        extract_embedded_python, install_pip, install_pytorch,
-        install_whisperx, repin_pytorch_cuda, verify_installation,
+except ImportError:  # running from extracted folder
+    from install_logic import (  # type: ignore[no-redef]
+        STEP_WEIGHTS,
+        detect_gpu,
+        download_ffmpeg,
+        download_runtime_zip,
     )
 
-# Backend installers (ASR models, e.g. GigaAM). Импортируется после того
-# как core.backend_installers добавлен в проект; оборачиваем try/except
-# чтобы installer UI мог запуститься в окружении без core-слоя.
+# Backend installers (ASR models — GigaAM, faster-whisper). Wrapped in
+# try/except so this module can still import in a minimal environment
+# for development; in release builds the import always succeeds.
 try:
     from core.backend_installers import (
         BackendId,
@@ -47,48 +65,47 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Theme (matches wisper_launcher.py)
 # ---------------------------------------------------------------------------
-BG       = "#1e1e2e"
-BG2      = "#2a2a3c"
-FG       = "#cdd6f4"
-FG_DIM   = "#6c7086"
-ACCENT   = "#40b87c"
-WARN     = "#f9a825"
-ERR      = "#f44336"
+BG = "#1e1e2e"
+BG2 = "#2a2a3c"
+FG = "#cdd6f4"
+FG_DIM = "#6c7086"
+ACCENT = "#40b87c"
+WARN = "#f9a825"
+ERR = "#f44336"
 INPUT_BG = "#313244"
 INPUT_FG = "#cdd6f4"
 
-# Step definitions
-STEPS = [
-    ("python",   "Подготовка Python runtime"),
-    ("pip",      "Установка pip"),
-    ("pytorch",  "Установка PyTorch"),
-    ("whisperx", "Установка WhisperX"),
-    ("ffmpeg",   "Загрузка ffmpeg"),
-    ("models",   "Загрузка моделей"),
+# Visible progress stages — order matches the worker flow below.
+STEPS: list[tuple[str, str]] = [
+    ("ffmpeg", "Загрузка ffmpeg"),
+    ("models", "Загрузка моделей ASR"),
+    ("runtime", "Загрузка приложения"),
 ]
 
 
 class InstallerWindow:
-    """
-    A tkinter window that shows installation progress with:
-    - GPU detection banner
-    - Per-step status indicators
-    - Real-time log output
-    - Overall progress bar
+    """tkinter window that drives a 3-stage install + progress bar.
+
+    Args:
+        data_dir: ``%APPDATA%/ttrpg-transcriber``; the installer
+            writes ``tools/ffmpeg/``, ``models/<backend>/…``, and
+            ``session-transcriber/`` under here.
+        version: application version string — used to build the
+            GitHub Release URL for the runtime zip (tag ``v{version}``).
+        on_complete: called on the main thread after the runtime zip
+            has been unpacked successfully. The bootstrap passes a
+            callback that writes the ``.installed`` sentinel and then
+            ``Popen``-s the runtime EXE.
     """
 
     def __init__(
         self,
         data_dir: Path,
-        python_zip: Path,
-        tkinter_src: Path | None,
-        scripts_dir: Path,
+        version: str,
         on_complete: Callable[[], None],
     ):
         self.data_dir = data_dir
-        self.python_zip = python_zip
-        self.tkinter_src = tkinter_src
-        self.scripts_dir = scripts_dir
+        self.version = version
         self.on_complete = on_complete
 
         self._log_queue: queue.Queue[str] = queue.Queue()
@@ -97,11 +114,12 @@ class InstallerWindow:
         self._gpu_mode = "cpu"
         self._error: str | None = None
 
-        # Selected ASR backends (GigaAM и т.д.) — заполняется в _build_ui,
-        # читается в _install_worker на стадии "models".
+        #: Tk ``BooleanVar`` per backend, populated in :meth:`_build_ui`.
         self._backend_checkboxes: dict = {}
 
         self._build_ui()
+
+    # ─────────────────────────────────── UI ──────────────────────────────
 
     def _build_ui(self) -> None:
         self.root = tk.Tk()
@@ -119,8 +137,6 @@ class InstallerWindow:
         style.configure(".", background=BG, foreground=FG, borderwidth=0)
         style.configure("TLabel", background=BG, foreground=FG)
         style.configure("TFrame", background=BG)
-
-        # Progress bar style
         style.configure(
             "Green.Horizontal.TProgressbar",
             troughcolor=INPUT_BG,
@@ -128,7 +144,7 @@ class InstallerWindow:
             thickness=20,
         )
 
-        # ── Title ─────────────────────────────────────────────────────────
+        # ── Title ────────────────────────────────────────────────────
         title_frame = tk.Frame(self.root, bg=BG)
         title_frame.pack(fill="x", padx=24, pady=(20, 0))
 
@@ -141,12 +157,12 @@ class InstallerWindow:
 
         tk.Label(
             title_frame,
-            text="Первый запуск — установка зависимостей",
+            text=f"Первый запуск — установка v{self.version}",
             font=("Segoe UI", 10),
             fg=FG_DIM, bg=BG,
         ).pack(anchor="w", pady=(2, 0))
 
-        # ── GPU banner ────────────────────────────────────────────────────
+        # ── GPU banner ───────────────────────────────────────────────
         self.gpu_frame = tk.Frame(self.root, bg="#1a3d2a", padx=12, pady=8)
         self.gpu_frame.pack(fill="x", padx=24, pady=(16, 0))
 
@@ -158,7 +174,7 @@ class InstallerWindow:
         )
         self.gpu_label.pack(anchor="w")
 
-        # ── Steps ─────────────────────────────────────────────────────────
+        # ── Steps ────────────────────────────────────────────────────
         steps_frame = tk.Frame(self.root, bg=BG)
         steps_frame.pack(fill="x", padx=24, pady=(16, 0))
 
@@ -188,14 +204,14 @@ class InstallerWindow:
             status.pack(side="right")
             self._step_status[step_id] = status
 
-        # ── Backend checkboxes (ASR models) ───────────────────────────────
+        # ── Backend checkboxes (ASR models) ──────────────────────────
         if _BACKEND_INSTALLERS_AVAILABLE and list_backends is not None:
             backends_frame = tk.Frame(self.root, bg=BG)
             backends_frame.pack(fill="x", padx=24, pady=(8, 0))
 
             tk.Label(
                 backends_frame,
-                text="Дополнительные модели ASR:",
+                text="Модели распознавания речи:",
                 font=("Segoe UI", 9, "bold"),
                 fg=FG_DIM, bg=BG,
             ).pack(anchor="w")
@@ -222,7 +238,7 @@ class InstallerWindow:
                     justify="left",
                 ).pack(anchor="w", padx=(20, 0))
 
-        # ── Log area ──────────────────────────────────────────────────────
+        # ── Log area ─────────────────────────────────────────────────
         log_frame = tk.Frame(self.root, bg=INPUT_BG, padx=1, pady=1)
         log_frame.pack(fill="both", expand=True, padx=24, pady=(16, 0))
 
@@ -241,7 +257,7 @@ class InstallerWindow:
         scrollbar.pack(fill="y", side="right")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
-        # ── Overall progress ──────────────────────────────────────────────
+        # ── Overall progress ─────────────────────────────────────────
         bottom_frame = tk.Frame(self.root, bg=BG)
         bottom_frame.pack(fill="x", padx=24, pady=(12, 20))
 
@@ -262,7 +278,7 @@ class InstallerWindow:
         )
         self.progress_bar.pack(fill="x", pady=(6, 0))
 
-        # ── Retry button (hidden initially) ───────────────────────────────
+        # ── Retry button (hidden initially) ──────────────────────────
         self.retry_btn = tk.Button(
             bottom_frame,
             text="Повторить",
@@ -274,6 +290,8 @@ class InstallerWindow:
         )
         # Not packed yet — shown only on error
 
+    # ────────────────────────────── lifecycle ───────────────────────────
+
     def run(self) -> None:
         """Show the window and start installation."""
         self._start_install()
@@ -281,7 +299,7 @@ class InstallerWindow:
         self.root.mainloop()
 
     def _start_install(self) -> None:
-        """Start (or restart) the installation in a background thread."""
+        """(Re)start the installation in a background thread."""
         self.retry_btn.pack_forget()
         self._error = None
         for step_id, _ in STEPS:
@@ -290,124 +308,92 @@ class InstallerWindow:
             self._step_status[step_id].config(text="")
         self._update_overall_progress()
 
-        t = threading.Thread(target=self._install_worker, daemon=True)
-        t.start()
+        threading.Thread(target=self._install_worker, daemon=True).start()
 
     def _install_worker(self) -> None:
         """Run all installation steps in a background thread."""
         try:
-            python_dir = self.data_dir / "python"
-            python_exe = python_dir / "python.exe"
-            ffmpeg_dir = self.data_dir / "tools" / "ffmpeg"
-
-            # Step: Python
-            self._begin_step("python")
-            if not python_exe.exists():
-                # If bundled zip exists, extract. Otherwise download first.
-                if not self.python_zip.exists():
-                    download_embedded_python(
-                        self.python_zip, self._log, self._step_progress_fn("python")
-                    )
-                extract_embedded_python(
-                    self.python_zip, python_dir, self.tkinter_src,
-                    self._log, self._step_progress_fn("python"),
-                )
-            else:
-                self._log("Python runtime уже извлечён.")
-            self._complete_step("python")
-
-            # Step: pip
-            self._begin_step("pip")
-            pip_exe = python_dir / "Scripts" / "pip.exe"
-            if not pip_exe.exists():
-                install_pip(python_exe, self._log, self._step_progress_fn("pip"))
-            else:
-                self._log("pip уже установлен.")
-            self._complete_step("pip")
-
-            # Detect GPU
+            # Detect GPU (informational only — no torch install anymore)
             self._gpu_mode = detect_gpu(self._log)
             self.root.after(0, self._update_gpu_banner)
 
-            # Step: PyTorch
-            self._begin_step("pytorch")
-            install_pytorch(
-                python_exe, self._gpu_mode,
-                self._log, self._step_progress_fn("pytorch"),
-            )
-            self._complete_step("pytorch")
+            ffmpeg_dir = self.data_dir / "tools" / "ffmpeg"
 
-            # Step: WhisperX
-            self._begin_step("whisperx")
-            install_whisperx(
-                python_exe, self._log, self._step_progress_fn("whisperx"),
-            )
-            # Re-pin CUDA torch if needed
-            if self._gpu_mode == "cuda":
-                self._log("Фиксация PyTorch CUDA после WhisperX...")
-                repin_pytorch_cuda(python_exe, self._log, lambda p: None)
-            self._complete_step("whisperx")
-
-            # Step: ffmpeg
+            # Step 1: ffmpeg
             self._begin_step("ffmpeg")
             download_ffmpeg(
-                ffmpeg_dir, self._log, self._step_progress_fn("ffmpeg"),
+                ffmpeg_dir, self._log, self._step_progress_fn("ffmpeg")
             )
             self._complete_step("ffmpeg")
 
-            # Step: models (ASR backends like GigaAM)
+            # Step 2: ASR backends (GigaAM / faster-whisper / …)
             self._begin_step("models")
-            if _BACKEND_INSTALLERS_AVAILABLE and install_backend is not None:
-                selected = [
-                    bid for bid, var in self._backend_checkboxes.items()
-                    if var.get()
-                ]
-                if selected:
-                    step_cb = self._step_progress_fn("models")
-                    for idx, backend_id in enumerate(selected):
-                        self._log(f"Установка {backend_id.value}...")
-
-                        def _prog(
-                            frac: float,
-                            msg: str,
-                            _idx: int = idx,
-                            _total: int = len(selected),
-                            _cb=step_cb,
-                        ) -> None:
-                            stage_pct = (_idx + frac) / _total * 100
-                            _cb(stage_pct)
-                            self._log(msg)
-
-                        try:
-                            install_backend(backend_id, progress=_prog)
-                        except Exception as e:
-                            self._log(
-                                f"ОШИБКА установки {backend_id.value}: {e}"
-                            )
-                            raise
-                else:
-                    self._log("Модели ASR пропущены пользователем.")
-            else:
-                self._log("Backend installers недоступны — пропуск стадии.")
+            self._install_backends()
             self._complete_step("models")
 
-            # Verify
-            self._log("")
-            info = verify_installation(python_exe, self._log)
+            # Step 3: PySide6 runtime zip from GitHub Release
+            self._begin_step("runtime")
+            download_runtime_zip(
+                self.data_dir,
+                self.version,
+                self._log,
+                self._step_progress_fn("runtime"),
+            )
+            self._complete_step("runtime")
 
             self._log("")
             self._log("=" * 50)
             self._log("  Установка завершена!")
             self._log("=" * 50)
 
-            # Signal completion
             self.root.after(500, self._on_install_complete)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — UI boundary
             self._error = str(e)
             self._log(f"\nОШИБКА: {e}")
             self._log(traceback.format_exc())
             self.root.after(0, self._on_install_error)
+
+    def _install_backends(self) -> None:
+        """Run all ticked ASR backend installers in sequence."""
+        if not _BACKEND_INSTALLERS_AVAILABLE or install_backend is None:
+            self._log(
+                "Backend installers недоступны — стадия моделей пропущена. "
+                "Это режим разработчика, финальный EXE всегда собирает "
+                "core.backend_installers."
+            )
+            return
+
+        selected = [
+            bid for bid, var in self._backend_checkboxes.items() if var.get()
+        ]
+        if not selected:
+            self._log("Ни одна ASR-модель не выбрана — пропуск установки.")
+            return
+
+        step_cb = self._step_progress_fn("models")
+        total = len(selected)
+        for idx, backend_id in enumerate(selected):
+            self._log(f"Установка {backend_id.value}...")
+
+            def _prog(
+                frac: float,
+                msg: str,
+                _idx: int = idx,
+                _total: int = total,
+                _cb=step_cb,
+            ) -> None:
+                stage_pct = (_idx + frac) / _total * 100
+                _cb(stage_pct)
+                self._log(msg)
+
+            try:
+                install_backend(backend_id, progress=_prog)
+            except Exception as e:
+                self._log(f"ОШИБКА установки {backend_id.value}: {e}")
+                raise
+
+    # ─────────────────────────── progress helpers ──────────────────────
 
     def _begin_step(self, step_id: str) -> None:
         self._current_step = step_id
@@ -452,15 +438,17 @@ class InstallerWindow:
         if self._gpu_mode == "cuda":
             self.gpu_frame.config(bg="#1a3d2a")
             self.gpu_label.config(
-                text="GPU обнаружена — установка в режиме CUDA",
+                text="GPU обнаружена — runtime будет использовать CUDA",
                 fg=ACCENT, bg="#1a3d2a",
             )
         else:
             self.gpu_frame.config(bg="#3d3a1a")
             self.gpu_label.config(
-                text="GPU не обнаружена — установка в режиме CPU (медленнее)",
+                text="GPU не обнаружена — runtime будет использовать CPU (медленнее)",
                 fg=WARN, bg="#3d3a1a",
             )
+
+    # ────────────────────────────── logging ────────────────────────────
 
     def _log(self, msg: str) -> None:
         """Thread-safe log message."""
@@ -479,6 +467,8 @@ class InstallerWindow:
             self.log_text.config(state="disabled")
         self.root.after(100, self._poll_log)
 
+    # ────────────────────────────── finish ─────────────────────────────
+
     def _on_install_complete(self) -> None:
         """Called on the main thread after successful installation."""
         self.progress_label.config(
@@ -489,15 +479,10 @@ class InstallerWindow:
 
     def _on_install_error(self) -> None:
         """Called on the main thread after a failed installation."""
-        self.progress_label.config(
-            text=f"Ошибка установки",
-            fg=ERR,
-        )
-        # Mark current step as failed
+        self.progress_label.config(text="Ошибка установки", fg=ERR)
         if self._current_step:
             self._step_labels[self._current_step].config(text="✗", fg=ERR)
             self._step_status[self._current_step].config(text="Ошибка", fg=ERR)
-        # Show retry button
         self.retry_btn.pack(pady=(10, 0))
 
     def _finish(self) -> None:
@@ -506,8 +491,7 @@ class InstallerWindow:
         self.on_complete()
 
     def _on_close(self) -> None:
-        """Handle window close — ask confirmation during installation."""
+        """Handle window close — block during active installation."""
         if self._current_step and not self._error:
-            # Installation in progress — ignore close
             return
         self.root.destroy()

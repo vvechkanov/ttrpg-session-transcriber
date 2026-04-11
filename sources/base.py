@@ -51,6 +51,15 @@ class Installable(Protocol):
     сторона (``core.backend_installers``) знает конкретный тип; на уровне
     Protocol тип остаётся ``object`` из-за отсутствия TypeVar-variance
     в структурной типизации. См. gigaam-v2.md §2.4.
+
+    **Tracked install invariant (Epic A):** всё, что ``install()``
+    пишет на диск, ДОЛЖНО лежать строго внутри одного каталога —
+    «корневой каталог backend-а». Никаких глобальных кешей
+    (``~/.cache/huggingface``, ``~/.cache/torch``, site-packages
+    системного Python и т.п.): каждый backend обязан изолировать
+    свои файлы и веса в собственной поддиректории под
+    ``default_models_root()``. Это делает ``uninstall()`` простым
+    и безопасным — один ``shutil.rmtree`` на корневую директорию.
     """
 
     def is_installed(self, params: object) -> bool:
@@ -61,6 +70,22 @@ class Installable(Protocol):
         params: object,
         progress: InstallProgress | None = None,
     ) -> None:
+        ...
+
+    def uninstall(self, params: object) -> None:
+        """Удалить все файлы, созданные ``install(params)``.
+
+        Контракт:
+            * После успешного ``uninstall(params)`` ``is_installed(params)``
+              ДОЛЖЕН вернуть False.
+            * Должна быть идемпотентной: вызов на неустановленный
+              backend — no-op (не бросает).
+            * НЕ трогает ничего за пределами корневого каталога
+              backend-а (см. tracked install invariant выше).
+
+        Реализация как правило сводится к ``shutil.rmtree`` корневой
+        директории backend-а — поэтому invariant выше критичен.
+        """
         ...
 
     def installed_size_bytes(self, params: object) -> int:

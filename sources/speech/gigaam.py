@@ -21,11 +21,15 @@ from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import InstallProgress, Source
+from sources.speech._bundle_download import (
+    all_files_present,
+    files_by_logical,
+    read_version_file,
+    total_installed_size,
+)
 from sources.speech._gigaam_paths import (
     GIGAAM_SCHEMA_VERSION,
-    VersionInfo,
     gigaam_module_dir,
-    read_version_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,16 +154,16 @@ class GigaAMSource(Source):
         проверяется один раз на ``install()`` перед записью version.json.
         """
         module_dir = gigaam_module_dir(params)
-        info = read_version_file(module_dir)
-        if info is None:
+        payload = read_version_file(module_dir)
+        if payload is None:
             return False
-        if info.schema_version != GIGAAM_SCHEMA_VERSION:
+        if int(payload.get("schema_version", 0)) != GIGAAM_SCHEMA_VERSION:
             return False
-        if info.variant != params.variant.value:
+        if payload.get("variant") != params.variant.value:
             return False
-        if info.precision != params.precision.value:
+        if payload.get("precision") != params.precision.value:
             return False
-        return _all_files_present(module_dir, info)
+        return all_files_present(module_dir, payload)
 
     def install(
         self,
@@ -178,17 +182,22 @@ class GigaAMSource(Source):
 
         install_gigaam_bundle(params, progress)
 
+    def uninstall(self, params: GigaAMInstallParams) -> None:
+        """Удалить установленный bundle этой variant+precision.
+
+        Идемпотентна: no-op если каталог не существует. Удаляет всё
+        содержимое ``<models_root>/gigaam/<variant>-<precision>/``.
+        """
+        from sources.speech._gigaam_download import uninstall_gigaam_bundle
+
+        uninstall_gigaam_bundle(params)
+
     def installed_size_bytes(self, params: GigaAMInstallParams) -> int:
         """Суммарный размер установленных файлов в байтах.
 
         Возвращает 0 если каталог не существует.
         """
-        module_dir = gigaam_module_dir(params)
-        if not module_dir.exists():
-            return 0
-        return sum(
-            p.stat().st_size for p in module_dir.rglob("*") if p.is_file()
-        )
+        return total_installed_size(gigaam_module_dir(params))
 
     # ---- Source --------------------------------------------------------
 
@@ -442,21 +451,22 @@ def _build_recognizer(
     import sherpa_onnx
 
     module_dir = gigaam_module_dir(params)
-    info = read_version_file(module_dir)
-    if info is None:
+    payload = read_version_file(module_dir)
+    if payload is None:
         raise RuntimeError(
             f"_build_recognizer: GigaAM not installed at {module_dir}"
         )
+    files = files_by_logical(payload)
 
     provider = _detect_provider(device)
-    hotwords_path = module_dir / info.files["hotwords"]
+    hotwords_path = module_dir / files["hotwords"]
     decoding_method = _pick_decoding_method(hotwords_path)
 
     kwargs: dict[str, Any] = dict(
-        encoder=str(module_dir / info.files["encoder"]),
-        decoder=str(module_dir / info.files["decoder"]),
-        joiner=str(module_dir / info.files["joiner"]),
-        tokens=str(module_dir / info.files["tokens"]),
+        encoder=str(module_dir / files["encoder"]),
+        decoder=str(module_dir / files["decoder"]),
+        joiner=str(module_dir / files["joiner"]),
+        tokens=str(module_dir / files["tokens"]),
         num_threads=num_threads,
         sample_rate=16000,
         feature_dim=80,
@@ -496,17 +506,6 @@ def _warmup_recognizer(recognizer: Any) -> None:
     stream.accept_waveform(16000, silence)
     recognizer.decode_stream(stream)
     # stream отбрасываем, результат warmup не нужен
-
-
-def _all_files_present(module_dir: Path, info: VersionInfo) -> bool:
-    """Проверить что все файлы из ``file_sizes`` есть с правильным размером."""
-    for relpath, expected_size in info.file_sizes.items():
-        p = module_dir / relpath
-        if not p.is_file():
-            return False
-        if expected_size > 0 and p.stat().st_size != expected_size:
-            return False
-    return True
 
 
 def _scan_audio_files(

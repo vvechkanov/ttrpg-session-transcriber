@@ -7,8 +7,15 @@ tests/fixtures/e2e_p2/expected_merged.txt via token overlap (>= 0.90).
 SKIP CONDITIONS:
   - @pytest.mark.slow: excluded from default CI run (pytest -m "not slow")
   - @pytest.mark.requires_asr: needs faster-whisper model downloaded
+  - FW bundle not installed via Epic A tracked install: skipped with
+    actionable message. The pipeline now imports ``faster_whisper`` from
+    a per-model sandbox ``<models_root>/faster-whisper/<slug>/site-packages``,
+    so the system-wide pip install is not consulted anymore.
 
 RUN LOCALLY:
+  # One-time bundle install (~3.2 GB — wheels + model weights)
+  python -c "from core.backend_installers import install_backend, BackendId; \
+             install_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU)"
   pytest tests/test_e2e_tier2_semantic.py -v -m slow
 
 XFAIL CONDITION:
@@ -32,6 +39,31 @@ BASELINE_EXISTS = EXPECTED_MERGED.exists() and EXPECTED_MERGED.stat().st_size > 
 # Insert project root so imports work without package install
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _fw_bundle_installed() -> bool:
+    """Check the FW bundle is present via the Epic A tracked install path.
+
+    Returns False if the bundle directory, version.json, or any
+    component file is missing. Import is lazy — happens only when
+    pytest evaluates the skipif marker, so importing this test module
+    never drags in ``core.backend_installers`` side-effects.
+    """
+    try:
+        from core.backend_installers import BackendId, is_backend_installed
+
+        return is_backend_installed(BackendId.FASTER_WHISPER_LARGE_V3_RU)
+    except Exception:  # noqa: BLE001 — any import/path failure → not installed
+        return False
+
+
+_FW_INSTALL_HINT = (
+    "faster-whisper bundle is not installed. Epic A tracked install layout "
+    "requires running: python -c \"from core.backend_installers import "
+    "install_backend, BackendId; "
+    "install_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU)\" "
+    "(~3.2 GB download)."
+)
 
 # ---------------------------------------------------------------------------
 # Token overlap helper
@@ -96,6 +128,7 @@ def _flac_files_exist() -> bool:
         "Run: python scripts/gen_fixtures_noprint.py"
     ),
 )
+@pytest.mark.skipif(not _fw_bundle_installed(), reason=_FW_INSTALL_HINT)
 def test_tier2_semantic_token_overlap():
     """Full pipeline run on fixture audio produces output with >= 0.90 token overlap vs baseline.
 
@@ -155,6 +188,7 @@ def test_tier2_semantic_token_overlap():
     not _flac_files_exist(),
     reason="FLAC fixtures not found — run scripts/gen_fixtures_noprint.py",
 )
+@pytest.mark.skipif(not _fw_bundle_installed(), reason=_FW_INSTALL_HINT)
 def test_tier2_output_format():
     """Pipeline output lines conform to 'Speaker: text' format.
 

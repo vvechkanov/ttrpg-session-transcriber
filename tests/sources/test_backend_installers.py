@@ -75,3 +75,60 @@ class TestInstallBackend:
             # Verify progress callback was forwarded
             call_kwargs = instance.install.call_args
             assert call_kwargs is not None
+
+    def test_delegates_to_faster_whisper_install(self):
+        from core.backend_installers import BackendId
+
+        with patch("core.backend_installers.FasterWhisperSource") as MockSource:
+            instance = MockSource.return_value
+            from core.backend_installers import install_backend
+            install_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU, progress=None)
+            instance.install.assert_called_once()
+
+
+class TestUninstallBackend:
+    """Epic A: uninstall_backend() shim test."""
+
+    def test_delegates_to_gigaamasource_uninstall(self):
+        from core.backend_installers import BackendId, uninstall_backend
+
+        with patch("core.backend_installers.GigaAMSource") as MockSource:
+            instance = MockSource.return_value
+            uninstall_backend(BackendId.GIGAAM_RNNT_FP32)
+            instance.uninstall.assert_called_once()
+
+    def test_delegates_to_faster_whisper_uninstall(self):
+        from core.backend_installers import BackendId, uninstall_backend
+
+        with patch("core.backend_installers.FasterWhisperSource") as MockSource:
+            instance = MockSource.return_value
+            uninstall_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU)
+            instance.uninstall.assert_called_once()
+
+
+class TestFasterWhisperBackendInfo:
+    def test_fw_backend_registered(self):
+        from core.backend_installers import BackendId, list_backends
+
+        ids = [b.id for b in list_backends()]
+        assert BackendId.FASTER_WHISPER_LARGE_V3_RU in ids
+
+    def test_fw_approx_bytes_reasonable(self):
+        from core.backend_installers import BACKENDS, BackendId
+
+        info = BACKENDS[BackendId.FASTER_WHISPER_LARGE_V3_RU]
+        # 2 GB – 4 GB (wheels + 3 GB model.bin)
+        assert 2_000_000_000 <= info.approx_download_bytes <= 4_000_000_000
+
+    def test_fw_default_not_selected(self):
+        """FW is opt-in (GigaAM is the default Russian backend)."""
+        from core.backend_installers import BACKENDS, BackendId
+
+        info = BACKENDS[BackendId.FASTER_WHISPER_LARGE_V3_RU]
+        assert info.default_selected is False
+
+    def test_fw_title_nonempty(self):
+        from core.backend_installers import BACKENDS, BackendId
+
+        info = BACKENDS[BackendId.FASTER_WHISPER_LARGE_V3_RU]
+        assert info.title.strip()

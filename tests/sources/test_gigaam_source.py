@@ -17,19 +17,37 @@ sys.modules.setdefault("sherpa_onnx", MagicMock())
 
 
 def _write_valid_version_json(module_dir: Path, files: dict[str, str]) -> None:
-    """Write a minimal valid version.json with correct sizes for fake files."""
+    """Write a minimal valid version.json in the new generic format.
+
+    Epic A: version.json теперь пишется generic ``_bundle_download`` —
+    список ``remote_files`` с relpath/size/sha256 вместо трёх
+    параллельных словарей. Тесты пишут payload в том же формате
+    напрямую, минуя реальный network-flow.
+    """
     from sources.speech._gigaam_paths import GIGAAM_SCHEMA_VERSION
-    file_sizes = {relpath: (module_dir / relpath).stat().st_size
-                  for relpath in files.values()
-                  if (module_dir / relpath).is_file()}
+
+    remote_files = []
+    for logical, relpath in files.items():
+        p = module_dir / relpath
+        size = p.stat().st_size if p.is_file() else 0
+        remote_files.append(
+            {
+                "logical": logical,
+                "relpath": relpath,
+                "size": size,
+                "sha256": "a" * 64,
+                "url": f"https://example.test/{relpath}",
+                "unpack": "none",
+            }
+        )
     payload = {
         "schema_version": GIGAAM_SCHEMA_VERSION,
         "bundle_version": "v3-test",
+        "display_name": "GigaAM-v3",
         "variant": "rnnt",
         "precision": "fp32",
-        "files": files,
-        "file_sizes": file_sizes,
-        "file_sha256": {relpath: "a" * 64 for relpath in files.values()},
+        "remote_files": remote_files,
+        "local_files": [],
     }
     (module_dir / "version.json").write_text(
         json.dumps(payload), encoding="utf-8"
@@ -119,23 +137,28 @@ class TestIsInstalled:
 
     def test_returns_false_when_variant_mismatch_in_version_json(self, tmp_path):
         from sources.speech.gigaam import GigaAMSource
-        from sources.speech._gigaam_paths import gigaam_module_dir, GIGAAM_SCHEMA_VERSION
+        from sources.speech._gigaam_paths import (
+            GIGAAM_SCHEMA_VERSION,
+            gigaam_module_dir,
+        )
 
         params = self._make_params(tmp_path)
         module_dir = gigaam_module_dir(params)
         module_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write version.json with wrong variant
+        # Write version.json with wrong variant (new generic format).
         payload = {
             "schema_version": GIGAAM_SCHEMA_VERSION,
             "bundle_version": "v3-test",
+            "display_name": "GigaAM-v3",
             "variant": "e2e_rnnt",  # wrong!
             "precision": "fp32",
-            "files": {},
-            "file_sizes": {},
-            "file_sha256": {},
+            "remote_files": [],
+            "local_files": [],
         }
-        (module_dir / "version.json").write_text(json.dumps(payload), encoding="utf-8")
+        (module_dir / "version.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
 
         src = GigaAMSource(models_root=tmp_path)
         assert src.is_installed(params) is False

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from core.backend_installers import BackendId
 from core.discovery import find_fvtt_chat_log
 from core.pipeline import PipelineParams
 from core.ui_registry import resolve_template
@@ -33,10 +34,21 @@ from sources import SPEECH_SOURCES
 from sources.game_log.fvtt_chat import FvttChatSource
 from ui.shell import theme
 from ui.shell._demo_stub_panel import DemoStubPanel
+from ui.shell.install_wizard import ensure_backend_installed
 from ui.shell.run_controller import RunController, RunRequest
 from ui.shell.screens import SessionScreen, SessionScreenData
 from ui.shell.settings_drawer import SettingsDrawer
 from ui.widgets import SourceCardData
+
+#: Maps ``PipelineParams.speech_backend`` values to the
+#: :class:`core.backend_installers.BackendId` that must be installed
+#: before the pipeline can run with that backend. Kept here (UI layer)
+#: rather than in ``core/`` because the mapping is a UI concern: it
+#: decides which install wizard to show to the user, nothing more.
+_BACKEND_FOR_SPEECH: dict[str, BackendId] = {
+    "gigaam": BackendId.GIGAAM_RNNT_FP32,
+    "faster-whisper": BackendId.FASTER_WHISPER_LARGE_V3_RU,
+}
 
 _WINDOW_TITLE = "Session Transcriber — диктофон сессий"
 _DEFAULT_WIDTH = 1400
@@ -379,11 +391,53 @@ class MainWindow(QMainWindow):
             return
 
         params = self._build_pipeline_params()
+
+        # Pre-flight: make sure the ASR backend the pipeline is about
+        # to call is actually installed. The installer EXE already
+        # ticks the default backend, so this is only reached when the
+        # user switched to a non-installed backend in the settings
+        # drawer or manually deleted the backend directory.
+        if not self._ensure_speech_backend_installed(params.speech_backend):
+            return
+
         request = RunRequest(session_dir=self._session_dir, params=params)
         self._session_screen.set_state_running()
         started = self._run_controller.start(request)
         if not started:
             self._session_screen.set_state_idle()
+
+    def _ensure_speech_backend_installed(self, speech_backend: str) -> bool:
+        """Gate the Run button behind an Epic A tracked install check.
+
+        Returns ``True`` if the backend is (now) installed and the
+        run may proceed. Returns ``False`` if the user cancelled the
+        install or it failed — in which case the caller aborts.
+        """
+        backend_id = _BACKEND_FOR_SPEECH.get(speech_backend)
+        if backend_id is None:
+            # Unknown / unmapped backend — let the pipeline handle it
+            # and surface the error itself. Nothing to install.
+            return True
+
+        try:
+            installed = ensure_backend_installed(backend_id, parent=self)
+        except Exception as exc:  # noqa: BLE001 — UI boundary
+            _log.exception("Install wizard failed for %s", backend_id)
+            QMessageBox.critical(
+                self,
+                "Ошибка установки модели",
+                f"Не удалось установить {backend_id.value}:\n\n{exc}",
+            )
+            return False
+
+        if not installed:
+            QMessageBox.information(
+                self,
+                "Установка отменена",
+                f"Запуск отменён — модель {backend_id.value} не установлена.",
+            )
+            return False
+        return True
 
     def _build_pipeline_params(self) -> PipelineParams:
         """Build PipelineParams from the current modules' user-visible state.

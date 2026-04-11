@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sources.speech._gigaam_paths import gigaam_module_dir, read_version_file
+from sources.speech._bundle_download import files_by_logical, read_version_file
+from sources.speech._gigaam_paths import gigaam_module_dir
 
 if TYPE_CHECKING:
     from sources.speech.gigaam import GigaAMInstallParams, _VadTuning
@@ -35,15 +36,16 @@ def build_vad(
     del num_threads  # reserved for future use; tuning.num_threads is canonical
 
     module_dir = gigaam_module_dir(params)
-    info = read_version_file(module_dir)
-    if info is None:
+    payload = read_version_file(module_dir)
+    if payload is None:
         raise RuntimeError(
             "build_vad called before GigaAM install completed: "
             f"no version.json in {module_dir}"
         )
+    files = files_by_logical(payload)
 
     config = sherpa_onnx.VadModelConfig()
-    config.silero_vad.model = str(module_dir / info.files["vad"])
+    config.silero_vad.model = str(module_dir / files["vad"])
     config.silero_vad.threshold = tuning.threshold
     config.silero_vad.min_silence_duration = tuning.min_silence_duration
     config.silero_vad.min_speech_duration = tuning.min_speech_duration

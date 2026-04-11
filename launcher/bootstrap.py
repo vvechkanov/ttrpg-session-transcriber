@@ -1,50 +1,87 @@
-"""
-Bootstrap entry point — compiled into the single EXE via PyInstaller.
+"""Bootstrap entry point — compiled into ``WhisperX-Transcriber.exe``.
 
-Logic:
-  1. Determine DATA_DIR (%LOCALAPPDATA%/WhisperX-Transcriber)
-  2. If .installed sentinel exists and version matches → launch app
-  3. Otherwise → extract bundled assets, show installer UI, then launch app
+Post-migration flow (Epic A/B/C):
+
+    1. Resolve ``DATA_DIR = %APPDATA%/ttrpg-transcriber``. This is the
+       shared root that both the installer and the runtime use for
+       ``models/<backend>/``, ``tools/ffmpeg/``, and
+       ``session-transcriber/`` (the PySide6 shell).
+    2. Check the ``.installed`` sentinel. If it exists **and** points
+       at the current version **and** ``session-transcriber.exe`` is
+       still on disk, jump straight to step 4.
+    3. Otherwise, open :class:`launcher.installer_ui.InstallerWindow`.
+       That worker runs three stages: ffmpeg, ASR models (via
+       ``core.backend_installers.install_backend``), and runtime zip
+       download from GitHub Releases.
+    4. Spawn ``%APPDATA%/ttrpg-transcriber/session-transcriber/``
+       ``session-transcriber.exe`` with the ``PATH`` extended by the
+       local ffmpeg ``bin/`` directory, then exit. The bootstrap EXE
+       is a launcher — it does not stay resident.
+
+Legacy Python embeddable / pip-based install flow has been removed.
+All ML stacks live inside the ASR backend bundles themselves
+(see ``sources/speech/_fw_download.py`` and
+``sources/speech/_bundle_download.py``).
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 # When running from a PyInstaller bundle, sys._MEIPASS points to the
-# temporary directory where bundled data files are extracted.
+# temporary directory where bundled data files are extracted. Kept for
+# forward compatibility even though we no longer ship any bundled
+# Python runtime / tkinter files.
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
-# Persistent application data directory
-DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "WhisperX-Transcriber"
+# Shared data root — same as ``default_models_root()`` in
+# ``sources.speech._gigaam_paths`` and ``._fw_paths`` so the installer
+# and the runtime see the same ``models/`` tree.
+DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ttrpg-transcriber"
 
 SENTINEL = DATA_DIR / ".installed"
 
-_PROJECT_DIRS = ("ui", "core", "sources", "mergers", "renderers", "domain", "scripts", "prompts")
-
 
 def _get_version() -> str:
-    """Get the current version string."""
+    """Get the current installer version string."""
     try:
         from launcher.version import VERSION
         return VERSION
     except ImportError:
         pass
     try:
-        from version import VERSION
+        from version import VERSION  # type: ignore[no-redef]
         return VERSION
     except ImportError:
         return "0.0.0"
 
 
+def _runtime_exe() -> Path:
+    """Expected absolute path to the installed PySide6 runtime exe."""
+    # Import lazily so the module is loadable even if install_logic is
+    # missing during unit tests.
+    try:
+        from launcher.install_logic import RUNTIME_EXE_RELPATH
+    except ImportError:
+        from install_logic import RUNTIME_EXE_RELPATH  # type: ignore[no-redef]
+    return DATA_DIR / RUNTIME_EXE_RELPATH
+
+
 def _is_installed() -> bool:
-    """Check if the app is already installed with the current version."""
+    """Check that the sentinel matches our version AND the exe is on disk.
+
+    Both checks matter: a stale sentinel from a failed upgrade or a
+    user who deleted ``session-transcriber/`` manually should trigger
+    a fresh install.
+    """
     if not SENTINEL.exists():
+        return False
+    if not _runtime_exe().exists():
         return False
     try:
         data = json.loads(SENTINEL.read_text(encoding="utf-8"))
@@ -54,96 +91,46 @@ def _is_installed() -> bool:
 
 
 def _write_sentinel() -> None:
-    """Write the .installed sentinel file."""
-    import datetime
+    """Write the ``.installed`` sentinel file."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     SENTINEL.write_text(
-        json.dumps({
-            "version": _get_version(),
-            "installed_at": datetime.datetime.now().isoformat(),
-        }, indent=2),
+        json.dumps(
+            {
+                "version": _get_version(),
+                "installed_at": datetime.datetime.now().isoformat(),
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
 
-def _extract_project() -> None:
-    """Extract all bundled runtime directories into DATA_DIR.
+def _launch_runtime() -> None:
+    """Spawn ``session-transcriber.exe`` and detach.
 
-    P2: the six-layer package structure (ui, core, sources, mergers,
-    renderers, domain) plus scripts (chunk_text.py post-processor) and
-    prompts.
+    Extends the child process ``PATH`` with ``DATA_DIR/tools/ffmpeg/bin``
+    so the runtime can find ``ffmpeg.exe`` without the user touching
+    system PATH.
     """
-    for folder in _PROJECT_DIRS:
-        src = BUNDLE_DIR / folder
-        dst = DATA_DIR / folder
-        if src.exists() and src.is_dir():
-            if dst.exists():
-                shutil.rmtree(dst)
-            shutil.copytree(src, dst)
-
-
-def _find_python_zip() -> Path:
-    """Find the bundled Python embeddable zip."""
-    # Check in bundle (PyInstaller --add-data)
-    bundled = BUNDLE_DIR / "runtime" / "python-3.12.8-embed-amd64.zip"
-    if bundled.exists():
-        return bundled
-
-    # Check if already downloaded to DATA_DIR
-    cached = DATA_DIR / "python-3.12.8-embed-amd64.zip"
-    return cached  # install_logic will download if missing
-
-
-def _find_tkinter_files() -> Path | None:
-    """Find bundled tkinter files for the embeddable Python."""
-    tk_dir = BUNDLE_DIR / "runtime" / "tkinter_files"
-    if tk_dir.exists():
-        return tk_dir
-    return None
-
-
-def _launch_app() -> None:
-    """Launch the main GUI application via ``python -m ui``."""
-    python_exe = DATA_DIR / "python" / "pythonw.exe"
-    if not python_exe.exists():
-        python_exe = DATA_DIR / "python" / "python.exe"
-
-    if not python_exe.exists():
+    exe_path = _runtime_exe()
+    if not exe_path.exists():
         _show_error(
-            "Python runtime не найден.\n"
-            f"Ожидался: {python_exe}\n\n"
-            "Попробуйте удалить папку и запустить заново:\n"
-            f"  {DATA_DIR}"
-        )
-        return
-
-    ui_pkg = DATA_DIR / "ui" / "__main__.py"
-    if not ui_pkg.exists():
-        _show_error(
-            "ui/__main__.py не найден.\n"
-            f"Ожидался: {ui_pkg}\n\n"
-            "Попробуйте удалить папку и запустить заново:\n"
+            "Runtime приложение не найдено.\n"
+            f"Ожидался файл: {exe_path}\n\n"
+            "Попробуйте удалить каталог и запустить установщик заново:\n"
             f"  {DATA_DIR}"
         )
         return
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-    # Make DATA_DIR importable so ``python -m ui`` resolves the six-layer
-    # packages (ui, core, sources, mergers, renderers, domain).
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        str(DATA_DIR) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
-    )
 
     ffmpeg_bin = DATA_DIR / "tools" / "ffmpeg" / "bin"
-    python_scripts = DATA_DIR / "python" / "Scripts"
-    extra_path = []
-    if python_scripts.exists():
-        extra_path.append(str(python_scripts))
     if ffmpeg_bin.exists():
-        extra_path.append(str(ffmpeg_bin))
-    if extra_path:
-        env["PATH"] = ";".join(extra_path + [env.get("PATH", "")])
+        existing_path = env.get("PATH", "")
+        env["PATH"] = (
+            str(ffmpeg_bin) + (os.pathsep + existing_path if existing_path else "")
+        )
 
     startupinfo = None
     creationflags = 0
@@ -153,19 +140,21 @@ def _launch_app() -> None:
         creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
 
     subprocess.Popen(
-        [str(python_exe), "-m", "ui"],
-        cwd=str(DATA_DIR),
+        [str(exe_path)],
+        cwd=str(exe_path.parent),
         env=env,
         startupinfo=startupinfo,
         creationflags=creationflags,
+        close_fds=True,
     )
 
 
 def _show_error(message: str) -> None:
-    """Show an error dialog."""
+    """Show an error dialog (tkinter — always available on Windows)."""
     try:
         import tkinter as tk
         from tkinter import messagebox
+
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror("WhisperX Transcriber — Ошибка", message)
@@ -175,31 +164,22 @@ def _show_error(message: str) -> None:
 
 
 def _run_installer() -> None:
-    """Show the installer UI and run installation."""
+    """Show the installer UI and run a 3-stage install."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Extract project files first (installer doesn't need them, but
-    # they'll be ready when the app launches)
-    _extract_project()
-
-    python_zip = _find_python_zip()
-    tkinter_src = _find_tkinter_files()
 
     def on_complete() -> None:
         """Called when installation finishes successfully."""
         _write_sentinel()
-        _launch_app()
+        _launch_runtime()
 
     try:
         from launcher.installer_ui import InstallerWindow
     except ImportError:
-        from installer_ui import InstallerWindow
+        from installer_ui import InstallerWindow  # type: ignore[no-redef]
 
     window = InstallerWindow(
         data_dir=DATA_DIR,
-        python_zip=python_zip,
-        tkinter_src=tkinter_src,
-        scripts_dir=DATA_DIR / "scripts",
+        version=_get_version(),
         on_complete=on_complete,
     )
     window.run()
@@ -208,9 +188,7 @@ def _run_installer() -> None:
 def main() -> None:
     """Entry point."""
     if _is_installed():
-        # Project files might have been updated in a new version
-        _extract_project()
-        _launch_app()
+        _launch_runtime()
     else:
         _run_installer()
 

@@ -1,14 +1,30 @@
-"""
-Installation logic — Python port of install_whisperx_windows.ps1.
+"""Installation logic for the bootstrap EXE (Epic A / B + C).
 
-Every public function accepts on_log(msg) and on_progress(percent) callbacks
-so the UI can display real-time progress.
+Post-migration the installer EXE (``WhisperX-Transcriber.exe``) is a
+PyInstaller-frozen Python process, so it can call
+``core.backend_installers.install_backend`` **in-process** — no more
+embedded Python, no more ``pip install torch|whisperx|sherpa-onnx``,
+no more ``get-pip.py``. ASR bundles ship through the Epic A tracked
+install path (``%APPDATA%/ttrpg-transcriber/models/<backend>/<slug>/``).
+
+What this module is still responsible for:
+    * ffmpeg download into ``DATA_DIR/tools/ffmpeg`` (the runtime EXE
+      picks it up via the ``PATH`` environment variable the launcher
+      extends before ``Popen``).
+    * ``detect_gpu`` — informational banner in the installer UI so the
+      user sees "CUDA mode" vs "CPU mode" and understands what the
+      runtime will do.
+    * ``STEP_WEIGHTS`` — overall progress bar weighting used by
+      :mod:`launcher.installer_ui`.
+
+Everything else (PyTorch / WhisperX / get-pip / embeddable Python /
+sherpa-onnx pip) was removed — those stacks live inside the ASR
+backend bundles themselves now (see
+``sources/speech/_fw_download.py`` wheel unpacking).
 """
 
 from __future__ import annotations
 
-import io
-import os
 import re
 import shutil
 import subprocess
@@ -17,40 +33,39 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Callable
-from urllib.request import urlopen, Request
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-PYTHON_EMBED_URL = (
-    "https://www.python.org/ftp/python/3.12.8/python-3.12.8-embed-amd64.zip"
-)
-PYTHON_EMBED_ZIP = "python-3.12.8-embed-amd64.zip"
-
-GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
-TORCH_INDEX_CUDA = "https://download.pytorch.org/whl/cu126"
-TORCH_INDEX_CPU = "https://download.pytorch.org/whl/cpu"
+#: GitHub repository that hosts the release assets (installer EXE +
+#: PySide6 runtime zip). Tag format: ``v{VERSION}``; asset filename:
+#: ``session-transcriber.zip``. See ``.github/workflows/release.yml``.
+RUNTIME_REPO = "vvechkanov/ttrpg-session-transcriber"
+RUNTIME_ASSET = "session-transcriber.zip"
 
-WHISPERX_PIP = "whisperx @ git+https://github.com/m-bain/whisperX.git"
-
-# sherpa-onnx — runtime для GigaAMSource. Минимальная версия 1.12.0 обязательна:
-# до неё hotwords-биасинг для NeMo transducer моделей тихо игнорировался
-# (см. gigaam-v2.md §6.5.4, PR #3077).
-SHERPA_ONNX_PIP = "sherpa-onnx>=1.12.0,<2.0"
-
-# Weighted step percentages for overall progress
+#: Weights for the overall progress bar in :mod:`launcher.installer_ui`.
+#: Sum does not matter — UI normalises to 100 %. Weights reflect the
+#: *actual time* each stage takes on a mid-range home connection:
+#:
+#:     * ffmpeg  ~50 MB  ->  10 % (fast CDN)
+#:     * models  ~1-3 GB -> 60 % (biggest payload, dominates total time)
+#:     * runtime ~80 MB  -> 30 % (session-transcriber.zip from GitHub
+#:       Release, downloaded + unzipped by bootstrap)
 STEP_WEIGHTS = {
-    "python":   4,
-    "pip":      4,
-    "pytorch":  47,
-    "whisperx": 21,
-    "ffmpeg":   9,
-    "models":   15,
+    "ffmpeg": 10,
+    "models": 60,
+    "runtime": 30,
 }
+
+#: Path inside the extracted runtime zip where ``session-transcriber.exe``
+#: lives. Matches the ``COLLECT(name=APP_NAME)`` output of the root
+#: ``build.spec`` — PyInstaller creates a subdirectory named after
+#: ``APP_NAME`` and puts the exe + Qt DLLs inside it.
+RUNTIME_EXE_RELPATH = Path("session-transcriber") / "session-transcriber.exe"
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[float], None]
@@ -60,8 +75,12 @@ ProgressFn = Callable[[float], None]
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _download(url: str, dest: Path, on_log: LogFn,
-              on_progress: ProgressFn | None = None) -> None:
+def _download(
+    url: str,
+    dest: Path,
+    on_log: LogFn,
+    on_progress: ProgressFn | None = None,
+) -> None:
     """Download a URL to a local file with optional progress updates."""
     on_log(f"Скачивание: {url}")
     req = Request(url, headers={"User-Agent": "WhisperX-Transcriber/1.0"})
@@ -84,175 +103,18 @@ def _download(url: str, dest: Path, on_log: LogFn,
     on_log(f"Скачано: {dest.name} ({downloaded // 1024} KB)")
 
 
-def _run_pip(python_exe: Path, args: list[str], *,
-             on_log: LogFn, on_progress: ProgressFn | None = None,
-             cwd: Path | None = None) -> None:
-    """Run pip via python -m pip with real-time output streaming."""
-    cmd = [str(python_exe), "-m", "pip"] + args
-    on_log(">> " + " ".join(cmd))
-
-    startupinfo = None
-    creationflags = 0
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(cwd) if cwd else None,
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-    )
-
-    for line in proc.stdout:  # type: ignore[union-attr]
-        line = line.rstrip()
-        if not line:
-            continue
-        on_log(line)
-        # Parse pip download progress (e.g. "Downloading ... 45%")
-        if on_progress:
-            m = re.search(r"(\d+)%", line)
-            if m:
-                on_progress(float(m.group(1)))
-
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"pip exited with code {proc.returncode}")
-
-
 # ---------------------------------------------------------------------------
-# Installation steps
+# Stages
 # ---------------------------------------------------------------------------
-
-def extract_embedded_python(
-    bundle_python_zip: Path,
-    dest_dir: Path,
-    tkinter_src: Path | None,
-    on_log: LogFn,
-    on_progress: ProgressFn,
-) -> Path:
-    """
-    Extract the Python embeddable package and configure it for pip/tkinter.
-
-    Args:
-        bundle_python_zip: path to python-3.12.x-embed-amd64.zip
-        dest_dir: where to extract (e.g. %LOCALAPPDATA%/WhisperX-Transcriber/python)
-        tkinter_src: directory with tkinter files (_tkinter.pyd, tcl/, tk/, etc.)
-
-    Returns:
-        Path to the extracted python.exe
-    """
-    on_log("Извлечение Python runtime...")
-    on_progress(0)
-
-    if dest_dir.exists():
-        shutil.rmtree(dest_dir, ignore_errors=True)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-
-    with zipfile.ZipFile(bundle_python_zip, "r") as zf:
-        zf.extractall(dest_dir)
-    on_progress(50)
-
-    # Enable site-packages by editing python3XX._pth
-    pth_files = list(dest_dir.glob("python*._pth"))
-    for pth in pth_files:
-        text = pth.read_text(encoding="utf-8")
-        text = text.replace("#import site", "import site")
-        if "import site" not in text:
-            text += "\nimport site\n"
-        pth.write_text(text, encoding="utf-8")
-        on_log(f"  Enabled site-packages in {pth.name}")
-
-    # Copy tkinter files if provided
-    if tkinter_src and tkinter_src.exists():
-        on_log("  Копирование tkinter...")
-        for item in tkinter_src.iterdir():
-            dst = dest_dir / item.name
-            if item.is_dir():
-                if dst.exists():
-                    shutil.rmtree(dst)
-                shutil.copytree(item, dst)
-            else:
-                shutil.copy2(item, dst)
-
-    on_progress(100)
-    python_exe = dest_dir / "python.exe"
-    if not python_exe.exists():
-        raise FileNotFoundError(f"python.exe not found in {dest_dir}")
-
-    on_log(f"Python runtime: {python_exe}")
-    return python_exe
-
-
-def download_embedded_python(
-    dest_zip: Path, on_log: LogFn, on_progress: ProgressFn
-) -> None:
-    """Download the Python embeddable package from python.org."""
-    if dest_zip.exists():
-        on_log(f"Python embeddable уже скачан: {dest_zip.name}")
-        on_progress(100)
-        return
-    _download(PYTHON_EMBED_URL, dest_zip, on_log, on_progress)
-
-
-def install_pip(python_exe: Path, on_log: LogFn, on_progress: ProgressFn) -> None:
-    """Download and run get-pip.py."""
-    on_log("Установка pip...")
-    on_progress(0)
-
-    get_pip = python_exe.parent / "get-pip.py"
-    _download(GET_PIP_URL, get_pip, on_log)
-    on_progress(30)
-
-    # Run get-pip.py
-    cmd = [str(python_exe), str(get_pip)]
-    on_log(">> " + " ".join(cmd))
-
-    startupinfo = None
-    creationflags = 0
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        startupinfo=startupinfo,
-        creationflags=creationflags,
-    )
-    for line in proc.stdout:  # type: ignore[union-attr]
-        line = line.rstrip()
-        if line:
-            on_log(line)
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"get-pip.py exited with code {proc.returncode}")
-
-    on_progress(70)
-
-    # Upgrade pip + setuptools + wheel
-    _run_pip(python_exe, ["install", "--upgrade", "pip", "setuptools", "wheel"],
-             on_log=on_log)
-    on_progress(100)
-    on_log("pip установлен.")
-
-    # Clean up get-pip.py
-    get_pip.unlink(missing_ok=True)
-
 
 def detect_gpu(on_log: LogFn) -> str:
-    """Detect NVIDIA GPU via nvidia-smi. Returns 'cuda' or 'cpu'."""
+    """Detect NVIDIA GPU via nvidia-smi. Returns 'cuda' or 'cpu'.
+
+    Informational only — the installer does not install torch/CUDA
+    wheels anymore. The ASR backend bundle chooses CPU vs GPU compute
+    kernels at runtime based on what the user picks in the settings
+    drawer.
+    """
     try:
         startupinfo = None
         creationflags = 0
@@ -270,7 +132,6 @@ def detect_gpu(on_log: LogFn) -> str:
             creationflags=creationflags,
         )
         if result.returncode == 0:
-            # Try to parse GPU name
             for line in result.stdout.splitlines():
                 m = re.search(r"(NVIDIA\s+\S+.*?)\s+\|", line)
                 if m:
@@ -284,82 +145,21 @@ def detect_gpu(on_log: LogFn) -> str:
     return "cpu"
 
 
-def install_pytorch(
-    python_exe: Path, mode: str, on_log: LogFn, on_progress: ProgressFn
-) -> None:
-    """Install PyTorch (CUDA or CPU)."""
-    index_url = TORCH_INDEX_CUDA if mode == "cuda" else TORCH_INDEX_CPU
-    label = "CUDA" if mode == "cuda" else "CPU"
-    on_log(f"Установка PyTorch ({label})... Это может занять несколько минут.")
-    on_progress(0)
-
-    _run_pip(
-        python_exe,
-        ["install", "--no-cache-dir", "--index-url", index_url,
-         "torch", "torchvision", "torchaudio"],
-        on_log=on_log,
-        on_progress=on_progress,
-    )
-    on_progress(100)
-    on_log(f"PyTorch ({label}) установлен.")
-
-
-def install_whisperx(
-    python_exe: Path, on_log: LogFn, on_progress: ProgressFn
-) -> None:
-    """Install WhisperX + sherpa-onnx (for GigaAM backend)."""
-    on_log("Установка WhisperX...")
-    on_progress(0)
-
-    _run_pip(
-        python_exe,
-        ["install", "--no-cache-dir", WHISPERX_PIP],
-        on_log=on_log,
-        on_progress=lambda p: on_progress(p * 0.85),
-    )
-    on_progress(85)
-    on_log("WhisperX установлен.")
-
-    on_log(f"Установка {SHERPA_ONNX_PIP} (runtime для GigaAM)...")
-    _run_pip(
-        python_exe,
-        ["install", "--no-cache-dir", SHERPA_ONNX_PIP],
-        on_log=on_log,
-        on_progress=lambda p: on_progress(85 + p * 0.15),
-    )
-    on_progress(100)
-    on_log("sherpa-onnx установлен.")
-
-
-def repin_pytorch_cuda(
-    python_exe: Path, on_log: LogFn, on_progress: ProgressFn
-) -> None:
-    """Re-pin PyTorch CUDA wheels after WhisperX (it may pull CPU torch)."""
-    on_log("Фиксация PyTorch CUDA...")
-    on_progress(0)
-
-    _run_pip(
-        python_exe,
-        ["install", "--force-reinstall", "--no-cache-dir", "--no-deps",
-         "--index-url", TORCH_INDEX_CUDA,
-         "torch", "torchvision", "torchaudio"],
-        on_log=on_log,
-        on_progress=on_progress,
-    )
-    on_progress(100)
-
-
 def download_ffmpeg(
     dest_dir: Path, on_log: LogFn, on_progress: ProgressFn
 ) -> None:
-    """Download and extract ffmpeg."""
+    """Download and extract ffmpeg into ``dest_dir``.
+
+    ``dest_dir`` becomes the top-level ffmpeg directory with
+    ``bin/ffmpeg.exe`` inside. If ffmpeg is already present in the
+    system ``PATH``, the download is skipped.
+    """
     ffmpeg_exe = dest_dir / "bin" / "ffmpeg.exe"
     if ffmpeg_exe.exists():
         on_log(f"ffmpeg уже установлен: {ffmpeg_exe}")
         on_progress(100)
         return
 
-    # Check system PATH
     if shutil.which("ffmpeg"):
         on_log("ffmpeg найден в системном PATH — пропуск загрузки.")
         on_progress(100)
@@ -369,7 +169,9 @@ def download_ffmpeg(
     on_progress(0)
 
     tmp_zip = Path(tempfile.gettempdir()) / "ffmpeg-release-essentials.zip"
-    _download(FFMPEG_URL, tmp_zip, on_log, on_progress=lambda p: on_progress(p * 0.7))
+    _download(
+        FFMPEG_URL, tmp_zip, on_log, on_progress=lambda p: on_progress(p * 0.7)
+    )
 
     on_log("Распаковка ffmpeg...")
     on_progress(70)
@@ -381,7 +183,6 @@ def download_ffmpeg(
     with zipfile.ZipFile(tmp_zip, "r") as zf:
         zf.extractall(tmp_extract)
 
-    # Find the top-level directory inside the archive
     subdirs = [d for d in tmp_extract.iterdir() if d.is_dir()]
     if not subdirs:
         raise RuntimeError("Unexpected ffmpeg archive layout")
@@ -392,7 +193,6 @@ def download_ffmpeg(
         shutil.rmtree(dest_dir)
     shutil.move(str(top_dir), str(dest_dir))
 
-    # Cleanup
     shutil.rmtree(tmp_extract, ignore_errors=True)
     tmp_zip.unlink(missing_ok=True)
 
@@ -400,60 +200,74 @@ def download_ffmpeg(
     on_log(f"ffmpeg установлен: {dest_dir}")
 
 
-def verify_installation(python_exe: Path, on_log: LogFn) -> dict:
-    """Verify that torch and whisperx can be imported. Returns diagnostic info."""
-    on_log("Проверка установки...")
-    result = {"ok": False, "torch": "", "cuda": False, "gpu": "", "whisperx": False}
+def _resolve_runtime_url(version: str) -> str:
+    """Build the download URL for the runtime zip of a given version.
 
-    startupinfo = None
-    creationflags = 0
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-
-    check_script = (
-        "import json, sys\n"
-        "d = {'ok': False, 'torch': '', 'cuda': False, 'gpu': '', 'whisperx': False}\n"
-        "try:\n"
-        "    import torch\n"
-        "    d['torch'] = torch.__version__\n"
-        "    d['cuda'] = torch.cuda.is_available()\n"
-        "    if d['cuda'] and torch.cuda.device_count() > 0:\n"
-        "        d['gpu'] = torch.cuda.get_device_name(0)\n"
-        "except Exception as e:\n"
-        "    d['error_torch'] = str(e)\n"
-        "try:\n"
-        "    import whisperx\n"
-        "    d['whisperx'] = True\n"
-        "except Exception as e:\n"
-        "    d['error_whisperx'] = str(e)\n"
-        "d['ok'] = bool(d['torch'] and d['whisperx'])\n"
-        "print(json.dumps(d))\n"
+    We deliberately bypass the GitHub API (no auth, no rate limits)
+    by going straight to the ``releases/download/<tag>/<asset>`` CDN
+    path. This fails cleanly with HTTP 404 if the release is missing,
+    which is exactly the error we want to surface to the user.
+    """
+    tag = f"v{version}"
+    return (
+        f"https://github.com/{RUNTIME_REPO}/releases/download/"
+        f"{tag}/{RUNTIME_ASSET}"
     )
 
-    proc = subprocess.run(
-        [str(python_exe), "-c", check_script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=60,
-        startupinfo=startupinfo,
-        creationflags=creationflags,
+
+def download_runtime_zip(
+    data_dir: Path,
+    version: str,
+    on_log: LogFn,
+    on_progress: ProgressFn,
+) -> Path:
+    """Download and extract the PySide6 runtime bundle.
+
+    Flow:
+        1. Download ``session-transcriber.zip`` from the matching
+           GitHub Release tag into ``%TMP%``.
+        2. Extract it into ``data_dir`` so the final layout is
+           ``data_dir/session-transcriber/session-transcriber.exe``.
+        3. Wipe any previous ``session-transcriber/`` directory first —
+           this makes reinstall/upgrade idempotent.
+
+    Returns:
+        Path to the extracted ``session-transcriber.exe``.
+
+    Raises:
+        RuntimeError: if the zip layout doesn't contain
+            ``session-transcriber.exe`` where expected.
+    """
+    on_log(f"Загрузка приложения (session-transcriber v{version})...")
+    on_progress(0)
+
+    runtime_dir = data_dir / "session-transcriber"
+    if runtime_dir.exists():
+        on_log(f"Удаление старой версии: {runtime_dir}")
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+    tmp_zip = Path(tempfile.gettempdir()) / "session-transcriber.zip"
+    url = _resolve_runtime_url(version)
+    _download(
+        url, tmp_zip, on_log, on_progress=lambda p: on_progress(p * 0.8)
     )
 
-    import json
-    if proc.returncode == 0 and proc.stdout.strip():
-        try:
-            result = json.loads(proc.stdout.strip())
-        except json.JSONDecodeError:
-            pass
+    on_log("Распаковка приложения...")
+    on_progress(80)
 
-    if result.get("ok"):
-        on_log(f"  torch {result['torch']}  |  CUDA: {result['cuda']}  |  GPU: {result.get('gpu', 'n/a')}")
-        on_log("  whisperx OK")
-    else:
-        on_log(f"  WARN: проверка не пройдена: {result}")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(tmp_zip, "r") as zf:
+        zf.extractall(data_dir)
 
-    return result
+    tmp_zip.unlink(missing_ok=True)
+
+    runtime_exe = data_dir / RUNTIME_EXE_RELPATH
+    if not runtime_exe.exists():
+        raise RuntimeError(
+            f"session-transcriber.exe не найден после распаковки: "
+            f"ожидался {runtime_exe}. Проверьте формат zip-архива в релизе."
+        )
+
+    on_progress(100)
+    on_log(f"Приложение установлено: {runtime_exe}")
+    return runtime_exe
