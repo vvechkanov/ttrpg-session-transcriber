@@ -44,11 +44,15 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _token_overlap(a: str, b: str) -> float:
-    """Symmetric token overlap: 2 * |intersection| / (|A| + |B|).
+    """Multiset Dice coefficient over tokens: 2 * |A ∩ B| / (|A| + |B|).
 
     Returns 1.0 for identical texts, 0.0 for completely different.
     Tolerates ASR variance, punctuation drift, whitespace differences.
+    Uses multiset (Counter) intersection so repeated tokens count correctly —
+    otherwise identical texts with duplicates would score below 1.0.
     """
+    from collections import Counter
+
     tokens_a = _tokenize(a)
     tokens_b = _tokenize(b)
 
@@ -57,10 +61,8 @@ def _token_overlap(a: str, b: str) -> float:
     if not tokens_a or not tokens_b:
         return 0.0
 
-    set_a = set(tokens_a)
-    set_b = set(tokens_b)
-    intersection = set_a & set_b
-    return 2 * len(intersection) / (len(tokens_a) + len(tokens_b))
+    intersection = sum((Counter(tokens_a) & Counter(tokens_b)).values())
+    return 2 * intersection / (len(tokens_a) + len(tokens_b))
 
 
 # ---------------------------------------------------------------------------
