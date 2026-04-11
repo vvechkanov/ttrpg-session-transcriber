@@ -70,16 +70,21 @@ class TestResolveTemplate:
         assert callable(getattr(module, "make_settings_panel", None))
         assert callable(getattr(module, "make_runtime_panel", None))
 
-    def test_unregistered_stub_templates_still_raise(self):
-        """Phase 8 stubs: chat_source / merger / renderer — пока нет файлов.
-
-        Резолвер зарегистрированного id должен пытаться импортировать
-        модуль и падать с ``ModuleNotFoundError`` до Phase 8.
-        """
+    def test_all_registered_templates_resolve_after_phase_8(self):
+        """Phase 8: chat_source / merger / renderer стубы реализованы."""
+        pytest.importorskip("PySide6")
         for template_id in ("chat_source", "merger", "renderer"):
             cfg = UIConfig(template=template_id)
-            with pytest.raises(ModuleNotFoundError):
-                resolve_template(cfg)
+            module = resolve_template(cfg)
+            assert callable(getattr(module, "make_home_card", None)), (
+                f"{template_id}: missing make_home_card"
+            )
+            assert callable(getattr(module, "make_settings_panel", None)), (
+                f"{template_id}: missing make_settings_panel"
+            )
+            assert callable(getattr(module, "make_runtime_panel", None)), (
+                f"{template_id}: missing make_runtime_panel"
+            )
 
 
 class TestLazyImport:
