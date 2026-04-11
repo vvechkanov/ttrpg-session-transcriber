@@ -71,6 +71,8 @@ a = Analysis(  # noqa: F821
     hiddenimports=[
         'installer_ui',
         'install_logic',
+        'uninstaller_ui',
+        'uninstall_logic',
         'version',
         # Epic A backend installer shim + source modules.
         'core.backend_installers',

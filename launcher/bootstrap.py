@@ -22,6 +22,20 @@ Legacy Python embeddable / pip-based install flow has been removed.
 All ML stacks live inside the ASR backend bundles themselves
 (see ``sources/speech/_fw_download.py`` and
 ``sources/speech/_bundle_download.py``).
+
+Uninstall (L1 + L2)
+-------------------
+``WhisperX-Transcriber.exe --uninstall`` wipes ``DATA_DIR`` and
+removes the Add/Remove Programs entry. On successful install a copy
+of this EXE is placed at ``DATA_DIR/uninstall.exe`` and the HKCU
+``Uninstall`` registry key points at it — so Windows' built-in
+"Uninstall" button works even after the user deletes the original
+download.
+
+When the running EXE is the copy inside ``DATA_DIR`` we can't delete
+it directly (Windows file lock on the process image), so we relocate
+ourselves to ``%TEMP%`` and relaunch with ``--from-temp`` before
+showing the UninstallerWindow.
 """
 
 from __future__ import annotations
@@ -29,8 +43,10 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # When running from a PyInstaller bundle, sys._MEIPASS points to the
@@ -45,6 +61,11 @@ BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "ttrpg-transcriber"
 
 SENTINEL = DATA_DIR / ".installed"
+
+#: CLI flag used internally by ``_run_uninstaller`` to signal that the
+#: currently-running EXE is already a temp copy and is free to delete
+#: the original ``DATA_DIR/uninstall.exe``.
+_FROM_TEMP_FLAG = "--from-temp"
 
 
 def _get_version() -> str:
@@ -163,6 +184,40 @@ def _show_error(message: str) -> None:
         print(f"ERROR: {message}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# L2 — Add/Remove Programs registration
+# ---------------------------------------------------------------------------
+
+def _refresh_uninstall_registration() -> None:
+    """Copy the bootstrap EXE to ``DATA_DIR`` and refresh the registry.
+
+    Idempotent and silent: called from both the post-install hook and
+    every warm launch, so a user who deleted ``uninstall.exe`` or
+    cleared the registry key manually gets it restored automatically.
+
+    Failures are swallowed — Add/Remove Programs integration is a
+    nice-to-have, not a blocker for the main launch path.
+    """
+    try:
+        from launcher.uninstall_logic import (
+            copy_self_to_data_dir,
+            write_uninstall_registry_entry,
+        )
+    except ImportError:
+        from uninstall_logic import (  # type: ignore[no-redef]
+            copy_self_to_data_dir,
+            write_uninstall_registry_entry,
+        )
+
+    try:
+        dst = copy_self_to_data_dir(DATA_DIR)
+        if dst is not None:
+            write_uninstall_registry_entry(DATA_DIR, dst, _get_version())
+    except Exception:
+        # L2 is a best-effort integration point; do not break launch.
+        pass
+
+
 def _run_installer() -> None:
     """Show the installer UI and run a 3-stage install."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -170,6 +225,7 @@ def _run_installer() -> None:
     def on_complete() -> None:
         """Called when installation finishes successfully."""
         _write_sentinel()
+        _refresh_uninstall_registration()
         _launch_runtime()
 
     try:
@@ -185,9 +241,149 @@ def _run_installer() -> None:
     window.run()
 
 
+# ---------------------------------------------------------------------------
+# L1 — --uninstall flow
+# ---------------------------------------------------------------------------
+
+def _current_exe_path() -> Path | None:
+    """Path of the running frozen EXE, or None when running from source."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    return None
+
+
+def _running_from_data_dir() -> bool:
+    """True if this EXE is the ``DATA_DIR/uninstall.exe`` copy.
+
+    When True, deleting ``DATA_DIR`` will fail on Windows because the
+    OS holds an exclusive lock on the running process image. The
+    caller must relocate to ``%TEMP%`` before proceeding.
+    """
+    exe = _current_exe_path()
+    if exe is None:
+        return False
+    try:
+        return exe.parent.resolve() == DATA_DIR.resolve()
+    except OSError:
+        return False
+
+
+def _relaunch_from_temp(original_exe: Path) -> None:
+    """Copy this EXE to ``%TEMP%`` and relaunch with ``--from-temp``.
+
+    After the copy is running, ``sys.exit(0)`` here releases the file
+    lock on ``original_exe`` so the temp copy can delete it during
+    the final cleanup pass.
+    """
+    tmp_root = Path(tempfile.mkdtemp(prefix="whisperx-uninstall-"))
+    tmp_exe = tmp_root / "uninstall.exe"
+    shutil.copy2(str(original_exe), str(tmp_exe))
+
+    creationflags = 0
+    startupinfo = None
+    if sys.platform == "win32":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+
+    subprocess.Popen(
+        [str(tmp_exe), "--uninstall", _FROM_TEMP_FLAG, str(original_exe)],
+        cwd=str(tmp_root),
+        startupinfo=startupinfo,
+        creationflags=creationflags,
+        close_fds=True,
+    )
+
+
+def _cleanup_after_uninstall(original_exe: Path | None) -> None:
+    """Final pass: delete the original ``DATA_DIR/uninstall.exe``.
+
+    Runs only when we were invoked with ``--from-temp``. After the
+    delete succeeds DATA_DIR may now be empty, in which case we also
+    try to remove it (best-effort).
+    """
+    if original_exe is None:
+        return
+    for _ in range(20):  # ~2 s — wait for parent process to release lock
+        try:
+            if original_exe.exists():
+                original_exe.unlink()
+            break
+        except OSError:
+            import time
+            time.sleep(0.1)
+
+    try:
+        parent = original_exe.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+
+def _run_uninstaller(argv: list[str]) -> None:
+    """Show the UninstallerWindow and wipe ``DATA_DIR``.
+
+    If we are running from ``DATA_DIR/uninstall.exe`` and have not
+    yet relocated to ``%TEMP%``, this function copies itself there
+    and exits — the relaunched copy continues the flow. Otherwise
+    it shows :class:`launcher.uninstaller_ui.UninstallerWindow` and
+    schedules final self-deletion via :func:`_cleanup_after_uninstall`.
+    """
+    from_temp = _FROM_TEMP_FLAG in argv
+    original_exe: Path | None = None
+    if from_temp:
+        # Argument layout: ``--uninstall --from-temp <original_exe>``
+        try:
+            idx = argv.index(_FROM_TEMP_FLAG)
+            original_exe = Path(argv[idx + 1]).resolve()
+        except (ValueError, IndexError):
+            original_exe = None
+
+    if not from_temp and _running_from_data_dir():
+        exe = _current_exe_path()
+        if exe is not None:
+            try:
+                _relaunch_from_temp(exe)
+            except OSError as exc:
+                _show_error(f"Не удалось подготовить деинсталлятор: {exc}")
+                return
+            sys.exit(0)
+
+    # skip_self: if we're still the running exe inside DATA_DIR (shouldn't
+    # happen after the relaunch above, but defensive) pass its path so
+    # uninstall_everything skips it.
+    skip_self: Path | None = None
+    if not from_temp:
+        exe = _current_exe_path()
+        if exe is not None and _running_from_data_dir():
+            skip_self = exe
+
+    def on_complete() -> None:
+        _cleanup_after_uninstall(original_exe)
+
+    try:
+        from launcher.uninstaller_ui import UninstallerWindow
+    except ImportError:
+        from uninstaller_ui import UninstallerWindow  # type: ignore[no-redef]
+
+    window = UninstallerWindow(
+        data_dir=DATA_DIR,
+        skip_self=skip_self,
+        on_complete=on_complete,
+    )
+    window.run()
+
+
 def main() -> None:
     """Entry point."""
+    argv = sys.argv[1:]
+    if "--uninstall" in argv:
+        _run_uninstaller(argv)
+        return
+
     if _is_installed():
+        _refresh_uninstall_registration()
         _launch_runtime()
     else:
         _run_installer()
