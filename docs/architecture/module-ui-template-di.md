@@ -1,7 +1,13 @@
-# Module UI Template DI
+# Module UI Template DI — implementation notes
 
-**Статус:** tech notes для архитектора → кандидат в ADR-016
-**Контекст:** обсуждение Screen 3, 2026-04-11
+**Статус:** **superseded by [ADR-016](../adr/ADR-016-module-ui-contract.md)** для канонического контракта.
+Файл сохраняется как implementation notes: объясняет мотивацию,
+обсуждает trade-off'ы, показывает примеры. За каноническими определениями
+`UIConfig` / `SettingsPanelProtocol` / layer-rules — иди в ADR-016.
+Open questions в §Open questions ниже считаются **снятыми** ADR-016;
+оставлены здесь для истории.
+
+**Дата исходных заметок:** 2026-04-11
 **Уровень:** архитектурный слой, влияет на `sources/`, `mergers/`, `renderers/`, `ui/`
 
 ---
@@ -104,16 +110,18 @@ def make_runtime_panel(parent, module, state, params) -> Widget:
     Для audio_source это: список треков, прогресс-бары, ETA, per-track статусы.
     """
 
-def make_settings_widget(parent, module, state, params) -> Widget:
-    """Контент для модального окна [Настроить].
+def make_settings_panel(parent, module, state, params) -> Widget:
+    """Контент для side drawer'а [Настроить].
 
-    Чекбоксы/поля из params. Валидация. Save/cancel кнопки НЕ здесь — их
-    рисует хост.
+    Чекбоксы/поля/таблицы из params. Валидация. Save/cancel кнопки НЕ
+    здесь — их рисует хост (SettingsDrawer). Возвращаемый виджет должен
+    реализовывать SettingsPanelProtocol (см. ниже).
     """
 ```
 
 Все три фабрики получают:
-- `parent` — tkinter parent frame
+- `parent` — Qt parent widget (`QWidget`). Для `make_settings_panel`
+  хост кладёт результат в `QScrollArea` бокового drawer'а.
 - `module` — ссылка на сам модуль (для чтения и записи его состояния)
 - `state` — снэпшот runtime-состояния (для runtime_panel — прогресс, для
   home_card — «idle/running/dimmed», etc.)
@@ -143,6 +151,65 @@ for module in session.active_modules:
     card = tmpl.make_home_card(parent, module, state, module.ui_config.params)
     cards_frame.add(card)
 ```
+
+### Хост: SettingsDrawer
+
+`[Настроить]` на любой карточке → открывается **боковой drawer справа**
+(не модальное окно). Drawer — это `QFrame` с `parent = main_window`, но
+НЕ помещённый в layout: он живёт как оверлей поверх главного контента,
+как Android navigation drawer / гамбургер-меню.
+
+Параметры drawer'а (MVP):
+
+- **Ширина:** 80% от текущей ширины главного окна, адаптивно на `resizeEvent`
+- **Поведение:** перекрывает правые 80% окна, **не сдвигает** основной
+  контент. Основной контент остаётся на месте, drawer ложится сверху.
+- **Scrim:** полупрозрачный слой (`rgba(0,0,0,0.25)`) закрывает левые 20%
+  окна, ловит клики для закрытия drawer'а.
+- **Анимация:** `QPropertyAnimation` по `geometry`, 220 мс, `OutCubic`.
+  Старт — за правым краем окна, финиш — прижат к правому краю.
+- **Закрытие:** клик по scrim, Esc, крестик в хедере, кнопки Отмена/Сохранить.
+  При `has_unsaved_changes() == True` — подтверждение «Сохранить изменения?».
+- **Одновременность:** в любой момент открыт **один** drawer на всё
+  приложение. Открытие нового первым закрывает предыдущий.
+- **Во время обработки:** `[Настроить]` задизейблены, drawer не открывается.
+
+Структура drawer'а сверху вниз:
+
+1. **Sticky header** (~72 px) — иконка модуля, заголовок («Настройки ·
+   Аудио»), подзаголовок (backend + язык), крестик справа. Рисует хост.
+2. **QScrollArea** — содержит `make_settings_panel(...)` от модуля. Модуль
+   отвечает только за это.
+3. **Sticky footer** (~64 px) — слева индикатор dirty, справа
+   `[Отмена]` ghost + `[Сохранить]` primary. Рисует хост.
+
+Так как drawer занимает 80% окна, он ощущается как «второй экран», не
+как всплывашка. Типографика и отступы — такие же как на главном экране,
+без экономии.
+
+### Контракт SettingsPanelProtocol
+
+Виджет, возвращаемый `make_settings_panel`, должен реализовывать:
+
+```python
+from typing import Protocol
+from PySide6.QtCore import Signal
+
+class SettingsPanelProtocol(Protocol):
+    changed: Signal  # emit при любом изменении поля (для dirty-индикатора)
+
+    def validate(self) -> list[str]:
+        """Список текстовых ошибок; пусто = можно сохранять."""
+
+    def apply_changes(self) -> None:
+        """Записать значения полей в модуль. Вызывает хост при Save."""
+
+    def has_unsaved_changes(self) -> bool:
+        """Флаг для индикации dirty и подтверждения при закрытии."""
+```
+
+Хост слушает `changed`, подсвечивает индикатор, блокирует `[Сохранить]`
+пока `validate()` не вернёт пустой список.
 
 ---
 
