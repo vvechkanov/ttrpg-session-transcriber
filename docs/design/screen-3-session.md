@@ -259,11 +259,15 @@ source-модули — то есть пользователь может доб
 ### Поведение drawer
 
 - **Ширина:** 80% от текущей ширины окна, адаптивно пересчитывается
-  на `resizeEvent`
-- **Scrim:** полупрозрачный слой слева (оставшиеся 20% ширины,
-  `rgba(0,0,0,0.25)`), клик по scrim → закрытие drawer'а
+  на `resizeEvent`. Нижняя граница — 320 px, чтобы на очень узких
+  окнах форма оставалась читаемой.
+- **Backdrop:** полноэкранный полупрозрачный слой
+  (`rgba(45,37,32,0.25)` — foreground @ 25% alpha) **за drawer'ом
+  и под ним тоже**, покрывает всё окно целиком, как в Android
+  navigation drawer. Клик по любой видимой части backdrop'а
+  (оставшиеся ~20% слева) → закрытие drawer'а.
 - **Анимация:** выезжает справа за 220 мс, `OutCubic`
-- **Закрытие:** scrim, Esc, крестик в хедере, `[Отмена]`, `[Сохранить]`.
+- **Закрытие:** backdrop, Esc, крестик в хедере, `[Отмена]`, `[Сохранить]`.
   При `has_unsaved_changes() == True` — подтверждение «Сохранить изменения?»
 - **Ровно один drawer** открыт в любой момент времени
 - **Во время обработки** кнопки `[Настроить]` задизейблены — drawer не
@@ -289,12 +293,21 @@ source-модули — то есть пользователь может доб
 
 - Drawer: `QFrame(parent=main_window)`, **не в layout** → работает как
   absolute-позиционированный оверлей
-- Scrim: отдельный полупрозрачный `QWidget`, тоже `parent=main_window`,
-  размер 20% слева, `mousePressEvent` → закрытие
-- Анимация: `QPropertyAnimation(drawer, b"geometry")`, 220 мс
+- Backdrop: отдельный полупрозрачный `QWidget` (sibling drawer'а,
+  тоже `parent=main_window`), **покрывает всё окно**,
+  `mousePressEvent` → закрытие. Drawer поднимается поверх backdrop'а
+  через `raise_()` — визуально получается «затемнённый левый край +
+  непрозрачная панель справа».
+- Анимация: `QPropertyAnimation(drawer, b"geometry")`, 220 мс, `OutCubic`
 - Контент модуля: `QScrollArea` внутри drawer'а, `setWidget()` принимает
   то, что вернул `make_settings_panel(...)`
-- Пересчёт ширины: главный `resizeEvent` → `drawer.setGeometry(...)`
+- Пересчёт ширины: `eventFilter` drawer'а слушает `Resize` главного
+  окна → `drawer.setGeometry(...)` + `backdrop.setGeometry(...)`
+
+Реализация — `ui/shell/settings_drawer.py` (`SettingsDrawer`). Демо-запуск
+(до фазы 3 без реальных карточек модулей) — кнопка «Показать
+SettingsDrawer (demo)» в `ui/shell/app.py`, панель-заглушка —
+`ui/shell/_demo_stub_panel.py`. После фазы 4 demo-stub и кнопка удаляются.
 
 Контракт модуля `make_settings_panel(parent, module, state, params)`
 агностичен к тому, куда его встроили. Если в будущем drawer заменится
