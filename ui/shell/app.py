@@ -21,6 +21,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QMainWindow,
     QMessageBox,
@@ -34,6 +35,12 @@ from sources import SPEECH_SOURCES
 from sources.game_log.fvtt_chat import FvttChatSource
 from ui.shell import theme
 from ui.shell._demo_stub_panel import DemoStubPanel
+from ui.shell.add_source_dialog import (
+    KEY_FASTER_WHISPER,
+    KEY_FVTT_CHAT,
+    KEY_GIGAAM,
+    AddSourceDialog,
+)
 from ui.shell.install_wizard import ensure_backend_installed
 from ui.shell.run_controller import RunController, RunRequest
 from ui.shell.screens import SessionScreen, SessionScreenData
@@ -48,6 +55,15 @@ from ui.widgets import SourceCardData
 _BACKEND_FOR_SPEECH: dict[str, BackendId] = {
     "gigaam": BackendId.GIGAAM_RNNT_FP32,
     "faster-whisper": BackendId.FASTER_WHISPER_LARGE_V3_RU,
+}
+
+#: Maps :class:`ui.shell.add_source_dialog.ParserOption` keys to the
+#: matching :class:`BackendId`. Chat parsers don't need a model and so
+#: don't appear here. Used by :meth:`MainWindow._on_add_source` to
+#: gate the new source behind an install wizard when necessary.
+_BACKEND_FOR_PARSER_KEY: dict[str, BackendId] = {
+    KEY_GIGAAM: BackendId.GIGAAM_RNNT_FP32,
+    KEY_FASTER_WHISPER: BackendId.FASTER_WHISPER_LARGE_V3_RU,
 }
 
 _WINDOW_TITLE = "Session Transcriber — диктофон сессий"
@@ -315,13 +331,203 @@ class MainWindow(QMainWindow):
         )
 
     def _on_add_source(self) -> None:
-        QMessageBox.information(
+        """Open the parser picker; install the backing model if needed.
+
+        Flow:
+            1. ``AddSourceDialog`` — user picks a parser type (speech
+               or chat).
+            2. If the picked parser has an ASR backend and that backend
+               is not installed, confirm with the user and then run
+               :func:`ui.shell.install_wizard.ensure_backend_installed`.
+               The chat parser has no model dependency and skips this
+               step entirely.
+            3. On success, build the module and append a card to the
+               session screen so the user sees the new source in
+               block 1 immediately.
+        """
+        dialog = AddSourceDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted or dialog.selected_key is None:
+            return
+        key = dialog.selected_key
+
+        backend_id = _BACKEND_FOR_PARSER_KEY.get(key)
+        if backend_id is not None and not self._confirm_and_install_backend(
+            backend_id
+        ):
+            return
+
+        new_module = self._build_module_for_key(key)
+        if new_module is None:
+            return
+        card = self._build_card_for_module(key, new_module)
+        self._append_source(new_module, card)
+
+    def _confirm_and_install_backend(self, backend_id: BackendId) -> bool:
+        """Ask the user before a multi-GB download, then run the wizard.
+
+        Returns ``True`` when the backend is installed (either because
+        it already was or because the user accepted the prompt and the
+        wizard succeeded). Returns ``False`` when the user cancelled or
+        the install failed — in which case no card is added.
+        """
+        from core.backend_installers import BACKENDS, is_backend_installed
+
+        if is_backend_installed(backend_id):
+            return True
+
+        info = BACKENDS[backend_id]
+        size_mb = info.approx_download_bytes // 1_000_000
+        confirm = QMessageBox.question(
             self,
-            "Добавление источника",
-            "Мульти-источник поддерживается через ui_config на классах "
-            "модулей. Интерактивное добавление через GUI планируется "
-            "позже.",
+            "Установить модель?",
+            (
+                f"Для этого парсера нужна модель:\n\n"
+                f"{info.title}\n"
+                f"Размер загрузки: ~{size_mb} MB\n\n"
+                "Установить сейчас?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return False
+
+        try:
+            return ensure_backend_installed(backend_id, parent=self)
+        except Exception as exc:  # noqa: BLE001 — UI boundary
+            _log.exception("Install wizard failed for %s", backend_id)
+            QMessageBox.critical(
+                self,
+                "Ошибка установки модели",
+                f"Не удалось установить {backend_id.value}:\n\n{exc}",
+            )
+            return False
+
+    def _build_module_for_key(self, key: str) -> object | None:
+        """Construct a pipeline module instance for the picked parser.
+
+        Returns ``None`` (with a user-visible warning) when the key is
+        unknown or the module's constructor raises — this keeps the
+        session screen in a consistent state instead of appending a
+        half-built card.
+        """
+        try:
+            if key == KEY_GIGAAM:
+                return SPEECH_SOURCES["gigaam"]()
+            if key == KEY_FASTER_WHISPER:
+                return SPEECH_SOURCES["faster-whisper"]()
+            if key == KEY_FVTT_CHAT:
+                chat_log = (
+                    find_fvtt_chat_log(self._session_dir)
+                    if self._session_dir is not None
+                    else None
+                )
+                if chat_log is None:
+                    QMessageBox.warning(
+                        self,
+                        "Чат-лог не найден",
+                        (
+                            "В выбранной папке сессии нет файла "
+                            "foundry-чата. Добавьте файл и повторите."
+                        ),
+                    )
+                    return None
+                return FvttChatSource(chat_log_path=chat_log)
+        except Exception as exc:  # noqa: BLE001 — UI boundary
+            _log.exception("Failed to construct module for key=%r", key)
+            QMessageBox.critical(
+                self,
+                "Ошибка добавления парсера",
+                f"Не удалось создать парсер {key!r}: {exc}",
+            )
+            return None
+        QMessageBox.warning(
+            self,
+            "Неизвестный парсер",
+            f"Ключ парсера {key!r} не поддерживается.",
+        )
+        return None
+
+    def _build_card_for_module(self, key: str, module: object) -> SourceCardData:
+        """Build a ready-to-insert :class:`SourceCardData` for ``module``.
+
+        The card reflects whatever files are currently on disk under
+        ``self._session_dir`` (audio scan for speech parsers, chat log
+        line count for the chat parser). If no session is open yet the
+        card falls back to ``"нет файлов"`` status so the user still
+        sees their pick in the list.
+        """
+        if key in (KEY_GIGAAM, KEY_FASTER_WHISPER):
+            audio_files = (
+                _scan_audio_files(self._session_dir)
+                if self._session_dir is not None
+                else ()
+            )
+            if key == KEY_GIGAAM:
+                title, subtitle = "Аудио", "GigaAM-v3 RNNT · русский"
+            else:
+                title, subtitle = (
+                    "Аудио",
+                    "faster-whisper large-v3 · русский",
+                )
+            return SourceCardData(
+                title=title,
+                subtitle=subtitle,
+                files=audio_files,
+                status="ready" if audio_files else "warning",
+                status_text="готов" if audio_files else "нет файлов",
+            )
+        if key == KEY_FVTT_CHAT:
+            chat_log = getattr(module, "chat_log_path", None)
+            files: tuple[str, ...] = ()
+            files_hint = ""
+            if chat_log is not None:
+                files = (chat_log.name,)
+                try:
+                    line_count = chat_log.read_text(
+                        encoding="utf-8", errors="ignore"
+                    ).count("\n")
+                    files_hint = f"{line_count} строк"
+                except OSError:
+                    files_hint = ""
+            return SourceCardData(
+                title="Foundry VTT чат",
+                subtitle="fvtt-chat parser",
+                files=files,
+                files_hint=files_hint,
+                status="ready",
+                status_text="готов",
+            )
+        return SourceCardData(
+            title=key,
+            subtitle="",
+            files=(),
+            status="warning",
+            status_text="unknown",
+        )
+
+    def _append_source(
+        self, module: object, card: SourceCardData
+    ) -> None:
+        """Append a new source to the session and rebuild the screen.
+
+        ``SessionScreenData`` is a frozen dataclass, so we construct a
+        fresh instance with the extra card rather than mutating the
+        existing one. The central widget is swapped atomically via
+        :meth:`_replace_session_screen` to keep Qt's ownership rules
+        simple.
+        """
+        current = self._session_screen._data  # noqa: SLF001
+        new_data = SessionScreenData(
+            project_name=current.project_name,
+            session_name=current.session_name,
+            active_tab=current.active_tab,
+            sources=current.sources + (card,),
+            merger=current.merger,
+            output=current.output,
+        )
+        self._source_modules.append(module)
+        self._replace_session_screen(new_data)
 
     def _open_module_drawer(
         self, *, module: object, title: str, subtitle: str
