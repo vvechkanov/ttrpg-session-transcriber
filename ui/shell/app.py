@@ -68,7 +68,10 @@ _BACKEND_FOR_PARSER_KEY: dict[str, BackendId] = {
 
 _WINDOW_TITLE = "Session Transcriber — диктофон сессий"
 _DEFAULT_WIDTH = 1400
-_DEFAULT_HEIGHT = 900
+# 960 clears the full 4-block stack with ~1 px to spare on a 1080p screen
+# (title bar + taskbar ≈ 120 px). Below that the content starts scrolling,
+# which is fine — just means the user shrank the window on purpose.
+_DEFAULT_HEIGHT = 960
 
 _log = logging.getLogger(__name__)
 
@@ -196,6 +199,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(_WINDOW_TITLE)
         self.resize(_DEFAULT_WIDTH, _DEFAULT_HEIGHT)
+        # Guard rails: below this the 4-block card layout starts clipping
+        # (cards wrap onto 2 rows but block 3's hero card still needs
+        # ~600 px to breathe). Users can still scroll if they insist.
+        self.setMinimumSize(900, 640)
         self.setStyleSheet(
             f"QMainWindow {{ background-color: {theme.COLOR_BACKGROUND}; }}"
         )
