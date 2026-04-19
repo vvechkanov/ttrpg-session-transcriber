@@ -1,24 +1,22 @@
 """Installer UI — tkinter window showing installation progress.
 
-Post-Epic-A/B/C the installer has exactly three stages:
+The first-run installer has exactly two stages:
 
     1. **ffmpeg**  — download and extract ffmpeg to
        ``DATA_DIR/tools/ffmpeg``.
-    2. **models**  — call
-       :func:`core.backend_installers.install_backend` for every
-       backend the user ticked (GigaAM by default, faster-whisper
-       opt-in). Epic A tracked install writes to
-       ``DATA_DIR/models/<backend>/<slug>/``.
-    3. **runtime** — download ``session-transcriber.zip`` from the
+    2. **runtime** — download ``session-transcriber.zip`` from the
        matching GitHub Release tag and unpack it into
        ``DATA_DIR/session-transcriber/``. That directory contains
        ``session-transcriber.exe`` (the PySide6 shell) which is what
        the bootstrap EXE Popen-s after installation.
 
-No more pip, no more embedded Python, no more PyTorch/WhisperX
-installs — those stacks live inside the ASR backend bundles now
-(see ``sources/speech/_fw_download.py`` wheel unpacking and the
-generic ``sources/speech/_bundle_download.py``).
+Speech-recognition models are **not** installed here — the user is
+asked about them lazily, only when they actually add a speech parser
+to a session from inside the shell (see
+``ui.shell.install_wizard.ensure_backend_installed`` and
+``ui.shell.app`` → ``_on_add_source``). This keeps first-run free of
+multi-GB questions and lets chat-only users skip the ASR download
+entirely.
 """
 
 from __future__ import annotations
@@ -46,22 +44,6 @@ except ImportError:  # running from extracted folder
         download_runtime_zip,
     )
 
-# Backend installers (ASR models — GigaAM, faster-whisper). Wrapped in
-# try/except so this module can still import in a minimal environment
-# for development; in release builds the import always succeeds.
-try:
-    from core.backend_installers import (
-        BackendId,
-        install_backend,
-        list_backends,
-    )
-    _BACKEND_INSTALLERS_AVAILABLE = True
-except ImportError:
-    BackendId = None  # type: ignore[assignment,misc]
-    install_backend = None  # type: ignore[assignment]
-    list_backends = None  # type: ignore[assignment]
-    _BACKEND_INSTALLERS_AVAILABLE = False
-
 # ---------------------------------------------------------------------------
 # Theme (matches wisper_launcher.py)
 # ---------------------------------------------------------------------------
@@ -75,21 +57,22 @@ ERR = "#f44336"
 INPUT_BG = "#313244"
 INPUT_FG = "#cdd6f4"
 
-# Visible progress stages — order matches the worker flow below.
+# Visible progress stages — order matches the worker flow below. Models
+# are installed lazily from the shell, not here.
 STEPS: list[tuple[str, str]] = [
     ("ffmpeg", "Загрузка ffmpeg"),
-    ("models", "Загрузка моделей ASR"),
     ("runtime", "Загрузка приложения"),
 ]
 
 
 class InstallerWindow:
-    """tkinter window that drives a 3-stage install + progress bar.
+    """tkinter window that drives a 2-stage install + progress bar.
 
     Args:
         data_dir: ``%APPDATA%/ttrpg-transcriber``; the installer
-            writes ``tools/ffmpeg/``, ``models/<backend>/…``, and
-            ``session-transcriber/`` under here.
+            writes ``tools/ffmpeg/`` and ``session-transcriber/``
+            under here. Model directories appear later, when the
+            shell lazily installs an ASR backend.
         version: application version string — used to build the
             GitHub Release URL for the runtime zip (tag ``v{version}``).
         on_complete: called on the main thread after the runtime zip
@@ -113,9 +96,6 @@ class InstallerWindow:
         self._current_step = ""
         self._gpu_mode = "cpu"
         self._error: str | None = None
-
-        #: Tk ``BooleanVar`` per backend, populated in :meth:`_build_ui`.
-        self._backend_checkboxes: dict = {}
 
         self._build_ui()
 
@@ -204,39 +184,20 @@ class InstallerWindow:
             status.pack(side="right")
             self._step_status[step_id] = status
 
-        # ── Backend checkboxes (ASR models) ──────────────────────────
-        if _BACKEND_INSTALLERS_AVAILABLE and list_backends is not None:
-            backends_frame = tk.Frame(self.root, bg=BG)
-            backends_frame.pack(fill="x", padx=24, pady=(8, 0))
-
-            tk.Label(
-                backends_frame,
-                text="Модели распознавания речи:",
-                font=("Segoe UI", 9, "bold"),
-                fg=FG_DIM, bg=BG,
-            ).pack(anchor="w")
-
-            for info in list_backends():
-                var = tk.BooleanVar(value=info.default_selected)
-                self._backend_checkboxes[info.id] = var
-                size_mb = info.approx_download_bytes // 1_000_000
-                cb = tk.Checkbutton(
-                    backends_frame,
-                    text=f"{info.title} ({size_mb} MB)",
-                    variable=var,
-                    bg=BG, fg=FG, selectcolor=BG2,
-                    activebackground=BG, activeforeground=FG,
-                    font=("Segoe UI", 9),
-                )
-                cb.pack(anchor="w", pady=(2, 0))
-                tk.Label(
-                    backends_frame,
-                    text=info.description,
-                    font=("Segoe UI", 8),
-                    fg=FG_DIM, bg=BG,
-                    wraplength=560,
-                    justify="left",
-                ).pack(anchor="w", padx=(20, 0))
+        # ── Models hint (install is deferred to the shell) ──────────
+        hint_frame = tk.Frame(self.root, bg=BG)
+        hint_frame.pack(fill="x", padx=24, pady=(8, 0))
+        tk.Label(
+            hint_frame,
+            text=(
+                "Модель распознавания речи будет предложена к установке "
+                "позже — когда вы добавите парсер в сессию."
+            ),
+            font=("Segoe UI", 9),
+            fg=FG_DIM, bg=BG,
+            wraplength=600,
+            justify="left",
+        ).pack(anchor="w")
 
         # ── Log area ─────────────────────────────────────────────────
         log_frame = tk.Frame(self.root, bg=INPUT_BG, padx=1, pady=1)
@@ -326,12 +287,9 @@ class InstallerWindow:
             )
             self._complete_step("ffmpeg")
 
-            # Step 2: ASR backends (GigaAM / faster-whisper / …)
-            self._begin_step("models")
-            self._install_backends()
-            self._complete_step("models")
-
-            # Step 3: PySide6 runtime zip from GitHub Release
+            # Step 2: PySide6 runtime zip from GitHub Release.
+            # Models are NOT installed here — see
+            # ``ui.shell.install_wizard.ensure_backend_installed``.
             self._begin_step("runtime")
             download_runtime_zip(
                 self.data_dir,
@@ -353,45 +311,6 @@ class InstallerWindow:
             self._log(f"\nОШИБКА: {e}")
             self._log(traceback.format_exc())
             self.root.after(0, self._on_install_error)
-
-    def _install_backends(self) -> None:
-        """Run all ticked ASR backend installers in sequence."""
-        if not _BACKEND_INSTALLERS_AVAILABLE or install_backend is None:
-            self._log(
-                "Backend installers недоступны — стадия моделей пропущена. "
-                "Это режим разработчика, финальный EXE всегда собирает "
-                "core.backend_installers."
-            )
-            return
-
-        selected = [
-            bid for bid, var in self._backend_checkboxes.items() if var.get()
-        ]
-        if not selected:
-            self._log("Ни одна ASR-модель не выбрана — пропуск установки.")
-            return
-
-        step_cb = self._step_progress_fn("models")
-        total = len(selected)
-        for idx, backend_id in enumerate(selected):
-            self._log(f"Установка {backend_id.value}...")
-
-            def _prog(
-                frac: float,
-                msg: str,
-                _idx: int = idx,
-                _total: int = total,
-                _cb=step_cb,
-            ) -> None:
-                stage_pct = (_idx + frac) / _total * 100
-                _cb(stage_pct)
-                self._log(msg)
-
-            try:
-                install_backend(backend_id, progress=_prog)
-            except Exception as e:
-                self._log(f"ОШИБКА установки {backend_id.value}: {e}")
-                raise
 
     # ─────────────────────────── progress helpers ──────────────────────
 
