@@ -331,6 +331,11 @@ def gui_main() -> int:
     chat_log_path_var = tk.StringVar(value="")
     chat_tz_var = tk.StringVar(value="auto")
 
+    # ── FVTT combat (encounter) log vars ───────────────────────────────
+    combat_log_var = tk.BooleanVar(value=False)
+    combat_log_status_var = tk.StringVar(value="")
+    combat_log_paths: list[Path] = []  # mutated by _on_folder_changed
+
     # ── GPU diagnostics ───────────────────────────────────────────────────
     gpu_info = _detect_gpu()
     device_var = tk.StringVar(value="cuda" if gpu_info["cuda_available"] else "cpu")
@@ -483,6 +488,23 @@ def gui_main() -> int:
             chat_log_var.set(False)
             chat_tz_var.set("auto")
 
+        # ── Auto-detect FVTT combat (encounter) logs ───────────────────
+        combat_files = sorted(
+            list(session_dir.glob("Бой*.txt"))
+            + list(session_dir.glob("Бой*.json"))
+            + list(session_dir.glob("combat*.json"))
+            + list(session_dir.glob("encounter*.json"))
+        )
+        combat_log_paths.clear()
+        combat_log_paths.extend(combat_files)
+        if combat_files:
+            combat_log_var.set(True)
+            names = ", ".join(p.name for p in combat_files)
+            combat_log_status_var.set(f"Найдено: {len(combat_files)} — {names}")
+        else:
+            combat_log_var.set(False)
+            combat_log_status_var.set("Не найдено логов боя (Бой*.txt / *.json)")
+
     def pick_folder() -> None:
         d = filedialog.askdirectory(title="Выберите папку сессии")
         if d:
@@ -554,6 +576,8 @@ def gui_main() -> int:
             "chat_log_enabled": chat_log_var.get(),
             "chat_log_path": chat_log_path_var.get().strip(),
             "chat_tz_offset": chat_tz_var.get().strip(),
+            "combat_log_enabled": combat_log_var.get(),
+            "combat_log_paths": [str(p) for p in combat_log_paths],
         }
 
         _running.set()
@@ -676,18 +700,24 @@ def gui_main() -> int:
         if not jsons:
             raise RuntimeError("Не найдено ни одного *.json для склейки.")
 
-        chat_label = ""
+        extras_label_parts = []
         if p.get("chat_log_enabled") and p.get("chat_log_path"):
-            chat_label = " + чат FVTT"
-        _set_status(f"Склейка {len(jsons)} JSON{chat_label} → merged.txt…")
-        log(f"\n== Склейка {len(jsons)} JSON{chat_label} → merged.txt")
+            extras_label_parts.append("чат FVTT")
+        if p.get("combat_log_enabled") and p.get("combat_log_paths"):
+            n = len(p["combat_log_paths"])
+            extras_label_parts.append(f"бой×{n}")
+        extras_label = f" + {' + '.join(extras_label_parts)}" if extras_label_parts else ""
+        _set_status(f"Склейка {len(jsons)} JSON{extras_label} → merged.txt…")
+        log(f"\n== Склейка {len(jsons)} JSON{extras_label} → merged.txt")
         t_merge = time.time()
         cmd = [sys.executable, str(merge_script), *[str(j) for j in jsons]]
+        info_path = Path(p["session_dir"]) / "info.txt"
+        info_flag_added = False
         if p.get("chat_log_enabled") and p.get("chat_log_path"):
             cmd += ["--chat_log", p["chat_log_path"]]
-            info_path = Path(p["session_dir"]) / "info.txt"
             if info_path.exists():
                 cmd += ["--info_file", str(info_path)]
+                info_flag_added = True
             tz_val = p.get("chat_tz_offset", "auto")
             if tz_val and tz_val != "auto":
                 # Parse "UTC+3" or raw number
@@ -696,6 +726,11 @@ def gui_main() -> int:
                     cmd += ["--tz_offset", str(float(tz_str))]
                 except ValueError:
                     pass  # auto-detect in merge script
+        if p.get("combat_log_enabled") and p.get("combat_log_paths"):
+            for cpath in p["combat_log_paths"]:
+                cmd += ["--combat_log", cpath]
+            if not info_flag_added and info_path.exists():
+                cmd += ["--info_file", str(info_path)]
         run_and_stream(cmd, cwd=output_dir)
         log(f"   ✓ Готово за {_fmt_elapsed(time.time() - t_merge)}")
 
@@ -928,6 +963,20 @@ def gui_main() -> int:
     tz_combo = ttk.Combobox(chat_row3, textvariable=chat_tz_var,
                             values=["auto"] + tz_values, width=10, state="readonly")
     tz_combo.pack(side="left", padx=(6, 0))
+
+    # ── FVTT Combat (encounter) Log section ──────────────────────────
+    combat_lf = ttk.LabelFrame(frm, text="Лог боя (FVTT encounter JSON)")
+    combat_lf.pack(fill="x", pady=(8, 0))
+
+    combat_row1 = ttk.Frame(combat_lf)
+    combat_row1.pack(fill="x", padx=6, pady=(4, 0))
+    ttk.Checkbutton(combat_row1, text="Добавить логи боя",
+                    variable=combat_log_var).pack(side="left")
+
+    combat_row2 = ttk.Frame(combat_lf)
+    combat_row2.pack(fill="x", padx=6, pady=(2, 6))
+    ttk.Label(combat_row2, textvariable=combat_log_status_var,
+              style="Dim.TLabel", wraplength=520, justify="left").pack(side="left")
 
     model_row = ttk.Frame(frm)
     model_row.pack(fill="x", pady=(6, 0))
