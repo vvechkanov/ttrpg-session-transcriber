@@ -219,8 +219,8 @@ class SessionScreen(QWidget):
         content = QWidget()
         content.setStyleSheet(f"background-color: {theme.COLOR_BACKGROUND};")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(32, 24, 32, 32)
-        content_layout.setSpacing(theme.GAP_LARGE_PX)
+        content_layout.setContentsMargins(32, 20, 32, 24)
+        content_layout.setSpacing(theme.GAP_MEDIUM_PX)
 
         # Breadcrumb + tabs
         content_layout.addLayout(self._build_breadcrumb())
@@ -452,7 +452,10 @@ class SessionScreen(QWidget):
         state, see :meth:`_update_run_button`).
         """
         block = _BlockFrame()
-        block.setMinimumHeight(380)
+        # Enough vertical room for the idle "play hint" layout (72 px circle
+        # + two centered labels + ghost stretches above/below) without
+        # forcing the whole screen to overflow at the default 1400×900.
+        block.setMinimumHeight(260)
         outer = QVBoxLayout(block)
         outer.setContentsMargins(
             theme.PAD_CONTENT_PX,
