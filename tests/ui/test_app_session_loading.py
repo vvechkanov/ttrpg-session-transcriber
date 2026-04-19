@@ -102,13 +102,16 @@ class TestBuildSessionFromDir:
 class TestMainWindowPhase9:
     def test_empty_window_opens_with_placeholder(self, qtbot):
         from ui.shell.app import MainWindow
+        from ui.shell.screens import EmptyStateScreen
 
         window = MainWindow()
         qtbot.addWidget(window)
         assert window._session_dir is None
         assert window._source_modules == []
-        # Placeholder screen still shows
-        assert window._session_screen is not None
+        # P0a — empty state screen is the initial central widget; the
+        # full SessionScreen is built lazily on first _load_session.
+        assert window._session_screen is None
+        assert isinstance(window.centralWidget(), EmptyStateScreen)
 
     def test_load_session_populates_screen_and_modules(self, qtbot, tmp_path: Path):
         from ui.shell.app import MainWindow
@@ -257,3 +260,92 @@ class TestMainWindowPhase9:
         qtbot.addWidget(window)
         window._on_open_session()
         assert window._session_dir is None
+
+
+# ── P1a — window-level folder drag-and-drop ─────────────────────────────
+
+
+@pytest.mark.gui
+class TestMainWindowFolderDrop:
+    """Covers ``MainWindow.handle_mime_drop`` → ``_load_session``.
+
+    Synthesising a real :class:`QDropEvent` from Python is fragile —
+    the PySide6 bindings unwrap the event's ``mimeData()`` pointer as a
+    generic ``QObject`` once it round-trips through the C++ layer,
+    which makes ``hasUrls()`` raise. We exercise the drop-handling
+    logic through the testable ``handle_mime_drop`` entry point, which
+    takes a plain :class:`QMimeData`. In production Qt constructs the
+    event itself and this indirection isn't needed.
+    """
+
+    @staticmethod
+    def _mime(urls: list[str]):
+        from PySide6.QtCore import QMimeData, QUrl
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(u) for u in urls])
+        return mime
+
+    def test_folder_drop_calls_load_session(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        session = _make_session(tmp_path, with_chat=False, with_audio=True)
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(self._mime([str(session)]))
+        assert calls == [session]
+
+    def test_file_drop_is_ignored(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        some_file = tmp_path / "just-a-file.txt"
+        some_file.write_text("hi", encoding="utf-8")
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(self._mime([str(some_file)]))
+        assert calls == []
+        # Window should remain in the empty state (no session loaded).
+        assert window._session_dir is None
+
+    def test_multi_item_drop_is_ignored(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        session_a = _make_session(
+            tmp_path / "a", with_chat=False, with_audio=True
+        )
+        session_b = _make_session(
+            tmp_path / "b", with_chat=False, with_audio=True
+        )
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(
+            self._mime([str(session_a), str(session_b)])
+        )
+        assert calls == []

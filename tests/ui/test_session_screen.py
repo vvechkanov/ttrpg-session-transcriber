@@ -329,3 +329,49 @@ class TestPerCardStates:
         screen.set_state_idle()
         for card in screen._source_cards:  # noqa: SLF001
             assert card.visual_state == "idle"
+
+
+# ── P0b — run button gate on source availability ────────────────────────
+
+
+@pytest.mark.gui
+class TestRunButtonGate:
+    def test_run_button_disabled_when_no_sources(self, qtbot):
+        data = SessionScreenData(
+            project_name="Empty",
+            session_name="No sources",
+            sources=(),
+        )
+        screen = SessionScreen(data)
+        qtbot.addWidget(screen)
+        assert not screen._run_button.isEnabled()  # noqa: SLF001
+
+    def test_run_button_enabled_when_sources_present(self, qtbot):
+        screen = SessionScreen(_fixture_data(n_sources=1))
+        qtbot.addWidget(screen)
+        assert screen._run_button.isEnabled()  # noqa: SLF001
+
+    def test_set_run_enabled_toggles_button(self, qtbot):
+        screen = SessionScreen(_fixture_data(n_sources=1))
+        qtbot.addWidget(screen)
+
+        screen.set_run_enabled(False)
+        assert not screen._run_button.isEnabled()  # noqa: SLF001
+
+        screen.set_run_enabled(True)
+        assert screen._run_button.isEnabled()  # noqa: SLF001
+
+    def test_disabled_run_button_has_tooltip(self, qtbot):
+        data = SessionScreenData(
+            project_name="Empty",
+            session_name="No sources",
+            sources=(),
+        )
+        screen = SessionScreen(data)
+        qtbot.addWidget(screen)
+        assert "источник" in screen._run_button.toolTip().lower()  # noqa: SLF001
+
+    def test_enabled_run_button_has_no_tooltip(self, qtbot):
+        screen = SessionScreen(_fixture_data(n_sources=1))
+        qtbot.addWidget(screen)
+        assert screen._run_button.toolTip() == ""  # noqa: SLF001

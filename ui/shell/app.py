@@ -17,8 +17,14 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QFont, QFontDatabase
+from PySide6.QtCore import QMimeData, Qt
+from PySide6.QtGui import (
+    QAction,
+    QDragEnterEvent,
+    QDropEvent,
+    QFont,
+    QFontDatabase,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -43,7 +49,7 @@ from ui.shell.add_source_dialog import (
 )
 from ui.shell.install_wizard import ensure_backend_installed
 from ui.shell.run_controller import RunController, RunRequest
-from ui.shell.screens import SessionScreen, SessionScreenData
+from ui.shell.screens import EmptyStateScreen, SessionScreen, SessionScreenData
 from ui.shell.settings_drawer import SettingsDrawer
 from ui.widgets import SourceCardData
 
@@ -91,13 +97,27 @@ def _pick_ui_font() -> QFont:
 _AUDIO_EXTENSIONS: tuple[str, ...] = (".flac", ".wav", ".mp3", ".ogg", ".m4a", ".opus")
 
 
-def _empty_session_data() -> SessionScreenData:
-    """Placeholder shown before the user opens a folder."""
-    return SessionScreenData(
-        project_name="Нет сессии",
-        session_name="Откройте папку через меню «Файл → Открыть…»",
-        sources=(),
-    )
+def _drop_payload_single_dir(mime: QMimeData) -> Path | None:
+    """Return the dropped path iff it's a single existing directory.
+
+    Used by :meth:`MainWindow.dragEnterEvent` / :meth:`dropEvent` to
+    decide whether a window-level drop should route to
+    ``_load_session``. Returns ``None`` silently for anything else —
+    per P1a the window does not surface a warning; the empty-state
+    drop zone handles that case on its own.
+    """
+    if not mime.hasUrls():
+        return None
+    urls = mime.urls()
+    if len(urls) != 1:
+        return None
+    path_str = urls[0].toLocalFile()
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if not path.is_dir():
+        return None
+    return path
 
 
 def _scan_audio_files(session_dir: Path) -> tuple[str, ...]:
@@ -207,6 +227,12 @@ class MainWindow(QMainWindow):
             f"QMainWindow {{ background-color: {theme.COLOR_BACKGROUND}; }}"
         )
 
+        # P1a — accept folder drops anywhere on the window, so the user
+        # doesn't have to aim at the empty-state drop zone. Once a
+        # session is loaded the dropped folder still routes through
+        # ``_load_session``, replacing the current session.
+        self.setAcceptDrops(True)
+
         #: Current session folder. ``None`` until the user opens one.
         self._session_dir: Path | None = None
         #: Pipeline modules parallel to ``_session_screen._data.sources``.
@@ -215,8 +241,18 @@ class MainWindow(QMainWindow):
         self._merger_module = self._default_merger()
         self._renderer_module = self._default_renderer()
 
-        self._session_screen = SessionScreen(_empty_session_data(), parent=self)
-        self.setCentralWidget(self._session_screen)
+        # P0a — start on the empty state screen. A full SessionScreen
+        # is built lazily inside :meth:`_load_session`, so users only
+        # see the 4-block layout once they actually have a session.
+        self._session_screen: SessionScreen | None = None
+        self._empty_state_screen: EmptyStateScreen | None = EmptyStateScreen(
+            parent=self
+        )
+        self._empty_state_screen.pick_folder_requested.connect(
+            self._on_open_session
+        )
+        self._empty_state_screen.folder_dropped.connect(self._load_session)
+        self.setCentralWidget(self._empty_state_screen)
 
         # SettingsDrawer — overlay, parent=self, НЕ в layout.
         self._settings_drawer = SettingsDrawer(self)
@@ -229,9 +265,6 @@ class MainWindow(QMainWindow):
         self._run_controller.failed.connect(self._on_run_failed)
 
         self._build_menu_bar()
-
-        # ── Signal wiring ─────────────────────────────────────────
-        self._wire_session_screen_signals()
 
     # ── Menu bar ─────────────────────────────────────────────────────
 
@@ -251,6 +284,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
     def _wire_session_screen_signals(self) -> None:
+        assert self._session_screen is not None, (
+            "_wire_session_screen_signals called before SessionScreen exists"
+        )
         self._session_screen.source_configure_requested.connect(
             self._on_source_configure
         )
@@ -262,6 +298,44 @@ class MainWindow(QMainWindow):
         )
         self._session_screen.add_source_requested.connect(self._on_add_source)
         self._session_screen.run_clicked.connect(self._on_run_clicked)
+
+    # ── Window-level drag and drop (P1a) ────────────────────────────
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        """Accept the drag when the payload is a single directory.
+
+        Anything else (a file, multiple items) is silently ignored —
+        :class:`EmptyStateScreen` handles the single-file case with a
+        user-visible warning when the drop lands on it directly. We
+        don't duplicate that here because it would fire twice when the
+        child accepts the event.
+        """
+        if _drop_payload_single_dir(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        path = _drop_payload_single_dir(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._load_session(path)
+
+    def handle_mime_drop(self, mime: QMimeData) -> None:
+        """Testable entry point for mime-data-driven drops.
+
+        PySide6 cannot round-trip a Python-built :class:`QDropEvent`
+        through the C++ layer without the ``mimeData()`` getter losing
+        the concrete :class:`QMimeData` type. Tests call this helper
+        with a plain :class:`QMimeData` to exercise the drop logic
+        without synthesising a real event.
+        """
+        path = _drop_payload_single_dir(mime)
+        if path is None:
+            return
+        self._load_session(path)
 
     # ── Session loading ─────────────────────────────────────────────
 
@@ -303,11 +377,17 @@ class MainWindow(QMainWindow):
 
         PySide6 QMainWindow takes ownership of the new central widget
         and deletes the old one, so signal reconnection is mandatory.
+        The run button is gated on having at least one source card (P0b).
         """
         new_screen = SessionScreen(data, parent=self)
         self.setCentralWidget(new_screen)
+        # setCentralWidget takes ownership and deletes the old central
+        # widget; clear our reference so nothing reads a dangling
+        # EmptyStateScreen after the swap.
+        self._empty_state_screen = None
         self._session_screen = new_screen
         self._wire_session_screen_signals()
+        new_screen.set_run_enabled(len(data.sources) > 0)
 
     # ── Settings drawer routing (Phase 9: real templates) ─────────
 

@@ -484,6 +484,12 @@ class SessionScreen(QWidget):
         header_row.addWidget(self._run_button)
         outer.addLayout(header_row)
 
+        # P0b — gate the run button on having at least one source. The
+        # host (app.py) also calls ``set_run_enabled`` after it replaces
+        # the central widget, but we apply the initial state here so the
+        # widget is consistent as soon as it's constructed.
+        self.set_run_enabled(len(self._data.sources) > 0)
+
         # Stacked pages: idle / running / done
         self._stack = QStackedWidget(block)
         self._stack.addWidget(self._build_idle_page(block))
@@ -730,6 +736,21 @@ class SessionScreen(QWidget):
         self._run_button.setStyleSheet(self._run_button_style(running=False))
         for card in self._source_cards:
             card.set_visual_state("done")
+
+    def set_run_enabled(self, enabled: bool) -> None:
+        """Enable or disable the run button based on source availability.
+
+        Called by the host (``app.py``) whenever a source card is added
+        or removed. When disabled we also set a tooltip explaining why,
+        which Qt will show on hover even for a disabled button.
+        """
+        self._run_button.setEnabled(enabled)
+        if enabled:
+            self._run_button.setToolTip("")
+            self._run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self._run_button.setToolTip("Добавьте хотя бы один источник")
+            self._run_button.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_state_failed(self, error_text: str) -> None:
         """Switch block 3 to the terminal failure page (reuses done page)."""
