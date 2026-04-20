@@ -121,11 +121,15 @@ class SessionMeta(QObject):
     def openSession(self, folder_url_or_path: str) -> None:
         """Load a real session folder. QML drag/drop hands us a file:// URL.
 
-        Derives the session title from the folder name and the campaign
-        from its parent. Total duration = max(audio file duration) via
-        ``ffprobe`` (metadata-only, no decode) — fast enough to run
-        synchronously on ingest. Peaks extraction runs on a background
-        thread, orchestrated by :mod:`ui.app_qml`.
+        Derives the session title from the folder name and the
+        campaign from its parent. Total duration starts at 0 — an
+        earlier version called ffprobe synchronously here, which
+        froze the UI thread for N × subprocess-startup-ms and could
+        hang indefinitely on a stuck ffprobe (no timeout). Peaks
+        extraction already decodes the audio on a background
+        QThread (:class:`ui.engines.peaks_worker.PeaksWorker`); the
+        worker emits durationReady per track and SessionMeta
+        aggregates the max via :meth:`setTotalSeconds` below.
         """
 
         path = _url_to_path(folder_url_or_path)
@@ -135,27 +139,35 @@ class SessionMeta(QObject):
         self._session_title = path.name
         parent = path.parent
         self._campaign_title = parent.name if parent and parent.exists() else ""
-
-        # Probe each audio file for duration; session length = longest
-        # track. Sub-second on even a dozen files, runs on the UI thread.
-        from core.file_matchers import detect_audio_files as _detect_audio
-
-        audio_paths = _detect_audio(path)
-        durations = [probe_duration(p) for p in audio_paths]
-        max_seconds = max(durations) if durations else 0.0
-        # If ffprobe can't read a single track, the ruler renders
-        # empty rather than faking a duration.
-        total_min = max(1, int(round(max_seconds / 60.0))) if max_seconds > 0 else 0
-        self._total_min = total_min
-        # Craig splits mid-session on long recordings; for unknown
-        # splits, leave the strip flat.
-        self._seg_split_min = int(total_min * 2 // 3) if total_min > 0 else 0
+        self._total_min = 0
+        self._seg_split_min = 0
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
         self.totalMinutesChanged.emit()
         self.segmentSplitMinutesChanged.emit()
         self.sessionOpened.emit(str(path))
+
+    @Slot(float)
+    def setTotalSeconds(self, seconds: float) -> None:
+        """Extend the ruler to ``seconds`` if it's longer than current.
+
+        Called from PeaksWorker on a background thread (via
+        ``Qt.QueuedConnection``) as each track's duration becomes
+        known. Longest wins — one long track sets the session
+        length. No setter for shortening; once a duration lands, we
+        keep it.
+        """
+
+        if seconds <= 0:
+            return
+        total_min = max(1, int(round(seconds / 60.0)))
+        if total_min <= self._total_min:
+            return
+        self._total_min = total_min
+        self._seg_split_min = int(total_min * 2 // 3)
+        self.totalMinutesChanged.emit()
+        self.segmentSplitMinutesChanged.emit()
 
 
 # ─────────────────────────────────────────────────────────────────────

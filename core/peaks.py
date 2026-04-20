@@ -48,8 +48,11 @@ def _bundled_tool(name: str) -> str:
 def probe_duration(audio_path: Path) -> float:
     """Return audio duration in seconds via ``ffprobe``; 0.0 on failure.
 
-    Metadata-only — sub-second per file even on slow disks. Safe to
-    call synchronously from the GUI thread on ingest.
+    Metadata-only — sub-second per file. A 10 s timeout caps the
+    worst case where ffprobe stalls on a malformed file so callers
+    never block forever. Even with the timeout, probe_duration
+    should never be called on the UI thread; PeaksWorker runs it
+    on its own QThread.
     """
 
     try:
@@ -62,8 +65,9 @@ def probe_duration(audio_path: Path) -> float:
                 str(audio_path),
             ],
             stderr=subprocess.DEVNULL,
+            timeout=10,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return 0.0
     try:
         return float(out.strip())
@@ -93,8 +97,11 @@ def extract_peaks(audio_path: Path, bins: int = DEFAULT_BIN_COUNT) -> list[float
             ],
             capture_output=True,
             check=False,
+            timeout=600,  # 10 min ceiling for a single decode — user
+                          # would rather see an empty waveform than an
+                          # infinitely-stuck worker.
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return []
     if proc.returncode != 0 or not proc.stdout:
         return []

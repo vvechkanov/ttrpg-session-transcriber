@@ -101,6 +101,12 @@ def main() -> int:
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.peaksReady.connect(tracks_model.setPeaks)
+        # Per-track duration grows SessionMeta's total_minutes so the
+        # timeline ruler reflects the longest track. Runs here rather
+        # than in SessionMeta.openSession on the UI thread — an
+        # ffprobe-stall on a malformed file would otherwise hang the
+        # shell on folder-pick.
+        worker.durationReady.connect(session_meta.setTotalSeconds)
         worker.allDone.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
