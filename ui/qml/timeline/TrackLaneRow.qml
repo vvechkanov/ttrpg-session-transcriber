@@ -16,6 +16,10 @@ Item {
     property int gutterWidth: 220
     property real segmentSplitPct: 66.0
 
+    // Model row index — needed by inline-edit commit handlers so the
+    // TrackListModel can be updated by absolute position.
+    property int trackIndex: -1
+
     property string playerName: ""
     property string playerRole: ""
     property string character: ""
@@ -31,6 +35,13 @@ Item {
     // cached/failed. Drives the inline status chip and the fill tint.
     property string trackState: "idle"
     property string errorMessage: ""
+
+    // True while the pipeline is idle (so fields are safe to edit and
+    // the badge can open the override popover).
+    property bool editableLocked: false
+
+    signal nameEdited(string newName)
+    signal characterEdited(string newCharacter)
 
     // Phase-aware accent colour for the fill overlay.
     //   cached  → green (bars read as "already on disk")
@@ -122,27 +133,59 @@ Item {
                 Layout.fillWidth: true
                 spacing: 1
 
-                Text {
+                InlineEdit {
                     Layout.fillWidth: true
                     text: root.playerName
+                    locked: root.editableLocked || root.excluded
                     color: Theme.ink
                     font.family: Theme.fontSans
                     font.pixelSize: 12
                     font.weight: Font.DemiBold
                     font.letterSpacing: -0.05
-                    elide: Text.ElideRight
+                    onCommitted: (value) => root.nameEdited(value)
                 }
 
+                // Listener row: italic caption, no editable character.
                 Text {
+                    visible: root.excluded
                     Layout.fillWidth: true
-                    text: root.excluded
-                        ? "слушатель · не ASR"
-                        : (root.playerRole + " · " + root.character)
+                    text: "слушатель · не ASR"
                     color: Theme.ink3
                     font.family: Theme.fontSans
                     font.pixelSize: 10
-                    font.italic: root.excluded
+                    font.italic: true
                     elide: Text.ElideRight
+                }
+
+                // Role + inline-editable character. Keeping them in a
+                // RowLayout so only the character toggles to an edit
+                // field on click — the role stays static.
+                RowLayout {
+                    visible: !root.excluded
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Text {
+                        text: root.playerRole
+                        color: Theme.ink3
+                        font.family: Theme.fontSans
+                        font.pixelSize: 10
+                    }
+                    Text {
+                        text: "·"
+                        color: Theme.inkFaint
+                        font.family: Theme.fontSans
+                        font.pixelSize: 10
+                    }
+                    InlineEdit {
+                        Layout.fillWidth: true
+                        text: root.character
+                        locked: root.editableLocked
+                        color: Theme.ink3
+                        font.family: Theme.fontSans
+                        font.pixelSize: 10
+                        onCommitted: (value) => root.characterEdited(value)
+                    }
                 }
             }
 

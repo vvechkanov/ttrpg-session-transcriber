@@ -3,6 +3,7 @@ import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import App.Theme
 import "../controls"
+import "../popovers"
 import "../timeline"
 
 // Timeline / session working view.
@@ -33,6 +34,18 @@ Rectangle {
     // code terse (`root.phase`) and reacts to external mutations.
     readonly property string phase: appModel ? appModel.phase : "idle"
     property int _gutterWidth: 220
+
+    // ── Popovers / overlays ──────────────────────────────────────
+    TrackOverridePopover {
+        id: overridePopover
+        parent: root
+        x: 22
+        onChosen: (row, optionId) => {
+            if (tracksModel) {
+                tracksModel.setModelOverride(row, optionId)
+            }
+        }
+    }
 
     // Vertical layout: sticky bar on top, scrollable body below.
     ColumnLayout {
@@ -310,8 +323,10 @@ Rectangle {
                                         model: tracksModel
 
                                         delegate: TrackLaneRow {
+                                            id: trackDelegate
                                             Layout.fillWidth: true
-                                            gutterWidth: root._gutterWidth
+                                            trackIndex:    index
+                                            gutterWidth:   root._gutterWidth
                                             segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
                                             playerName:    model.name
                                             playerRole:    model.playerRole
@@ -323,6 +338,21 @@ Rectangle {
                                             progress:      model.progress
                                             trackState:    model.trackState
                                             errorMessage:  model.errorMessage
+                                            editableLocked: root.phase !== "idle"
+                                            onNameEdited: (value) => {
+                                                if (tracksModel) tracksModel.setPlayerName(index, value)
+                                            }
+                                            onCharacterEdited: (value) => {
+                                                if (tracksModel) tracksModel.setCharacter(index, value)
+                                            }
+                                            onModelBadgeClicked: {
+                                                if (root.phase !== "idle") return
+                                                const rowY = trackDelegate.mapToItem(root, 0, trackDelegate.height).y
+                                                overridePopover.y = Math.max(64, rowY)
+                                                overridePopover.openFor(
+                                                    index, model.name, model.modelId, model.override
+                                                )
+                                            }
                                         }
                                     }
 

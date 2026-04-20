@@ -285,6 +285,69 @@ class TrackListModel(QAbstractListModel):
             [TrackListModel.StateRole, TrackListModel.ErrorRole],
         )
 
+    # ── Inline edits & per-track model override ──────────────────────
+    @Slot(int, str)
+    def setPlayerName(self, row: int, name: str) -> None:
+        """Rename a player. Empty / whitespace-only names are rejected —
+        use a blank placeholder in the UI rather than clearing the row.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        name = name.strip()
+        if not name or self._rows[row].name == name:
+            return
+        self._rows[row].name = name
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.NameRole])
+
+    @Slot(int, str)
+    def setCharacter(self, row: int, character: str) -> None:
+        """Update the character string. Empty strings are allowed and
+        render as "Без персонажа" in the row below the name.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        character = character.strip()
+        if self._rows[row].character == character:
+            return
+        self._rows[row].character = character
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.CharacterRole])
+
+    @Slot(int, str)
+    def setModelOverride(self, row: int, option_id: str) -> None:
+        """Pick a model for this row from the override popover.
+
+        Accepted option IDs:
+          "default"     — clears the override, uses the active default
+          "gigaam"      — GigaAM-v3 (no override flag, same model as default)
+          "whisper-med" — whisper medium override
+          "whisper-lg"  — whisper large override
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        t = self._rows[row]
+        match option_id:
+            case "default":
+                t.model_id = "gigaam"
+                t.model_override = False
+            case "gigaam":
+                t.model_id = "gigaam"
+                t.model_override = False
+            case "whisper-med" | "whisper-lg":
+                t.model_id = "whisper"
+                t.model_override = True
+            case _:
+                return
+        idx = self.index(row, 0)
+        self.dataChanged.emit(
+            idx, idx,
+            [TrackListModel.ModelIdRole, TrackListModel.OverrideRole],
+        )
+
     @Slot()
     def resetStates(self) -> None:
         """Return every row to the ``idle`` state and clear errors.
