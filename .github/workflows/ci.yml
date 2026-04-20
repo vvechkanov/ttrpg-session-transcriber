@@ -42,7 +42,12 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install PySide6 pytest pytest-qt pytest-cov
+          # numpy is imported by tests/conftest.py for its audio
+          # fixtures (sine synthesis via wave + struct). The ML
+          # backends (torch, faster-whisper) stay out — they are
+          # provisioned by the bootstrap launcher at runtime, not
+          # needed for the test suite.
+          pip install PySide6 pytest pytest-qt pytest-cov numpy
 
       # Linux-only: libEGL / xkbcommon are needed by Qt's offscreen
       # platform plugin even though we don't show a window. Without
@@ -81,7 +86,13 @@ jobs:
       - name: Install minimal test deps
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
+          # conftest.py pulls in numpy for the audio fixtures even
+          # when we only run test_build_spec.py — same dep list as
+          # the full pytest job, minus PySide6.
+          pip install pytest numpy
 
       - name: Run build.spec invariants
-        run: pytest tests/test_build_spec.py -v
+        # --noconftest skips the project-wide conftest (numpy fixtures
+        # etc.) since test_build_spec.py only parses the .spec file;
+        # keeps spec-lint a lean 7-second check.
+        run: pytest tests/test_build_spec.py -v --noconftest
