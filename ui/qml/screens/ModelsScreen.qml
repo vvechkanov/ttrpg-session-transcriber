@@ -224,6 +224,34 @@ Rectangle {
                             }
                         }
 
+                        // Per-row busy state — keyed by the row index.
+                        // Set from ModelRegistry.installProgress /
+                        // installFinished / installFailed below; read
+                        // by ModelRow delegates via `busyRow` bindings.
+                        QtObject {
+                            id: busy
+                            property int row: -1
+                            property string kind: ""   // "install" | "uninstall"
+                            property int pct: 0
+                            property string note: ""
+
+                            function beginInstall(r)   { row = r; kind = "install";   pct = 0; note = "" }
+                            function beginUninstall(r) { row = r; kind = "uninstall"; pct = 0; note = "" }
+                            function clear()           { row = -1; kind = "";         pct = 0; note = "" }
+                        }
+
+                        Connections {
+                            target: modelRegistry
+                            function onInstallProgress(row, pct, note) {
+                                busy.row = row
+                                busy.kind = busy.kind === "uninstall" ? "uninstall" : "install"
+                                busy.pct = pct
+                                busy.note = note
+                            }
+                            function onInstallFinished(row) { busy.clear() }
+                            function onInstallFailed(row, message) { busy.clear() }
+                        }
+
                         // Rows
                         Repeater {
                             model: modelRegistry
@@ -239,10 +267,19 @@ Rectangle {
                                 installed: model.installed
                                 active: model.active
                                 lastRow: index === modelRegistry.rowCount() - 1
+                                busyKind: busy.row === index ? busy.kind : ""
+                                busyPct:  busy.row === index ? busy.pct  : 0
+                                busyNote: busy.row === index ? busy.note : ""
                                 onRowClicked: drawer.openFor(modelRegistry.entryAt(index))
                                 onActivateClicked: modelRegistry.setActive(index)
-                                onInstallClicked:  modelRegistry.install(index)
-                                onUninstallClicked: modelRegistry.uninstall(index)
+                                onInstallClicked: {
+                                    busy.beginInstall(index)
+                                    modelRegistry.install(index)
+                                }
+                                onUninstallClicked: {
+                                    busy.beginUninstall(index)
+                                    modelRegistry.uninstall(index)
+                                }
                             }
                         }
                     }
@@ -289,14 +326,15 @@ Rectangle {
                                     font.weight: Font.DemiBold
                                 }
                                 Text {
-                                    text: "4.3 GB"
+                                    text: modelRegistry.installedSizeLabel()
                                     color: Theme.ink2
                                     font.family: Theme.fontMono
                                     font.pixelSize: 12
                                     font.weight: Font.DemiBold
                                 }
                                 Text {
-                                    text: " из 3 моделей"
+                                    text: " · " + modelRegistry.installedCount()
+                                          + " из " + modelRegistry.rowCount() + " моделей"
                                     color: Theme.ink2
                                     font.family: Theme.fontSans
                                     font.pixelSize: 12
@@ -305,25 +343,11 @@ Rectangle {
                                 Item { Layout.fillWidth: true }
                             }
 
-                            // Stacked-usage bar: three proportional
-                            // segments drawn side-by-side. Widths come
-                            // from the prototype (9% / 18% / 70%).
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 4
-                                radius: 2
-                                color: Theme.borderSoft
-                                clip: true
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    spacing: 0
-                                    Rectangle { Layout.fillHeight: true; Layout.preferredWidth: parent.width * 0.09; color: Theme.accent }
-                                    Rectangle { Layout.fillHeight: true; Layout.preferredWidth: parent.width * 0.18; color: Theme.accentSoft }
-                                    Rectangle { Layout.fillHeight: true; Layout.preferredWidth: parent.width * 0.70; color: "#8A6FB8" }
-                                    Item      { Layout.fillHeight: true; Layout.fillWidth: true }
-                                }
-                            }
+                            // Per-backend stacked bar removed — the
+                            // 9/18/70 split was hardcoded mock
+                            // proportions. A real stacked view needs
+                            // per-backend size, which is already shown
+                            // in each row's size column.
                         }
 
                         GhostButton {

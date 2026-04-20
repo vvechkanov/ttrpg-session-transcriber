@@ -250,6 +250,22 @@ class ModelRegistry(QAbstractListModel):
         root = default_models_root()
         return str(root) if root.exists() else ""
 
+    @Slot(result=int)
+    def installedCount(self) -> int:
+        """Number of rows that are actually on disk."""
+
+        return sum(1 for r in self._rows if r.installed)
+
+    @Slot(result=str)
+    def installedSizeLabel(self) -> str:
+        """Human-readable total size across installed backends."""
+
+        total = 0
+        for info in list_backends():
+            if is_backend_installed(info.id):
+                total += installed_size_bytes(info.id)
+        return _format_size(total)
+
     # ── Internal ──────────────────────────────────────────────────────
     def _build_rows(self) -> list[ModelEntry]:
         rows: list[ModelEntry] = []

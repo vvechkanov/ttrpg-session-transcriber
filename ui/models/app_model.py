@@ -34,10 +34,11 @@ class AppModel(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        # First-launch lands on Timeline to match the prototype's default.
-        # The empty-state screen is reached through the Sessions nav item
-        # when no session is open (handled inside TimelineScreen later).
-        self._screen: str = "timeline"
+        # First-launch lands on the empty state — there is no real
+        # session open yet. Once the user drops a folder and
+        # SessionMeta.openSession runs, Main.qml flips this to
+        # "timeline" (see the DropArea handler).
+        self._screen: str = "empty"
         self._current_session_id: str = ""
         self._phase: str = "idle"
         self._merge_progress: float = 0.0

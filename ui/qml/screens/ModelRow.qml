@@ -29,6 +29,15 @@ Rectangle {
     property bool active: false
     property bool lastRow: false
 
+    // Transient pipeline state — set from ModelsScreen when the
+    // registry emits installProgress / installFinished / installFailed.
+    // While non-empty, the action column renders a progress label
+    // instead of the normal Install/Activate/Uninstall buttons so the
+    // user has feedback that clicking did something.
+    property string busyKind: ""    // "" | "install" | "uninstall"
+    property int busyPct: 0         // 0..100, only used for install
+    property string busyNote: ""    // free-form ffmpeg/download status
+
     signal rowClicked()
     signal activateClicked()
     signal installClicked()
@@ -155,14 +164,18 @@ Rectangle {
         }
 
         // ── Lang ──────────────────────────────────────────────────
+        // Width widened and Chip anchored left so multi-lang labels
+        // ("RU/EN/мульти.") don't bleed across the accuracy bar.
         Item {
-            Layout.preferredWidth: 80
+            Layout.preferredWidth: 110
             implicitHeight: langChip.implicitHeight
+            clip: true
 
             Chip {
                 id: langChip
                 tone: "neutral"
                 text: root.lang
+                anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -226,16 +239,53 @@ Rectangle {
             }
         }
 
-        // ── Action buttons (right-aligned) ────────────────────────
+        // ── Action buttons / busy state (right-aligned) ───────────
         RowLayout {
             Layout.preferredWidth: 170
             spacing: 6
 
             Item { Layout.fillWidth: true }
 
+            // Busy state — replaces the action buttons with a progress
+            // label so the user sees the install / uninstall is in
+            // flight. Earlier versions silently kicked off the worker
+            // thread and the UI looked frozen / no-op.
+            ColumnLayout {
+                visible: root.busyKind.length > 0
+                spacing: 3
+                Layout.fillWidth: false
+
+                Text {
+                    Layout.alignment: Qt.AlignRight
+                    text: root.busyKind === "install"
+                        ? ("Устанавливается… " + root.busyPct + "%")
+                        : "Удаляется…"
+                    color: Theme.accentDeep
+                    font.family: Theme.fontSans
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                }
+
+                Rectangle {
+                    visible: root.busyKind === "install"
+                    Layout.preferredWidth: 140
+                    Layout.preferredHeight: 3
+                    radius: 2
+                    color: Theme.borderSoft
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: parent.width * (root.busyPct / 100.0)
+                        radius: 2
+                        color: Theme.accent
+                    }
+                }
+            }
+
             // Installed, not active → "Сделать активной"
             SoftButton {
-                visible: root.installed && !root.active
+                visible: root.busyKind.length === 0 && root.installed && !root.active
                 sizeTag: "sm"
                 text: "Сделать активной"
                 onClicked: root.activateClicked()
@@ -245,7 +295,7 @@ Rectangle {
             // "Удалить" (per prototype); inactive installed gets just
             // the icon.
             GhostButton {
-                visible: root.installed && root.active
+                visible: root.busyKind.length === 0 && root.installed && root.active
                 sizeTag: "sm"
                 plain: true
                 iconName: "trash"
@@ -253,7 +303,7 @@ Rectangle {
                 onClicked: root.uninstallClicked()
             }
             GhostButton {
-                visible: root.installed && !root.active
+                visible: root.busyKind.length === 0 && root.installed && !root.active
                 sizeTag: "sm"
                 plain: true
                 iconName: "trash"
@@ -262,7 +312,7 @@ Rectangle {
             }
 
             PrimaryButton {
-                visible: !root.installed
+                visible: root.busyKind.length === 0 && !root.installed
                 sizeTag: "sm"
                 iconName: "download"
                 text: "Установить"

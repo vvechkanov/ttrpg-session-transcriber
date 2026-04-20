@@ -73,10 +73,14 @@ class SessionMeta(QObject):
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._session_dir: Path | None = None
-        self._total_min = TOTAL_MIN
-        self._seg_split_min = SEG_SPLIT_MIN
-        self._session_title = "Сессия 14 — Битва на мосту"
-        self._campaign_title = "Storm King's Thunder"
+        # Clean defaults — no mock "Сессия 14" visible before the user
+        # drops a folder. openSession() populates real values; the
+        # EmptyScreen is shown until then (AppModel.screen defaults to
+        # "empty" now).
+        self._total_min = 0
+        self._seg_split_min = 0
+        self._session_title = ""
+        self._campaign_title = ""
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
@@ -150,13 +154,14 @@ class SessionMeta(QObject):
         audio_paths = _detect_audio(path)
         durations = [probe_duration(p) for p in audio_paths]
         max_seconds = max(durations) if durations else 0.0
-        # Fall back to 180 min when probe fails or folder has no audio,
-        # so the prototype ruler still renders at a reasonable scale.
-        total_min = max(1, int(round(max_seconds / 60.0))) if max_seconds > 0 else 180
+        # No mock fallback duration — if ffprobe can't read a single
+        # track, the ruler renders empty rather than faking 3 h. User
+        # confusion about fake content > graceful degradation here.
+        total_min = max(1, int(round(max_seconds / 60.0))) if max_seconds > 0 else 0
         self._total_min = total_min
-        # Craig splits mid-session on long recordings; for unknown splits
-        # we fake a 2/3-point marker so the strip remains visible.
-        self._seg_split_min = int(total_min * 2 // 3)
+        # Craig splits mid-session on long recordings; for unknown
+        # splits, leave the strip flat.
+        self._seg_split_min = int(total_min * 2 // 3) if total_min > 0 else 0
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
@@ -202,32 +207,11 @@ class TrackEntry:
     audio_path: Path | None = None
 
 
-def _gen_peaks(seed: int, count: int = 80) -> list[float]:
-    """Deterministic pseudo-peaks — same shape the prototype uses.
-
-    Matches ``genActivity`` in the HTML file so the visual outcome is
-    recognisable when the screens are compared side-by-side.
-    """
-
-    x = seed * 9301 + 49297
-    out: list[float] = []
-    for i in range(count):
-        x = (x * 9301 + 49297) % 233280
-        r = x / 233280
-        base = 0.2 + r * 0.7
-        gap = 0.05 if i in (12, 30, 55) else 1.0
-        out.append(max(0.04, base * gap))
-    return out
-
-
-_TRACK_ROWS: list[TrackEntry] = [
-    TrackEntry("Andrey", "GM",        "Гендальф",    False, "gigaam",  False, _gen_peaks(1)),
-    TrackEntry("Boris",  "Игрок",     "Арагорн",     False, "gigaam",  False, _gen_peaks(2)),
-    TrackEntry("Carol",  "Игрок",     "Лютиэн",      False, "whisper", True,  _gen_peaks(3)),
-    TrackEntry("Dmitry", "Слушатель", "",            True,  "",        False, _gen_peaks(4)),
-    TrackEntry("Eve",    "Игрок",     "Галадриэль",  False, "gigaam",  False, _gen_peaks(5)),
-    TrackEntry("Frank",  "Игрок",     "Боромир",     False, "gigaam",  False, _gen_peaks(6)),
-]
+#: TrackListModel starts empty. Mock players were removed in Phase 11
+#: polish — the app only ever shows real tracks after the user drops
+#: a session folder onto the shell (SessionMeta.openSession populates
+#: both list models through the sessionOpened signal).
+_TRACK_ROWS: list[TrackEntry] = []
 
 
 class TrackListModel(QAbstractListModel):
@@ -553,11 +537,8 @@ class SourceEntry:
     end_pct: float
 
 
-_SOURCE_ROWS: list[SourceEntry] = [
-    SourceEntry("foundry-chat", "часть 1",    "session-14-chat-part1.db", 0.0,           SEG1_END_PCT),
-    SourceEntry("foundry-chat", "часть 2",    "session-14-chat-part2.db", SEG1_END_PCT,  100.0),
-    SourceEntry("combat-log",   "Гоблины",    "combat-goblins.json",      36.0,          60.0),
-]
+#: SourceListModel also starts empty — populated only after folder drop.
+_SOURCE_ROWS: list[SourceEntry] = []
 
 
 class SourceListModel(QAbstractListModel):
