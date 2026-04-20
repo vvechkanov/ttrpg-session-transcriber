@@ -1,0 +1,225 @@
+"""Mock data for the Timeline idle-phase slice.
+
+The prototype's timeline is populated with a hard-coded 3h47m session
+(6 players, 3 extra sources, Craig split at 2h30m). This module
+mirrors that data so the layout-focused Python ↔ QML pipeline has
+something to render without requiring real session discovery.
+
+When real session ingestion arrives (step 5+), ``TrackListModel`` and
+``SourceListModel`` stay with the same role names — only the data
+source changes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from PySide6.QtCore import (
+    QAbstractListModel,
+    QByteArray,
+    QModelIndex,
+    QObject,
+    Qt,
+    Property,
+    Signal,
+    Slot,
+)
+
+
+# Total session duration and the point at which Craig split the
+# recording into two segments. The ruler and the Craig-segments strip
+# both read these.
+TOTAL_MIN: int = 227        # 3h47m
+SEG_SPLIT_MIN: int = 150    # 2h30m
+
+SEG1_END_PCT: float = (SEG_SPLIT_MIN / TOTAL_MIN) * 100.0  # ~66%
+
+
+class SessionMeta(QObject):
+    """Scalar session facts shared by the ruler, waveforms, and strip.
+
+    Exposed to QML as ``sessionMeta``. Values are read-only at this
+    stage — the real SessionModel that arrives with ingest will
+    replace this with a signal-driven version.
+    """
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._total_min = TOTAL_MIN
+        self._seg_split_min = SEG_SPLIT_MIN
+
+    @Property(int, constant=True)
+    def totalMinutes(self) -> int:
+        return self._total_min
+
+    @Property(int, constant=True)
+    def segmentSplitMinutes(self) -> int:
+        return self._seg_split_min
+
+    @Property(float, constant=True)
+    def segmentSplitPct(self) -> float:
+        return (self._seg_split_min / self._total_min) * 100.0
+
+    @Property(str, constant=True)
+    def sessionTitle(self) -> str:
+        return "Сессия 14 — Битва на мосту"
+
+    @Property(str, constant=True)
+    def campaignTitle(self) -> str:
+        return "Storm King's Thunder"
+
+    @Property(str, constant=True)
+    def segmentsCaption(self) -> str:
+        # "2 сегмента · 3ч 47м" — same string the prototype renders.
+        h = self._total_min // 60
+        m = self._total_min % 60
+        return f"2 сегмента · {h}ч {m:02d}м"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Tracks (one audio lane per player)
+# ─────────────────────────────────────────────────────────────────────
+@dataclass
+class TrackEntry:
+    name: str
+    role: str              # "GM" | "Игрок" | "Слушатель"
+    character: str         # "" for listeners
+    excluded: bool         # True when the player has no audio
+    model_id: str          # "gigaam" | "whisper" | ""
+    model_override: bool
+    peaks: list[float] = field(default_factory=list)
+
+
+def _gen_peaks(seed: int, count: int = 80) -> list[float]:
+    """Deterministic pseudo-peaks — same shape the prototype uses.
+
+    Matches ``genActivity`` in the HTML file so the visual outcome is
+    recognisable when the screens are compared side-by-side.
+    """
+
+    x = seed * 9301 + 49297
+    out: list[float] = []
+    for i in range(count):
+        x = (x * 9301 + 49297) % 233280
+        r = x / 233280
+        base = 0.2 + r * 0.7
+        gap = 0.05 if i in (12, 30, 55) else 1.0
+        out.append(max(0.04, base * gap))
+    return out
+
+
+_TRACK_ROWS: list[TrackEntry] = [
+    TrackEntry("Andrey", "GM",        "Гендальф",    False, "gigaam",  False, _gen_peaks(1)),
+    TrackEntry("Boris",  "Игрок",     "Арагорн",     False, "gigaam",  False, _gen_peaks(2)),
+    TrackEntry("Carol",  "Игрок",     "Лютиэн",      False, "whisper", True,  _gen_peaks(3)),
+    TrackEntry("Dmitry", "Слушатель", "",            True,  "",        False, _gen_peaks(4)),
+    TrackEntry("Eve",    "Игрок",     "Галадриэль",  False, "gigaam",  False, _gen_peaks(5)),
+    TrackEntry("Frank",  "Игрок",     "Боромир",     False, "gigaam",  False, _gen_peaks(6)),
+]
+
+
+class TrackListModel(QAbstractListModel):
+    NameRole      = Qt.ItemDataRole.UserRole + 1
+    RoleRole      = Qt.ItemDataRole.UserRole + 2
+    CharacterRole = Qt.ItemDataRole.UserRole + 3
+    ExcludedRole  = Qt.ItemDataRole.UserRole + 4
+    ModelIdRole   = Qt.ItemDataRole.UserRole + 5
+    OverrideRole  = Qt.ItemDataRole.UserRole + 6
+    PeaksRole     = Qt.ItemDataRole.UserRole + 7
+
+    _ROLES = {
+        NameRole:      b"name",
+        RoleRole:      b"playerRole",
+        CharacterRole: b"character",
+        ExcludedRole:  b"excluded",
+        ModelIdRole:   b"modelId",
+        OverrideRole:  b"override",
+        PeaksRole:     b"peaks",
+    }
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._rows: list[TrackEntry] = list(_TRACK_ROWS)
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        t = self._rows[index.row()]
+        match role:
+            case TrackListModel.NameRole:      return t.name
+            case TrackListModel.RoleRole:      return t.role
+            case TrackListModel.CharacterRole: return t.character
+            case TrackListModel.ExcludedRole:  return t.excluded
+            case TrackListModel.ModelIdRole:   return t.model_id
+            case TrackListModel.OverrideRole:  return t.model_override
+            case TrackListModel.PeaksRole:     return t.peaks
+        return None
+
+    def roleNames(self) -> dict[int, QByteArray]:
+        return {role: QByteArray(name) for role, name in self._ROLES.items()}
+
+    @Slot(result=int)
+    def activeCount(self) -> int:
+        """Non-excluded tracks — used by the "5 из 6" section header."""
+        return sum(1 for t in self._rows if not t.excluded)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Sources (chat log / combat tracker / GM notes lanes above the tracks)
+# ─────────────────────────────────────────────────────────────────────
+@dataclass
+class SourceEntry:
+    parser_id: str   # "foundry-chat" | "combat-log" | "plain-text" | "markdown"
+    label: str       # short descriptor, e.g. "часть 1"
+    file_name: str
+    start_pct: float
+    end_pct: float
+
+
+_SOURCE_ROWS: list[SourceEntry] = [
+    SourceEntry("foundry-chat", "часть 1",    "session-14-chat-part1.db", 0.0,           SEG1_END_PCT),
+    SourceEntry("foundry-chat", "часть 2",    "session-14-chat-part2.db", SEG1_END_PCT,  100.0),
+    SourceEntry("combat-log",   "Гоблины",    "combat-goblins.json",      36.0,          60.0),
+]
+
+
+class SourceListModel(QAbstractListModel):
+    ParserIdRole = Qt.ItemDataRole.UserRole + 1
+    LabelRole    = Qt.ItemDataRole.UserRole + 2
+    FileRole     = Qt.ItemDataRole.UserRole + 3
+    StartRole    = Qt.ItemDataRole.UserRole + 4
+    EndRole      = Qt.ItemDataRole.UserRole + 5
+
+    _ROLES = {
+        ParserIdRole: b"parserId",
+        LabelRole:    b"label",
+        FileRole:     b"fileName",
+        StartRole:    b"startPct",
+        EndRole:      b"endPct",
+    }
+
+    def __init__(self, parent: Any = None) -> None:
+        super().__init__(parent)
+        self._rows: list[SourceEntry] = list(_SOURCE_ROWS)
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:
+        if not index.isValid() or not (0 <= index.row() < len(self._rows)):
+            return None
+        s = self._rows[index.row()]
+        match role:
+            case SourceListModel.ParserIdRole: return s.parser_id
+            case SourceListModel.LabelRole:    return s.label
+            case SourceListModel.FileRole:     return s.file_name
+            case SourceListModel.StartRole:    return s.start_pct
+            case SourceListModel.EndRole:      return s.end_pct
+        return None
+
+    def roleNames(self) -> dict[int, QByteArray]:
+        return {role: QByteArray(name) for role, name in self._ROLES.items()}

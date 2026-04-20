@@ -73,6 +73,37 @@ var info = "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 Z " +
 var chevRight = "M9 6 L15 12 L9 18";
 var chevDown  = "M6 9 L12 15 L18 9";
 
+var scissors = "M6 6 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0 Z " +
+               "M6 18 m-3 0 a3 3 0 1 0 6 0 a3 3 0 1 0 -6 0 Z " +
+               "M20 4 L8.12 15.88 " +
+               "M14.47 14.48 L20 20 " +
+               "M8.12 8.12 L12 12";
+
+var chat = "M21 15 A2 2 0 0 1 19 17 H7 L3 21 V5 A2 2 0 0 1 5 3 H19 A2 2 0 0 1 21 5 Z";
+
+// Lucide "swords" simplified — crossed strokes read as weapons at
+// small sizes.
+var swords = "M14.5 17.5 L3 6 V3 H6 L17.5 14.5 " +
+             "M13 19 L19 13 " +
+             "M16 16 L20 20 " +
+             "M19 21 L21 19 " +
+             "M14.5 6.5 L18 3 H21 V6 L17.5 9.5 " +
+             "M5 14 L9 18 " +
+             "M7 17 L4 20 " +
+             "M3 19 L5 21";
+
+var file = "M14 2 H6 A2 2 0 0 0 4 4 V20 A2 2 0 0 0 6 22 H18 A2 2 0 0 0 20 20 V8 L14 2 Z " +
+           "M14 2 V8 H20";
+
+// Star-spark (Lucide `sparkles` lightweight).
+var sparkle = "M12 3 L13.9 7.1 L18 9 L13.9 10.9 L12 15 L10.1 10.9 L6 9 L10.1 7.1 Z";
+
+var play = "M6 3 L20 12 L6 21 Z";
+
+var alert = "M10.29 3.86 L1.82 18 A2 2 0 0 0 3.53 21 H20.47 A2 2 0 0 0 22.18 18 L13.71 3.86 A2 2 0 0 0 10.29 3.86 Z " +
+            "M12 9 V13 " +
+            "M12 17 H12.01";
+
 function byName(name) {
     switch (name) {
         case "list":       return list;
@@ -91,6 +122,13 @@ function byName(name) {
         case "info":       return info;
         case "chevRight":  return chevRight;
         case "chevDown":   return chevDown;
+        case "scissors":   return scissors;
+        case "chat":       return chat;
+        case "swords":     return swords;
+        case "file":       return file;
+        case "sparkle":    return sparkle;
+        case "play":       return play;
+        case "alert":      return alert;
         default:           return "";
     }
 }

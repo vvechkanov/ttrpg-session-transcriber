@@ -10,5 +10,22 @@ The legacy QWidgets shell in ``ui/shell/`` is independent.
 
 from ui.models.app_model import AppModel
 from ui.models.model_registry import ModelRegistry
+from ui.models.session_mock import (
+    SEG1_END_PCT,
+    SEG_SPLIT_MIN,
+    TOTAL_MIN,
+    SessionMeta,
+    SourceListModel,
+    TrackListModel,
+)
 
-__all__ = ["AppModel", "ModelRegistry"]
+__all__ = [
+    "AppModel",
+    "ModelRegistry",
+    "SessionMeta",
+    "SourceListModel",
+    "TrackListModel",
+    "TOTAL_MIN",
+    "SEG_SPLIT_MIN",
+    "SEG1_END_PCT",
+]
