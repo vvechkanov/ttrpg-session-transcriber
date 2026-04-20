@@ -80,6 +80,9 @@ class SessionMeta(QObject):
 # ─────────────────────────────────────────────────────────────────────
 # Tracks (one audio lane per player)
 # ─────────────────────────────────────────────────────────────────────
+TRACK_STATES = ("idle", "queued", "running", "done", "cached", "failed")
+
+
 @dataclass
 class TrackEntry:
     name: str
@@ -93,6 +96,17 @@ class TrackEntry:
     # — AsrWorker emits progress into this via ``TrackListModel
     # .setProgress``. ``0`` means "nothing yet" (idle state).
     progress: float = 0.0
+    # Per-track lifecycle state used by the inline status chip:
+    #
+    #   idle    — no pipeline activity (default)
+    #   queued  — scheduled, waiting behind other rows
+    #   running — the AsrWorker is attached to this row
+    #   done    — ASR finished successfully
+    #   cached  — skipped because a result was already on disk
+    #   failed  — ASR errored on this row; other rows may still succeed
+    state: str = "idle"
+    # Set when `state == "failed"` — message shown to the user.
+    error_message: str = ""
 
 
 def _gen_peaks(seed: int, count: int = 80) -> list[float]:
@@ -132,6 +146,8 @@ class TrackListModel(QAbstractListModel):
     OverrideRole  = Qt.ItemDataRole.UserRole + 6
     PeaksRole     = Qt.ItemDataRole.UserRole + 7
     ProgressRole  = Qt.ItemDataRole.UserRole + 8
+    StateRole     = Qt.ItemDataRole.UserRole + 9
+    ErrorRole     = Qt.ItemDataRole.UserRole + 10
 
     _ROLES = {
         NameRole:      b"name",
@@ -142,6 +158,8 @@ class TrackListModel(QAbstractListModel):
         OverrideRole:  b"override",
         PeaksRole:     b"peaks",
         ProgressRole:  b"progress",
+        StateRole:     b"trackState",
+        ErrorRole:     b"errorMessage",
     }
 
     def __init__(self, parent: Any = None) -> None:
@@ -164,6 +182,8 @@ class TrackListModel(QAbstractListModel):
             case TrackListModel.OverrideRole:  return t.model_override
             case TrackListModel.PeaksRole:     return t.peaks
             case TrackListModel.ProgressRole:  return t.progress
+            case TrackListModel.StateRole:     return t.state
+            case TrackListModel.ErrorRole:     return t.error_message
         return None
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -230,6 +250,61 @@ class TrackListModel(QAbstractListModel):
                 [TrackListModel.ProgressRole],
             )
             self.overallProgressChanged.emit()
+
+    @Slot(int, str)
+    def setState(self, row: int, state: str) -> None:
+        """Update the lifecycle state for a single row.
+
+        Known values listed in :const:`TRACK_STATES`. Unknown states
+        are rejected to surface mis-spellings early rather than have
+        QML silently read them.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        if state not in TRACK_STATES:
+            raise ValueError(f"unknown track state {state!r}; expected one of {TRACK_STATES}")
+        if self._rows[row].state == state:
+            return
+        self._rows[row].state = state
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.StateRole])
+
+    @Slot(int, str)
+    def setError(self, row: int, message: str) -> None:
+        """Record a human-readable error for a row (flips state → "failed")."""
+
+        if not (0 <= row < len(self._rows)):
+            return
+        row_data = self._rows[row]
+        row_data.error_message = message
+        row_data.state = "failed"
+        idx = self.index(row, 0)
+        self.dataChanged.emit(
+            idx, idx,
+            [TrackListModel.StateRole, TrackListModel.ErrorRole],
+        )
+
+    @Slot()
+    def resetStates(self) -> None:
+        """Return every row to the ``idle`` state and clear errors.
+
+        Called before a fresh pipeline run. Together with
+        :meth:`resetProgress` it's enough to re-enter the idle look.
+        """
+
+        changed = False
+        for row in self._rows:
+            if row.state != "idle" or row.error_message:
+                row.state = "idle"
+                row.error_message = ""
+                changed = True
+        if changed:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._rows) - 1, 0),
+                [TrackListModel.StateRole, TrackListModel.ErrorRole],
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -295,6 +295,8 @@ Rectangle {
                                         modelOverride: model.override
                                         peaks:         model.peaks
                                         progress:      model.progress
+                                        trackState:    model.trackState
+                                        errorMessage:  model.errorMessage
                                     }
                                 }
 

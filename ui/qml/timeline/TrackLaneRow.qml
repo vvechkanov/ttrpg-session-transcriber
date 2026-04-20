@@ -27,12 +27,22 @@ Item {
     // 0.0 → 1.0. Drives the phase-fill overlay on the waveform.
     property real progress: 0.0
 
-    // Phase-aware accent colour for the fill overlay. Whisper-override
-    // tracks use the muted-purple accent from the prototype; regular
-    // tracks use the warm accent.
-    readonly property color _fillColor: modelOverride
-        ? "#8A6FB8"     // whisper-purple
-        : Theme.accent
+    // Lifecycle state from TrackListModel: idle/queued/running/done/
+    // cached/failed. Drives the inline status chip and the fill tint.
+    property string trackState: "idle"
+    property string errorMessage: ""
+
+    // Phase-aware accent colour for the fill overlay.
+    //   cached  → green (bars read as "already on disk")
+    //   failed  → muted red (partially-filled bars go red-soft)
+    //   whisper → purple override
+    //   else    → warm accent
+    readonly property color _fillColor: {
+        if (trackState === "cached") return Theme.green
+        if (trackState === "failed") return Theme.redSoft
+        if (modelOverride)           return "#8A6FB8"   // whisper-purple
+        return Theme.accent
+    }
 
     signal modelBadgeClicked()
 
@@ -194,6 +204,20 @@ Item {
             muted: root.excluded
             progress: root.excluded ? 0.0 : root.progress
             fillColor: root._fillColor
+        }
+
+        // Status chip bottom-anchored. Only renders when the pipeline
+        // is active (anything other than the idle state).
+        TrackStatusChip {
+            visible: !root.excluded && root.trackState !== "idle"
+                     && root.trackState !== "done"
+            anchors.left: parent.left
+            anchors.leftMargin: 4
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 2
+            trackState: root.trackState
+            progress: root.progress
+            errorMessage: root.errorMessage
         }
 
         // Vertical dashed segment-split line across the waveform.
