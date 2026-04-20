@@ -28,7 +28,10 @@ Rectangle {
     id: root
     color: Theme.bg
 
-    property string phase: "idle"
+    // Single source of truth for phase is appModel.phase — wired via a
+    // context property from Python. The local binding keeps template
+    // code terse (`root.phase`) and reacts to external mutations.
+    readonly property string phase: appModel ? appModel.phase : "idle"
     property int _gutterWidth: 220
 
     // Vertical layout: sticky bar on top, scrollable body below.
@@ -89,10 +92,14 @@ Rectangle {
 
                             EngineBar {}
 
-                            PrimaryButton {
-                                sizeTag: "md"
-                                iconName: "play"
-                                text: "Запустить обработку"
+                            RunControl {
+                                phase: root.phase
+                                overallProgress: tracksModel
+                                    ? tracksModel.overallProgress
+                                    : 0.0
+                                etaLabel: "~1 мин"
+                                onRunClicked: pipeline.runAsr()
+                                onCancelClicked: pipeline.cancel()
                             }
                         }
                     }
@@ -287,6 +294,7 @@ Rectangle {
                                         modelId:       model.modelId
                                         modelOverride: model.override
                                         peaks:         model.peaks
+                                        progress:      model.progress
                                     }
                                 }
 

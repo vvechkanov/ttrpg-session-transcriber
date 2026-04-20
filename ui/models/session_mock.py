@@ -89,6 +89,10 @@ class TrackEntry:
     model_id: str          # "gigaam" | "whisper" | ""
     model_override: bool
     peaks: list[float] = field(default_factory=list)
+    # 0.0 → 1.0 share of this track that has been transcribed. Mutable
+    # — AsrWorker emits progress into this via ``TrackListModel
+    # .setProgress``. ``0`` means "nothing yet" (idle state).
+    progress: float = 0.0
 
 
 def _gen_peaks(seed: int, count: int = 80) -> list[float]:
@@ -127,6 +131,7 @@ class TrackListModel(QAbstractListModel):
     ModelIdRole   = Qt.ItemDataRole.UserRole + 5
     OverrideRole  = Qt.ItemDataRole.UserRole + 6
     PeaksRole     = Qt.ItemDataRole.UserRole + 7
+    ProgressRole  = Qt.ItemDataRole.UserRole + 8
 
     _ROLES = {
         NameRole:      b"name",
@@ -136,6 +141,7 @@ class TrackListModel(QAbstractListModel):
         ModelIdRole:   b"modelId",
         OverrideRole:  b"override",
         PeaksRole:     b"peaks",
+        ProgressRole:  b"progress",
     }
 
     def __init__(self, parent: Any = None) -> None:
@@ -157,6 +163,7 @@ class TrackListModel(QAbstractListModel):
             case TrackListModel.ModelIdRole:   return t.model_id
             case TrackListModel.OverrideRole:  return t.model_override
             case TrackListModel.PeaksRole:     return t.peaks
+            case TrackListModel.ProgressRole:  return t.progress
         return None
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -166,6 +173,63 @@ class TrackListModel(QAbstractListModel):
     def activeCount(self) -> int:
         """Non-excluded tracks — used by the "5 из 6" section header."""
         return sum(1 for t in self._rows if not t.excluded)
+
+    # ── Aggregate progress (for the RunControl dial) ──────────────────
+    overallProgressChanged = Signal()
+
+    @Property(float, notify=overallProgressChanged)
+    def overallProgress(self) -> float:
+        """Mean progress across non-excluded tracks, 0..1.
+
+        With only one worker running in step 5 this averages one live
+        value with the zeros of the queued rows — which visually lines
+        up with the prototype's aggregate ETA.
+        """
+
+        active = [r for r in self._rows if not r.excluded]
+        if not active:
+            return 0.0
+        return sum(r.progress for r in active) / len(active)
+
+    # ── Called from the AsrWorker orchestrator on the main thread ────
+    @Slot(int, float)
+    def setProgress(self, row: int, progress: float) -> None:
+        """Push a 0.0..1.0 progress value to the given row.
+
+        Emits ``dataChanged`` with the ProgressRole only — delegates
+        bind only to ``progress`` so peers don't repaint. The setter
+        is a ``Slot`` so a worker thread can call it via a queued
+        connection without thread-local state leaks.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        clamped = 0.0 if progress < 0.0 else (1.0 if progress > 1.0 else progress)
+        if self._rows[row].progress == clamped:
+            return
+        self._rows[row].progress = clamped
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.ProgressRole])
+        self.overallProgressChanged.emit()
+
+    @Slot()
+    def resetProgress(self) -> None:
+        """Zero the progress of every row. Called when the user re-runs
+        the pipeline or cancels out of the running state.
+        """
+
+        changed = False
+        for row in self._rows:
+            if row.progress != 0.0:
+                row.progress = 0.0
+                changed = True
+        if changed:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._rows) - 1, 0),
+                [TrackListModel.ProgressRole],
+            )
+            self.overallProgressChanged.emit()
 
 
 # ─────────────────────────────────────────────────────────────────────

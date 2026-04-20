@@ -24,6 +24,16 @@ Item {
     property bool modelOverride: false
     property var peaks: []
 
+    // 0.0 → 1.0. Drives the phase-fill overlay on the waveform.
+    property real progress: 0.0
+
+    // Phase-aware accent colour for the fill overlay. Whisper-override
+    // tracks use the muted-purple accent from the prototype; regular
+    // tracks use the warm accent.
+    readonly property color _fillColor: modelOverride
+        ? "#8A6FB8"     // whisper-purple
+        : Theme.accent
+
     signal modelBadgeClicked()
 
     implicitHeight: 54
@@ -38,6 +48,21 @@ Item {
         anchors.bottom: parent.bottom
         height: 1
         color: Theme.borderSoft
+    }
+
+    // 3px accent strip at the left when this track is mid-ASR —
+    // mirrors the prototype's "runningThis" indicator.
+    readonly property bool _running: progress > 0.0 && progress < 1.0
+    Rectangle {
+        visible: root._running && !root.excluded
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.topMargin: 6
+        anchors.bottomMargin: 7
+        width: 3
+        color: root._fillColor
+        radius: 2
     }
 
     // ── Left gutter ───────────────────────────────────────────────
@@ -167,6 +192,8 @@ Item {
             anchors.fill: parent
             peaks: root.peaks
             muted: root.excluded
+            progress: root.excluded ? 0.0 : root.progress
+            fillColor: root._fillColor
         }
 
         // Vertical dashed segment-split line across the waveform.

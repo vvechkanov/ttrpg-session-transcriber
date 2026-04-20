@@ -2,21 +2,28 @@ import QtQuick
 import QtQuick.Layouts
 import App.Theme
 
-// Mock waveform: renders a list of 0..1 peak values as a row of
-// rounded bars. Idle phase draws all bars in the muted "dry" colour —
-// the filled / progress overlay arrives when the ASR phase is wired.
+// Mock waveform with a phase-driven fill overlay.
 //
-// Listener tracks render with an even lighter grey (see `muted`).
+// Two passes:
+//   1. `baseColor` — every bar at the "dry" muted grey.
+//   2. `fillColor` — the first `progress * N` bars on top, tinted.
+//
+// When `progress == 0` nothing overlays. The prototype selects the
+// fill colour by per-track status (accent for normal ASR, green for
+// cached, purple for whisper-override, redSoft for failed); the
+// caller passes whichever is appropriate via `fillColor`.
 Item {
     id: root
 
-    property var peaks: []        // list<real>
-    property bool muted: false    // listener tracks
-    property color barColor: muted
+    property var peaks: []            // list<real>
+    property bool muted: false        // listener — draws at lower alpha
+    property real progress: 0.0       // 0..1
+    property color fillColor: Theme.accent
+
+    readonly property color baseColor: muted
         ? Qt.rgba(148/255, 137/255, 126/255, 0.15)
         : Qt.rgba(107/255, 98/255, 90/255, 0.16)
 
-    // Minimum drawn bar height, keeps silence zones visible.
     readonly property real _minHeight: 2
     readonly property real _padX: 2
     readonly property real _gap: 1.5
@@ -25,8 +32,6 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: root._padX
         anchors.rightMargin: root._padX
-        anchors.topMargin: 0
-        anchors.bottomMargin: 0
         spacing: root._gap
 
         Repeater {
@@ -38,17 +43,27 @@ Item {
                        / Math.max(root.peaks.length, 1)
                 height: root.height
 
+                // Phase-fill tint decision for this bar:
+                //   fraction of this bar's left edge ≤ progress → use
+                //   `fillColor`; otherwise `baseColor`.
+                readonly property real _barFrac:
+                    index / Math.max(root.peaks.length, 1)
+                readonly property bool _isFilled: _barFrac < root.progress
+
                 Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.verticalCenter: parent.verticalCenter
-                    // `modelData` is the per-bar 0..1 peak.
+                    width: parent.width
                     height: Math.max(
                         root._minHeight,
                         (modelData * 0.8 + 0.15) * root.height
                     )
-                    width: parent.width
                     radius: 1.5
-                    color: root.barColor
+                    color: parent._isFilled ? root.fillColor : root.baseColor
+
+                    Behavior on color {
+                        ColorAnimation { duration: 220 }
+                    }
                 }
             }
         }

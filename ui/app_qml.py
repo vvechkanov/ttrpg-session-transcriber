@@ -19,6 +19,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuickControls2 import QQuickStyle
 
+from ui.engines import PipelineController
 from ui.models import (
     AppModel,
     ModelRegistry,
@@ -63,6 +64,7 @@ def main() -> int:
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
     session_meta = SessionMeta()
+    pipeline = PipelineController(app_model, tracks_model)
 
     root_ctx = engine.rootContext()
     root_ctx.setContextProperty("appModel",       app_model)
@@ -70,6 +72,7 @@ def main() -> int:
     root_ctx.setContextProperty("tracksModel",    tracks_model)
     root_ctx.setContextProperty("sourcesModel",   sources_model)
     root_ctx.setContextProperty("sessionMeta",    session_meta)
+    root_ctx.setContextProperty("pipeline",       pipeline)
 
     engine.load(QUrl.fromLocalFile(str(_QML_ROOT / "Main.qml")))
     if not engine.rootObjects():

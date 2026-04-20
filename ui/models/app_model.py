@@ -15,6 +15,7 @@ from PySide6.QtCore import Property, QObject, Signal
 
 
 SCREENS = ("empty", "timeline", "models", "settings")
+PHASES  = ("idle", "asr", "merge", "done", "failed")
 
 
 class AppModel(QObject):
@@ -26,6 +27,7 @@ class AppModel(QObject):
 
     screenChanged = Signal()
     currentSessionIdChanged = Signal()
+    phaseChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -34,6 +36,7 @@ class AppModel(QObject):
         # when no session is open (handled inside TimelineScreen later).
         self._screen: str = "timeline"
         self._current_session_id: str = ""
+        self._phase: str = "idle"
 
     # ── screen ────────────────────────────────────────────────────────
     @Property(str, notify=screenChanged)
@@ -60,3 +63,17 @@ class AppModel(QObject):
             return
         self._current_session_id = value
         self.currentSessionIdChanged.emit()
+
+    # ── phase ─────────────────────────────────────────────────────────
+    @Property(str, notify=phaseChanged)
+    def phase(self) -> str:
+        return self._phase
+
+    @phase.setter  # type: ignore[no-redef]
+    def phase(self, value: str) -> None:
+        if value not in PHASES:
+            raise ValueError(f"unknown phase {value!r}; expected one of {PHASES}")
+        if self._phase == value:
+            return
+        self._phase = value
+        self.phaseChanged.emit()
