@@ -188,6 +188,14 @@ class SessionScreen(QWidget):
     """
 
     source_configure_requested = Signal(int)
+    #: P3 — user clicked the "×" button on source card at this index.
+    source_remove_requested = Signal(int)
+    #: P3 — user dropped / picked a valid file onto source card at
+    #: index ``int``. Payload is the absolute path as a string.
+    source_file_dropped = Signal(int, str)
+    #: P3 — user toggled a candidate checkbox in State C. Args:
+    #: card index, filename, checked.
+    source_candidate_toggled = Signal(int, str, bool)
     add_source_requested = Signal()
     merger_configure_requested = Signal()
     output_configure_requested = Signal()
@@ -219,8 +227,8 @@ class SessionScreen(QWidget):
         content = QWidget()
         content.setStyleSheet(f"background-color: {theme.COLOR_BACKGROUND};")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(32, 24, 32, 32)
-        content_layout.setSpacing(theme.GAP_LARGE_PX)
+        content_layout.setContentsMargins(32, 20, 32, 24)
+        content_layout.setSpacing(theme.GAP_MEDIUM_PX)
 
         # Breadcrumb + tabs
         content_layout.addLayout(self._build_breadcrumb())
@@ -391,6 +399,19 @@ class SessionScreen(QWidget):
             card.configure_clicked.connect(
                 lambda i=idx: self.source_configure_requested.emit(i)
             )
+            # P3 — per-card signals need the index bound explicitly
+            # because ``Signal`` callbacks don't forward sender info.
+            card.remove_clicked.connect(
+                lambda i=idx: self.source_remove_requested.emit(i)
+            )
+            card.file_dropped.connect(
+                lambda path, i=idx: self.source_file_dropped.emit(i, path)
+            )
+            card.candidate_toggled.connect(
+                lambda name, checked, i=idx: self.source_candidate_toggled.emit(
+                    i, name, checked
+                )
+            )
             cards_row.addWidget(card, stretch=1)
             self._source_cards.append(card)
 
@@ -452,7 +473,10 @@ class SessionScreen(QWidget):
         state, see :meth:`_update_run_button`).
         """
         block = _BlockFrame()
-        block.setMinimumHeight(380)
+        # Enough vertical room for the idle "play hint" layout (72 px circle
+        # + two centered labels + ghost stretches above/below) without
+        # forcing the whole screen to overflow at the default 1400×900.
+        block.setMinimumHeight(260)
         outer = QVBoxLayout(block)
         outer.setContentsMargins(
             theme.PAD_CONTENT_PX,
@@ -480,6 +504,12 @@ class SessionScreen(QWidget):
         self._run_button.clicked.connect(self.run_clicked.emit)
         header_row.addWidget(self._run_button)
         outer.addLayout(header_row)
+
+        # P0b — gate the run button on having at least one source. The
+        # host (app.py) also calls ``set_run_enabled`` after it replaces
+        # the central widget, but we apply the initial state here so the
+        # widget is consistent as soon as it's constructed.
+        self.set_run_enabled(len(self._data.sources) > 0)
 
         # Stacked pages: idle / running / done
         self._stack = QStackedWidget(block)
@@ -727,6 +757,21 @@ class SessionScreen(QWidget):
         self._run_button.setStyleSheet(self._run_button_style(running=False))
         for card in self._source_cards:
             card.set_visual_state("done")
+
+    def set_run_enabled(self, enabled: bool) -> None:
+        """Enable or disable the run button based on source availability.
+
+        Called by the host (``app.py``) whenever a source card is added
+        or removed. When disabled we also set a tooltip explaining why,
+        which Qt will show on hover even for a disabled button.
+        """
+        self._run_button.setEnabled(enabled)
+        if enabled:
+            self._run_button.setToolTip("")
+            self._run_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self._run_button.setToolTip("Добавьте хотя бы один источник")
+            self._run_button.setCursor(Qt.CursorShape.ArrowCursor)
 
     def set_state_failed(self, error_text: str) -> None:
         """Switch block 3 to the terminal failure page (reuses done page)."""

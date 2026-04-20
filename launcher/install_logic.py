@@ -1,26 +1,29 @@
 """Installation logic for the bootstrap EXE (Epic A / B + C).
 
 Post-migration the installer EXE (``WhisperX-Transcriber.exe``) is a
-PyInstaller-frozen Python process, so it can call
-``core.backend_installers.install_backend`` **in-process** — no more
-embedded Python, no more ``pip install torch|whisperx|sherpa-onnx``,
-no more ``get-pip.py``. ASR bundles ship through the Epic A tracked
-install path (``%APPDATA%/ttrpg-transcriber/models/<backend>/<slug>/``).
+PyInstaller-frozen Python process and lays down only the fixed cost
+payload: ``ffmpeg`` and the PySide6 runtime. No embedded Python, no
+``pip install`` — everything model-related lives inside
+``core.backend_installers.install_backend`` and is invoked **lazily**
+from inside the running shell when the user actually needs a speech
+parser (see ``ui.shell.install_wizard.ensure_backend_installed``).
 
-What this module is still responsible for:
+What this module is responsible for:
     * ffmpeg download into ``DATA_DIR/tools/ffmpeg`` (the runtime EXE
       picks it up via the ``PATH`` environment variable the launcher
       extends before ``Popen``).
+    * ``download_runtime_zip`` — pull ``session-transcriber.zip`` from
+      the matching GitHub Release tag.
     * ``detect_gpu`` — informational banner in the installer UI so the
       user sees "CUDA mode" vs "CPU mode" and understands what the
       runtime will do.
     * ``STEP_WEIGHTS`` — overall progress bar weighting used by
       :mod:`launcher.installer_ui`.
 
-Everything else (PyTorch / WhisperX / get-pip / embeddable Python /
-sherpa-onnx pip) was removed — those stacks live inside the ASR
-backend bundles themselves now (see
-``sources/speech/_fw_download.py`` wheel unpacking).
+ASR models are deliberately NOT installed at first-run. The user is
+asked which model they want only when they add a speech parser to a
+session from inside the shell — sessions that only use the chat-log
+parser never pay the download cost.
 """
 
 from __future__ import annotations
@@ -72,14 +75,16 @@ RUNTIME_ASSET = "session-transcriber.zip"
 #: Sum does not matter — UI normalises to 100 %. Weights reflect the
 #: *actual time* each stage takes on a mid-range home connection:
 #:
-#:     * ffmpeg  ~50 MB  ->  10 % (fast CDN)
-#:     * models  ~1-3 GB -> 60 % (biggest payload, dominates total time)
-#:     * runtime ~80 MB  -> 30 % (session-transcriber.zip from GitHub
+#:     * ffmpeg  ~50 MB  -> 25 % (fast CDN)
+#:     * runtime ~80 MB  -> 75 % (session-transcriber.zip from GitHub
 #:       Release, downloaded + unzipped by bootstrap)
+#:
+#: ASR models are installed on demand from inside the shell (see
+#: ``ui.shell.install_wizard``) and therefore do not participate in
+#: this progress weighting.
 STEP_WEIGHTS = {
-    "ffmpeg": 10,
-    "models": 60,
-    "runtime": 30,
+    "ffmpeg": 25,
+    "runtime": 75,
 }
 
 #: Path inside the extracted runtime zip where ``session-transcriber.exe``

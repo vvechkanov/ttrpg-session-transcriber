@@ -100,15 +100,18 @@ class TestBuildSessionFromDir:
 
 @pytest.mark.gui
 class TestMainWindowPhase9:
-    def test_empty_window_opens_with_placeholder(self, qtbot):
+    def test_empty_window_opens_on_empty_state_screen(self, qtbot):
         from ui.shell.app import MainWindow
+        from ui.shell.screens import EmptyStateScreen
 
         window = MainWindow()
         qtbot.addWidget(window)
         assert window._session_dir is None
         assert window._source_modules == []
-        # Placeholder screen still shows
-        assert window._session_screen is not None
+        # P0a — empty state screen is the initial central widget; the
+        # full SessionScreen is built lazily on first _load_session.
+        assert window._session_screen is None
+        assert isinstance(window.centralWidget(), EmptyStateScreen)
 
     def test_load_session_populates_screen_and_modules(self, qtbot, tmp_path: Path):
         from ui.shell.app import MainWindow
@@ -257,3 +260,265 @@ class TestMainWindowPhase9:
         qtbot.addWidget(window)
         window._on_open_session()
         assert window._session_dir is None
+
+
+# ── P1a — window-level folder drag-and-drop ─────────────────────────────
+
+
+@pytest.mark.gui
+class TestMainWindowFolderDrop:
+    """Covers ``MainWindow.handle_mime_drop`` → ``_load_session``.
+
+    Synthesising a real :class:`QDropEvent` from Python is fragile —
+    the PySide6 bindings unwrap the event's ``mimeData()`` pointer as a
+    generic ``QObject`` once it round-trips through the C++ layer,
+    which makes ``hasUrls()`` raise. We exercise the drop-handling
+    logic through the testable ``handle_mime_drop`` entry point, which
+    takes a plain :class:`QMimeData`. In production Qt constructs the
+    event itself and this indirection isn't needed.
+    """
+
+    @staticmethod
+    def _mime(urls: list[str]):
+        from PySide6.QtCore import QMimeData, QUrl
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(u) for u in urls])
+        return mime
+
+    def test_folder_drop_calls_load_session(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        session = _make_session(tmp_path, with_chat=False, with_audio=True)
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(self._mime([str(session)]))
+        assert calls == [session]
+
+    def test_file_drop_is_ignored(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        some_file = tmp_path / "just-a-file.txt"
+        some_file.write_text("hi", encoding="utf-8")
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(self._mime([str(some_file)]))
+        assert calls == []
+        # Window should remain in the empty state (no session loaded).
+        assert window._session_dir is None
+
+    def test_multi_item_drop_is_ignored(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        from ui.shell.app import MainWindow
+
+        session_a = _make_session(
+            tmp_path / "a", with_chat=False, with_audio=True
+        )
+        session_b = _make_session(
+            tmp_path / "b", with_chat=False, with_audio=True
+        )
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        window.handle_mime_drop(
+            self._mime([str(session_a), str(session_b)])
+        )
+        assert calls == []
+
+    def test_drop_refused_while_run_in_progress(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        """A folder drop during a pipeline run shows an info dialog and
+        does not swap the session — prevents background stage signals
+        from landing on a dead :class:`SessionScreen`.
+        """
+        from ui.shell.app import MainWindow
+
+        session = _make_session(tmp_path, with_chat=False, with_audio=True)
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        # Force the run-in-progress guard.
+        monkeypatch.setattr(
+            type(window._run_controller), "is_running",
+            property(lambda self: True),
+        )
+
+        # Load should NOT be invoked.
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        # Swallow the QMessageBox.information call.
+        info_calls: list[tuple] = []
+        from PySide6.QtWidgets import QMessageBox
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda *a, **kw: info_calls.append((a, kw)),
+        )
+
+        window.handle_mime_drop(self._mime([str(session)]))
+
+        assert calls == []
+        assert len(info_calls) == 1
+
+
+# ── P2a / P2b — recent sessions and onboarding overlay wiring ────────────
+
+
+@pytest.fixture
+def isolated_config(tmp_path: Path, monkeypatch):
+    """Redirect recent-sessions and onboarding storage to ``tmp_path``.
+
+    Every MainWindow test that touches onboarding / recents implicitly
+    depends on :func:`core.recent_sessions.config_dir`; this fixture
+    makes sure we never pollute the real user config dir.
+    """
+    target = tmp_path / "cfg"
+    target.mkdir()
+    from core import onboarding_state, recent_sessions
+
+    monkeypatch.setattr(recent_sessions, "config_dir", lambda: target)
+    monkeypatch.setattr(onboarding_state, "config_dir", lambda: target)
+    return target
+
+
+@pytest.mark.gui
+class TestMainWindowRecentSessions:
+    def test_load_session_calls_add_recent(
+        self, qtbot, tmp_path: Path, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            app_module.recent_sessions,
+            "add_recent",
+            lambda p: calls.append(p) or (),
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        session = _make_session(
+            tmp_path / "sess", with_chat=False, with_audio=True
+        )
+        window._load_session(session)
+
+        assert calls == [session]
+
+    def test_recent_session_selected_routes_to_load(
+        self, qtbot, tmp_path: Path, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        captured: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: captured.append(p)
+        )
+
+        target = tmp_path / "some-session"
+        target.mkdir()
+        # Empty-state screen is still the central widget; emit directly.
+        assert window._empty_state_screen is not None
+        window._empty_state_screen.recent_session_selected.emit(target)
+
+        assert captured == [target]
+
+
+@pytest.mark.gui
+class TestMainWindowOnboardingOverlay:
+    def test_overlay_shown_on_first_run(
+        self, qtbot, monkeypatch, isolated_config: Path
+    ):
+        from core import onboarding_state, recent_sessions
+        from ui.shell import app as app_module
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: True
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions, "load_recent", lambda: ()
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        assert window._onboarding_overlay is not None
+        assert window._onboarding_overlay.isVisible() or not window.isVisible()
+        # Silence unused imports warning
+        _ = (onboarding_state, recent_sessions)
+
+    def test_overlay_not_shown_when_not_first_run(
+        self, qtbot, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: False
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions, "load_recent", lambda: ()
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+        assert window._onboarding_overlay is None
+
+    def test_overlay_not_shown_when_recents_exist(
+        self, qtbot, monkeypatch, tmp_path: Path, isolated_config: Path
+    ):
+        """First-run flag true BUT recents list non-empty → no overlay.
+
+        A user who manually cleared the flag but has recent sessions
+        has obviously used the app before, so we skip the welcome.
+        """
+        from core.recent_sessions import RecentSession
+        from ui.shell import app as app_module
+
+        session = tmp_path / "prev"
+        session.mkdir()
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: True
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions,
+            "load_recent",
+            lambda: (RecentSession(path=session, opened_at=100.0),),
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+        assert window._onboarding_overlay is None

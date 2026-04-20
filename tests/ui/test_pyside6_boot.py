@@ -15,4 +15,4 @@ def test_main_window_opens(qtbot):
     window.show()
     assert window.windowTitle().startswith("Session Transcriber")
     assert window.width() == 1400
-    assert window.height() == 900
+    assert window.height() == 960
