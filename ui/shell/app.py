@@ -466,18 +466,26 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         """Accept the drag when the payload is a single directory.
 
-        Anything else (a file, multiple items) is silently ignored —
-        :class:`EmptyStateScreen` handles the single-file case with a
-        user-visible warning when the drop lands on it directly. We
-        don't duplicate that here because it would fire twice when the
-        child accepts the event.
+        Also refuses the drop outright while a pipeline run is in
+        progress — opening a new session mid-run would destroy the
+        current :class:`SessionScreen` and leave background stage
+        signals wired to a dead widget. Anything else (a file, multiple
+        items) is silently ignored here; the :class:`EmptyStateScreen`
+        drop zone surfaces its own warning when the drop lands on it.
         """
+        if self._run_controller.is_running:
+            event.ignore()
+            return
         if _drop_payload_single_dir(event.mimeData()) is not None:
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        if self._run_controller.is_running:
+            self._warn_drop_during_run()
+            event.ignore()
+            return
         path = _drop_payload_single_dir(event.mimeData())
         if path is None:
             event.ignore()
@@ -494,10 +502,21 @@ class MainWindow(QMainWindow):
         with a plain :class:`QMimeData` to exercise the drop logic
         without synthesising a real event.
         """
+        if self._run_controller.is_running:
+            self._warn_drop_during_run()
+            return
         path = _drop_payload_single_dir(mime)
         if path is None:
             return
         self._load_session(path)
+
+    def _warn_drop_during_run(self) -> None:
+        """Tell the user we refused the drop because a run is active."""
+        QMessageBox.information(
+            self,
+            "Идёт обработка",
+            "Сначала дождитесь окончания текущей обработки или отмените её.",
+        )
 
     # ── Session loading ─────────────────────────────────────────────
 

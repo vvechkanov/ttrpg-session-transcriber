@@ -100,7 +100,7 @@ class TestBuildSessionFromDir:
 
 @pytest.mark.gui
 class TestMainWindowPhase9:
-    def test_empty_window_opens_with_placeholder(self, qtbot):
+    def test_empty_window_opens_on_empty_state_screen(self, qtbot):
         from ui.shell.app import MainWindow
         from ui.shell.screens import EmptyStateScreen
 
@@ -349,6 +349,46 @@ class TestMainWindowFolderDrop:
             self._mime([str(session_a), str(session_b)])
         )
         assert calls == []
+
+    def test_drop_refused_while_run_in_progress(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        """A folder drop during a pipeline run shows an info dialog and
+        does not swap the session — prevents background stage signals
+        from landing on a dead :class:`SessionScreen`.
+        """
+        from ui.shell.app import MainWindow
+
+        session = _make_session(tmp_path, with_chat=False, with_audio=True)
+
+        window = MainWindow()
+        qtbot.addWidget(window)
+
+        # Force the run-in-progress guard.
+        monkeypatch.setattr(
+            type(window._run_controller), "is_running",
+            property(lambda self: True),
+        )
+
+        # Load should NOT be invoked.
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: calls.append(p)
+        )
+
+        # Swallow the QMessageBox.information call.
+        info_calls: list[tuple] = []
+        from PySide6.QtWidgets import QMessageBox
+        monkeypatch.setattr(
+            QMessageBox,
+            "information",
+            lambda *a, **kw: info_calls.append((a, kw)),
+        )
+
+        window.handle_mime_drop(self._mime([str(session)]))
+
+        assert calls == []
+        assert len(info_calls) == 1
 
 
 # ── P2a / P2b — recent sessions and onboarding overlay wiring ────────────

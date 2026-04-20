@@ -29,7 +29,7 @@ Signals:
 
 Drag-and-drop rules (P0a):
     * Only directories accepted. A single file or multiple items shows a
-      :class:`QMessageBox.warning` ("Перетащите папку сессии, а не
+      :class:`QMessageBox.warning` ("Перетащите ровно одну папку
       отдельный файл") — single-file drops are handled by per-card flows
       in P3, not here.
     * While a valid drag-over is in progress the dashed border switches
@@ -205,10 +205,25 @@ class _DropZoneFrame(QFrame):
 
     # ── Drag and drop ────────────────────────────────────────────────
 
+    def set_drag_active(self, active: bool) -> None:
+        """Switch the dashed border to its "active drop target" style.
+
+        Exposed so tests can exercise the visual state without
+        synthesising a :class:`QDragEnterEvent` (PySide6's event
+        constructors don't round-trip from Python cleanly). The real
+        event handlers below simply delegate to this method.
+        """
+        self._drag_active = active
+        self.setStyleSheet(_drop_zone_style(active=active))
+
+    def is_drag_active(self) -> bool:
+        """Current drag-over highlight state (for tests)."""
+        return bool(getattr(self, "_drag_active", False))
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if _mime_single_dir(event.mimeData()) is not None:
             event.acceptProposedAction()
-            self.setStyleSheet(_drop_zone_style(active=True))
+            self.set_drag_active(True)
         else:
             event.ignore()
 
@@ -219,11 +234,11 @@ class _DropZoneFrame(QFrame):
             event.ignore()
 
     def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:  # noqa: N802
-        self.setStyleSheet(_drop_zone_style(active=False))
+        self.set_drag_active(False)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        self.setStyleSheet(_drop_zone_style(active=False))
+        self.set_drag_active(False)
         path = _mime_single_dir(event.mimeData())
         if path is None:
             self.invalid_drop.emit()
@@ -512,9 +527,14 @@ class EmptyStateScreen(QWidget):
     # ── Slots ────────────────────────────────────────────────────────
 
     def _on_invalid_drop(self) -> None:
-        """Surface a warning when the user drops a file instead of a folder."""
+        """Surface a warning when the drop isn't exactly one folder.
+
+        Covers both single-file drops and multi-item drops with a
+        single neutral phrasing — the previous "не отдельный файл"
+        misled users who dropped multiple folders.
+        """
         QMessageBox.warning(
             self,
             "Неверный формат",
-            "Перетащите папку сессии, а не отдельный файл.",
+            "Перетащите ровно одну папку сессии.",
         )

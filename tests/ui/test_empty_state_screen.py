@@ -132,6 +132,23 @@ class TestEmptyStateScreen:
         assert received == []
         assert calls == ["warning"]
 
+    def test_drag_active_toggle_changes_border_state(self, qtbot):
+        """The drop-zone highlight flag flips via ``set_drag_active``.
+
+        The real ``dragEnterEvent`` / ``dragLeaveEvent`` handlers
+        delegate to this method, so testing the toggle covers the
+        border feedback without synthesising a drag event.
+        """
+        screen = EmptyStateScreen()
+        qtbot.addWidget(screen)
+
+        zone = screen._drop_zone  # noqa: SLF001
+        assert zone.is_drag_active() is False
+        zone.set_drag_active(True)
+        assert zone.is_drag_active() is True
+        zone.set_drag_active(False)
+        assert zone.is_drag_active() is False
+
 
 # ── P2a — Recent sessions list ─────────────────────────────────────────
 
