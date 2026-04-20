@@ -397,9 +397,10 @@ Rectangle {
 
                         OutputChip {
                             done: root.phase === "done"
+                            outputPath: pipeline ? pipeline.outputPath : ""
                             sizeCaption: (appModel && appModel.doneSummary.fileSize)
                                 ? appModel.doneSummary.fileSize
-                                : "84 KB"
+                                : "—"
                         }
                     }
 

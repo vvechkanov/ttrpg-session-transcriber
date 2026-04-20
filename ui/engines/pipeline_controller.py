@@ -43,6 +43,20 @@ from ui.models.session_mock import SessionMeta, TrackListModel
 _CACHED_ROWS: frozenset[int] = frozenset({1})
 
 
+def _format_bytes(size: int) -> str:
+    """Short human-readable size — "12 KB", "1.3 MB", "—" on zero."""
+
+    if size <= 0:
+        return "—"
+    if size < 1024:
+        return f"{size} B"
+    kb = size / 1024
+    if kb < 1024:
+        return f"{int(round(kb))} KB"
+    mb = size / (1024 * 1024)
+    return f"{mb:.1f} MB"
+
+
 class PipelineController(QObject):
     """Kicks off and tears down ASR workers, one row at a time.
 
@@ -320,18 +334,46 @@ class PipelineController(QObject):
     def _onMergeDone(self, path: str) -> None:
         self._output_path = path
         self.outputPathChanged.emit()
-        # Mock summary for the done-phase cards — the same numbers the
-        # prototype shows. Replaced with real stats once core.pipeline
-        # is wired in.
-        self._app.setDoneSummary({
-            "durationLabel":  "Готово за 14 минут 23 секунды",
-            "statsLine":      "5 дорожек · 12 340 событий ASR · 1 423 чата · 13 763 события в таймлайне",
-            "fileSize":       "84 KB",
-            "wordCount":      "12 473 слова",
-            "cueCount":       "847 реплик",
-            "sessionLength":  "3 ч 47 м",
-        })
+        self._app.setDoneSummary(self._compute_done_summary(path))
         self._app.phase = "done"
+
+    def _compute_done_summary(self, output_path: str) -> dict[str, str | int]:
+        """Build the done-phase summary dict from real artefacts.
+
+        Reads merged.txt once for byte size + word count; derives cue
+        count from the accumulated per-track segments (one cue per
+        segment is a decent approximation — gluing happens inside the
+        merger and doesn't split 1:1). Session length comes from
+        :class:`SessionMeta`.
+        """
+
+        try:
+            file_bytes = Path(output_path).stat().st_size
+            text = Path(output_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            file_bytes = 0
+            text = ""
+
+        word_count = sum(1 for w in text.split() if w)
+        cue_count = sum(len(segs) for segs in self._collected_segments.values())
+        track_count = sum(
+            1
+            for row in range(self._tracks.rowCount())
+            if not self._is_excluded(row)
+        )
+
+        total_min = int(self._session.totalMinutes) if self._session is not None else 0
+        hours, minutes = divmod(total_min, 60)
+        session_length = f"{hours} ч {minutes:02d} м" if hours else f"{minutes} м"
+
+        return {
+            "durationLabel": f"Готово · {track_count} дорожек",
+            "statsLine": f"{track_count} дорожек · {cue_count} реплик · {word_count} слов",
+            "fileSize": _format_bytes(file_bytes),
+            "wordCount": f"{word_count} слов",
+            "cueCount": f"{cue_count} реплик",
+            "sessionLength": session_length,
+        }
 
     @Slot(str)
     def _onMergeError(self, message: str) -> None:
