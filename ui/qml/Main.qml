@@ -56,4 +56,26 @@ ApplicationWindow {
             SettingsScreen { }
         }
     }
+
+    // Window-wide drop target: dragging a folder anywhere on the app
+    // kicks off real session ingest via SessionMeta. The existing
+    // EmptyScreen drop zone is visually richer but not a hard
+    // requirement — users who already see a timeline can drop again
+    // to swap sessions.
+    DropArea {
+        anchors.fill: parent
+        onEntered: (drag) => {
+            if (drag.hasUrls)
+                drag.accepted = true
+        }
+        onDropped: (drop) => {
+            if (!drop.hasUrls || drop.urls.length === 0)
+                return
+            sessionMeta.openSession(drop.urls[0])
+            // Flip to the Timeline screen so the newly-loaded tracks
+            // are visible even if the user dropped while on a
+            // different screen.
+            appModel.screen = "timeline"
+        }
+    }
 }

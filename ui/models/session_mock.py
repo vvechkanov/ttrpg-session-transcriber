@@ -1,18 +1,21 @@
-"""Mock data for the Timeline idle-phase slice.
+"""Session-level view-models for the Timeline screen.
 
-The prototype's timeline is populated with a hard-coded 3h47m session
-(6 players, 3 extra sources, Craig split at 2h30m). This module
-mirrors that data so the layout-focused Python ↔ QML pipeline has
-something to render without requiring real session discovery.
+Ships with the prototype's hard-coded 3h47m / 6-player session as the
+first-launch default so the layout renders before the user opens
+anything. :meth:`SessionMeta.openSession` swaps those defaults for
+values discovered from a real folder via :mod:`core.file_matchers` —
+tracks come from ``detect_audio_files``, sources from
+``detect_fvtt_chat_logs`` + ``detect_combat_logs``.
 
-When real session ingestion arrives (step 5+), ``TrackListModel`` and
-``SourceListModel`` stay with the same role names — only the data
-source changes.
+The file name still says ``_mock`` because Phase 4 keeps the mock
+defaults alongside the real-ingest path; Phase 10 renames to
+``session.py`` once the mocks are retired.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import (
@@ -20,61 +23,115 @@ from PySide6.QtCore import (
     QByteArray,
     QModelIndex,
     QObject,
+    QUrl,
     Qt,
     Property,
     Signal,
     Slot,
 )
 
+from core.file_matchers import (
+    detect_audio_files,
+    detect_combat_logs,
+    detect_fvtt_chat_logs,
+)
 
-# Total session duration and the point at which Craig split the
-# recording into two segments. The ruler and the Craig-segments strip
-# both read these.
+
+# Mock defaults mirror the prototype's hard-coded 3h47m session until a
+# real folder is dropped onto the Timeline. The ruler and the Craig-
+# segments strip both read these.
 TOTAL_MIN: int = 227        # 3h47m
 SEG_SPLIT_MIN: int = 150    # 2h30m
 
 SEG1_END_PCT: float = (SEG_SPLIT_MIN / TOTAL_MIN) * 100.0  # ~66%
 
 
-class SessionMeta(QObject):
-    """Scalar session facts shared by the ruler, waveforms, and strip.
+def _url_to_path(url_or_path: str) -> Path:
+    """Accept either a ``file://`` URL (QML drag-and-drop) or a plain path."""
 
-    Exposed to QML as ``sessionMeta``. Values are read-only at this
-    stage — the real SessionModel that arrives with ingest will
-    replace this with a signal-driven version.
+    if url_or_path.startswith("file://") or url_or_path.startswith("file:///"):
+        return Path(QUrl(url_or_path).toLocalFile())
+    return Path(url_or_path)
+
+
+class SessionMeta(QObject):
+    """Scalar session facts shared by the ruler, waveforms, and top bar.
+
+    Exposed to QML as ``sessionMeta``. Starts with prototype defaults;
+    :meth:`openSession` swaps them for real folder data and emits
+    :pysig:`sessionOpened` so dependent list models (tracks, sources)
+    can refresh.
     """
+
+    sessionOpened = Signal(str)          # session dir (absolute posix-style)
+    totalMinutesChanged = Signal()
+    segmentSplitMinutesChanged = Signal()
+    sessionTitleChanged = Signal()
+    campaignTitleChanged = Signal()
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
+        self._session_dir: Path | None = None
         self._total_min = TOTAL_MIN
         self._seg_split_min = SEG_SPLIT_MIN
+        self._session_title = "Сессия 14 — Битва на мосту"
+        self._campaign_title = "Storm King's Thunder"
 
-    @Property(int, constant=True)
+    @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
         return self._total_min
 
-    @Property(int, constant=True)
+    @Property(int, notify=segmentSplitMinutesChanged)
     def segmentSplitMinutes(self) -> int:
         return self._seg_split_min
 
-    @Property(float, constant=True)
+    @Property(float, notify=totalMinutesChanged)
     def segmentSplitPct(self) -> float:
+        if self._total_min <= 0:
+            return 0.0
         return (self._seg_split_min / self._total_min) * 100.0
 
-    @Property(str, constant=True)
+    @Property(str, notify=sessionTitleChanged)
     def sessionTitle(self) -> str:
-        return "Сессия 14 — Битва на мосту"
+        return self._session_title
 
-    @Property(str, constant=True)
+    @Property(str, notify=campaignTitleChanged)
     def campaignTitle(self) -> str:
-        return "Storm King's Thunder"
+        return self._campaign_title
 
-    @Property(str, constant=True)
+    @Property(str, notify=totalMinutesChanged)
     def segmentsCaption(self) -> str:
         # "2 сегмента · 3ч 47м" — same string the prototype renders.
         h = self._total_min // 60
         m = self._total_min % 60
         return f"2 сегмента · {h}ч {m:02d}м"
+
+    @Slot(str)
+    def openSession(self, folder_url_or_path: str) -> None:
+        """Load a real session folder. QML drag/drop hands us a file:// URL.
+
+        Derives the session title from the folder name and the campaign
+        from its parent. Duration stays at a placeholder — real audio
+        decode + peaks extraction in Phase 5 will replace it.
+        """
+
+        path = _url_to_path(folder_url_or_path)
+        if not path.is_dir():
+            return
+        self._session_dir = path
+        self._session_title = path.name
+        parent = path.parent
+        self._campaign_title = parent.name if parent and parent.exists() else ""
+        # Placeholder session length until Phase 5 lands peaks + ffprobe.
+        # 180 minutes keeps the ruler and segment-split visually close
+        # to the prototype's 3h47m even on very short tests.
+        self._total_min = 180
+        self._seg_split_min = 120
+        self.sessionTitleChanged.emit()
+        self.campaignTitleChanged.emit()
+        self.totalMinutesChanged.emit()
+        self.segmentSplitMinutesChanged.emit()
+        self.sessionOpened.emit(str(path))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -369,6 +426,40 @@ class TrackListModel(QAbstractListModel):
                 [TrackListModel.StateRole, TrackListModel.ErrorRole],
             )
 
+    @Slot(str)
+    def loadFromDir(self, session_dir_str: str) -> None:
+        """Replace rows with one per audio file discovered in ``session_dir``.
+
+        Uses :func:`core.file_matchers.detect_audio_files` — the same
+        helper the legacy shell relied on — so Craig mix-down files are
+        skipped automatically. Peaks stay empty until Phase 5 plugs in
+        ``core/peaks.py``; role/character/model defaults match the
+        prototype's initial assignment so the existing delegate
+        styling still reads right.
+
+        Connected in :mod:`ui.app_qml` to
+        :pysig:`SessionMeta.sessionOpened`.
+        """
+
+        session_dir = Path(session_dir_str)
+        audio_files = detect_audio_files(session_dir)
+
+        self.beginResetModel()
+        self._rows = [
+            TrackEntry(
+                name=path.stem,
+                role="Игрок",
+                character="",
+                excluded=False,
+                model_id="gigaam",
+                model_override=False,
+                peaks=[],
+            )
+            for path in audio_files
+        ]
+        self.endResetModel()
+        self.overallProgressChanged.emit()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Sources (chat log / combat tracker / GM notes lanes above the tracks)
@@ -425,3 +516,41 @@ class SourceListModel(QAbstractListModel):
 
     def roleNames(self) -> dict[int, QByteArray]:
         return {role: QByteArray(name) for role, name in self._ROLES.items()}
+
+    @Slot(str)
+    def loadFromDir(self, session_dir_str: str) -> None:
+        """Replace rows with discovered chat logs + combat logs.
+
+        Each match is rendered as a full-width lane (0..100%) because
+        precise timeline offsets require timestamp parsing that's out
+        of scope until Phase 7 when the merger actually consumes the
+        files. The label doubles as the section caption the
+        prototype's section header uses.
+
+        Connected in :mod:`ui.app_qml` to
+        :pysig:`SessionMeta.sessionOpened`.
+        """
+
+        session_dir = Path(session_dir_str)
+
+        new_rows: list[SourceEntry] = []
+        for path in detect_fvtt_chat_logs(session_dir):
+            new_rows.append(SourceEntry(
+                parser_id="foundry-chat",
+                label="Foundry чат",
+                file_name=path.name,
+                start_pct=0.0,
+                end_pct=100.0,
+            ))
+        for path in detect_combat_logs(session_dir):
+            new_rows.append(SourceEntry(
+                parser_id="combat-log",
+                label="Боевой лог",
+                file_name=path.name,
+                start_pct=0.0,
+                end_pct=100.0,
+            ))
+
+        self.beginResetModel()
+        self._rows = new_rows
+        self.endResetModel()

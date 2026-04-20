@@ -68,6 +68,11 @@ def main() -> int:
     session_meta = SessionMeta()
     pipeline = PipelineController(app_model, tracks_model)
 
+    # Real ingest: on folder drop, SessionMeta emits the session dir
+    # and both list models refresh from core.file_matchers.
+    session_meta.sessionOpened.connect(tracks_model.loadFromDir)
+    session_meta.sessionOpened.connect(sources_model.loadFromDir)
+
     root_ctx = engine.rootContext()
     root_ctx.setContextProperty("appModel",       app_model)
     root_ctx.setContextProperty("preferences",    preferences)
