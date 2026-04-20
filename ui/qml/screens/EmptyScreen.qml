@@ -17,15 +17,19 @@ Rectangle {
     color: Theme.bg
 
     // Native OS folder picker triggered by "Выбрать папку…".
-    // onAccepted forwards the selected path to SessionMeta.openSession
-    // the same way the window-wide DropArea does; Main.qml listens on
-    // sessionOpened to flip the screen to Timeline.
+    // Mirrors Main.qml's window-wide DropArea: opens the session
+    // via SessionMeta.openSession, THEN flips appModel.screen to
+    // timeline. Without the screen flip the user stays on
+    // EmptyScreen and the load looks silent ("ничего не происходит").
     FolderDialog {
         id: folderPicker
         title: "Выберите папку сессии"
         onAccepted: {
             if (typeof sessionMeta !== "undefined" && sessionMeta) {
                 sessionMeta.openSession(selectedFolder.toString())
+            }
+            if (typeof appModel !== "undefined" && appModel) {
+                appModel.screen = "timeline"
             }
         }
     }
