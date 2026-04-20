@@ -36,6 +36,10 @@ from PySide6.QtWidgets import (
 from core import onboarding_state, recent_sessions
 from core.backend_installers import BackendId
 from core.discovery import find_fvtt_chat_log
+from core.file_matchers import (
+    detect_audio_files,
+    detect_fvtt_chat_logs,
+)
 from core.pipeline import PipelineParams
 from core.ui_registry import resolve_template
 from sources import SPEECH_SOURCES
@@ -145,6 +149,129 @@ def _scan_audio_files(session_dir: Path) -> tuple[str, ...]:
     return tuple(files)
 
 
+#: Human-readable mask shown on the audio card when no audio files
+#: are found. Matches :data:`core.file_matchers.AUDIO_EXTENSIONS` but
+#: pretty-printed for display only. Kept as a constant so unit tests
+#: can assert on it.
+_AUDIO_MASK_HINT = "*.flac / *.mp3 / *.wav"
+
+#: Same idea for the chat card — mirrors the pattern
+#: :func:`core.file_matchers.detect_fvtt_chat_logs` looks for.
+_FVTT_CHAT_MASK_HINT = "fvtt-log-*.txt"
+
+
+def _build_audio_card(
+    session_dir: Path | None,
+    *,
+    title: str,
+    subtitle: str,
+    parser_key: str,
+    removable: bool = True,
+) -> SourceCardData:
+    """Construct a :class:`SourceCardData` for an audio parser.
+
+    Uses :func:`core.file_matchers.detect_audio_files` to decide between
+    the three display states (files / drop / choose):
+        * 0 hits → State B with ``missing_hint=_AUDIO_MASK_HINT``;
+        * 1 hit → State A with the single filename;
+        * >1 hit → State C with candidates pre-selected (all checked).
+    """
+    paths: tuple[Path, ...] = (
+        detect_audio_files(session_dir) if session_dir is not None else ()
+    )
+    names = tuple(p.name for p in paths)
+
+    if len(names) == 0:
+        return SourceCardData(
+            title=title,
+            subtitle=subtitle,
+            files=(),
+            status="warning",
+            status_text="нет файлов",
+            missing_hint=_AUDIO_MASK_HINT,
+            parser_key=parser_key,
+            removable=removable,
+        )
+    if len(names) == 1:
+        return SourceCardData(
+            title=title,
+            subtitle=subtitle,
+            files=names,
+            status="ready",
+            status_text="готов",
+            parser_key=parser_key,
+            removable=removable,
+        )
+    # Multiple — State C; pre-select everything so the default run uses
+    # all files the user intended to transcribe. Explicit opt-out goes
+    # through the checkboxes.
+    return SourceCardData(
+        title=title,
+        subtitle=subtitle,
+        files=names,  # legacy callers still read .files for the pipeline
+        candidate_files=names,
+        selected_candidates=names,
+        status="ready",
+        status_text="готов",
+        parser_key=parser_key,
+        removable=removable,
+    )
+
+
+def _build_fvtt_chat_card(
+    session_dir: Path | None,
+    *,
+    chat_log: Path | None,
+    removable: bool = True,
+) -> SourceCardData:
+    """Construct a :class:`SourceCardData` for the FVTT chat parser."""
+    if chat_log is None:
+        # Check whether the folder has any candidate logs at all —
+        # find_fvtt_chat_log picks the first alphabetically, but if the
+        # scan finds multiple we should still fall into State C.
+        all_logs = (
+            detect_fvtt_chat_logs(session_dir) if session_dir is not None else ()
+        )
+        if len(all_logs) > 1:
+            names = tuple(p.name for p in all_logs)
+            return SourceCardData(
+                title="Foundry VTT чат",
+                subtitle="fvtt-chat parser",
+                files=names,
+                candidate_files=names,
+                selected_candidates=names,
+                status="ready",
+                status_text="готов",
+                parser_key=KEY_FVTT_CHAT,
+                removable=removable,
+            )
+        return SourceCardData(
+            title="Foundry VTT чат",
+            subtitle="fvtt-chat parser",
+            files=(),
+            status="warning",
+            status_text="нет файлов",
+            missing_hint=_FVTT_CHAT_MASK_HINT,
+            parser_key=KEY_FVTT_CHAT,
+            removable=removable,
+        )
+
+    try:
+        line_count = chat_log.read_text(encoding="utf-8", errors="ignore").count("\n")
+    except OSError:
+        line_count = 0
+    return SourceCardData(
+        title="Foundry VTT чат",
+        subtitle="fvtt-chat parser",
+        files=(chat_log.name,),
+        files_hint=f"{line_count} строк",
+        status="ready",
+        status_text="готов",
+        parser_key=KEY_FVTT_CHAT,
+        removable=removable,
+    )
+
+
 def _build_session_from_dir(session_dir: Path) -> tuple[
     SessionScreenData,
     "list[object]",
@@ -156,8 +283,6 @@ def _build_session_from_dir(session_dir: Path) -> tuple[
     ``source_configure_requested(index)`` can pick up the right module
     instance to feed the settings template.
     """
-    audio_files = _scan_audio_files(session_dir)
-
     # Default speech backend — GigaAMSource. Users can change it in the
     # drawer (precision/device/variant) after opening it.
     gigaam_cls = SPEECH_SOURCES["gigaam"]
@@ -168,32 +293,20 @@ def _build_session_from_dir(session_dir: Path) -> tuple[
         gigaam_module = gigaam_cls  # type: ignore[assignment]
 
     sources: list[SourceCardData] = [
-        SourceCardData(
+        _build_audio_card(
+            session_dir,
             title="Аудио",
             subtitle="GigaAM-v3 RNNT · русский",
-            files=audio_files,
-            status="ready" if audio_files else "warning",
-            status_text="готов" if audio_files else "нет файлов",
+            parser_key=KEY_GIGAAM,
         )
     ]
     modules: list[object] = [gigaam_module]
 
     chat_log = find_fvtt_chat_log(session_dir)
     if chat_log is not None:
-        try:
-            line_count = chat_log.read_text(encoding="utf-8", errors="ignore").count("\n")
-        except OSError:
-            line_count = 0
         chat_module = FvttChatSource(chat_log_path=chat_log)
         sources.append(
-            SourceCardData(
-                title="Foundry VTT чат",
-                subtitle="fvtt-chat parser",
-                files=(chat_log.name,),
-                files_hint=f"{line_count} строк",
-                status="ready",
-                status_text="готов",
-            )
+            _build_fvtt_chat_card(session_dir, chat_log=chat_log)
         )
         modules.append(chat_module)
 
@@ -329,6 +442,15 @@ class MainWindow(QMainWindow):
         )
         self._session_screen.source_configure_requested.connect(
             self._on_source_configure
+        )
+        self._session_screen.source_remove_requested.connect(
+            self._on_source_remove
+        )
+        self._session_screen.source_file_dropped.connect(
+            self._on_source_file_dropped
+        )
+        self._session_screen.source_candidate_toggled.connect(
+            self._on_source_candidate_toggled
         )
         self._session_screen.merger_configure_requested.connect(
             self._on_merger_configure
@@ -592,46 +714,24 @@ class MainWindow(QMainWindow):
         card falls back to ``"нет файлов"`` status so the user still
         sees their pick in the list.
         """
-        if key in (KEY_GIGAAM, KEY_FASTER_WHISPER):
-            audio_files = (
-                _scan_audio_files(self._session_dir)
-                if self._session_dir is not None
-                else ()
+        if key == KEY_GIGAAM:
+            return _build_audio_card(
+                self._session_dir,
+                title="Аудио",
+                subtitle="GigaAM-v3 RNNT · русский",
+                parser_key=KEY_GIGAAM,
             )
-            if key == KEY_GIGAAM:
-                title, subtitle = "Аудио", "GigaAM-v3 RNNT · русский"
-            else:
-                title, subtitle = (
-                    "Аудио",
-                    "faster-whisper large-v3 · русский",
-                )
-            return SourceCardData(
-                title=title,
-                subtitle=subtitle,
-                files=audio_files,
-                status="ready" if audio_files else "warning",
-                status_text="готов" if audio_files else "нет файлов",
+        if key == KEY_FASTER_WHISPER:
+            return _build_audio_card(
+                self._session_dir,
+                title="Аудио",
+                subtitle="faster-whisper large-v3 · русский",
+                parser_key=KEY_FASTER_WHISPER,
             )
         if key == KEY_FVTT_CHAT:
             chat_log = getattr(module, "chat_log_path", None)
-            files: tuple[str, ...] = ()
-            files_hint = ""
-            if chat_log is not None:
-                files = (chat_log.name,)
-                try:
-                    line_count = chat_log.read_text(
-                        encoding="utf-8", errors="ignore"
-                    ).count("\n")
-                    files_hint = f"{line_count} строк"
-                except OSError:
-                    files_hint = ""
-            return SourceCardData(
-                title="Foundry VTT чат",
-                subtitle="fvtt-chat parser",
-                files=files,
-                files_hint=files_hint,
-                status="ready",
-                status_text="готов",
+            return _build_fvtt_chat_card(
+                self._session_dir, chat_log=chat_log
             )
         return SourceCardData(
             title=key,
@@ -639,6 +739,7 @@ class MainWindow(QMainWindow):
             files=(),
             status="warning",
             status_text="unknown",
+            parser_key=key,
         )
 
     def _append_source(
@@ -662,6 +763,134 @@ class MainWindow(QMainWindow):
             output=current.output,
         )
         self._source_modules.append(module)
+        self._replace_session_screen(new_data)
+
+    # ── Per-card signal handlers (P3) ────────────────────────────────
+
+    def _on_source_remove(self, index: int) -> None:
+        """Drop card ``index`` from the session and rebuild the screen."""
+        if self._session_screen is None:
+            return
+        current = self._session_screen._data  # noqa: SLF001
+        if not (0 <= index < len(current.sources)):
+            return
+        new_sources = current.sources[:index] + current.sources[index + 1 :]
+        new_modules = (
+            self._source_modules[:index] + self._source_modules[index + 1 :]
+        )
+        new_data = SessionScreenData(
+            project_name=current.project_name,
+            session_name=current.session_name,
+            active_tab=current.active_tab,
+            sources=new_sources,
+            merger=current.merger,
+            output=current.output,
+        )
+        self._source_modules = list(new_modules)
+        self._replace_session_screen(new_data)
+
+    def _on_source_file_dropped(self, index: int, file_path: str) -> None:
+        """Attach a user-dropped / picked file to card ``index``.
+
+        When the card was in State B (``missing_hint`` set, no files)
+        this moves it into State A. When it was already in State A the
+        new file is appended to the list — the underlying pipeline
+        re-scans the folder at run time anyway; the UI change is the
+        visual confirmation that the drop "took".
+        """
+        if self._session_screen is None:
+            return
+        current = self._session_screen._data  # noqa: SLF001
+        if not (0 <= index < len(current.sources)):
+            return
+        old_card = current.sources[index]
+        path = Path(file_path)
+        new_files = tuple(dict.fromkeys(old_card.files + (path.name,)))
+
+        new_card = SourceCardData(
+            title=old_card.title,
+            subtitle=old_card.subtitle,
+            files=new_files,
+            files_hint=old_card.files_hint,
+            status="ready",
+            status_text="готов",
+            # Drop any State-B / State-C hints now that the user has
+            # explicitly provided a file. This collapses the card back
+            # to State A unconditionally.
+            candidate_files=(),
+            selected_candidates=(),
+            missing_hint="",
+            parser_key=old_card.parser_key,
+            removable=old_card.removable,
+        )
+
+        # Propagate the path onto the backing module if it exposes a
+        # hook for it. Most modules re-scan the folder at run time and
+        # don't need this — the hook is a forward-compat seam so a
+        # future ``set_input_files`` implementation can be wired
+        # without another round-trip through the UI layer.
+        module = self._source_modules[index]
+        setter = getattr(module, "set_input_files", None)
+        if callable(setter):
+            try:
+                setter((path,))
+            except Exception:  # noqa: BLE001 — module boundary
+                _log.exception(
+                    "module.set_input_files raised for %r", module
+                )
+
+        self._replace_card_at(index, new_card)
+
+    def _on_source_candidate_toggled(
+        self, index: int, filename: str, checked: bool
+    ) -> None:
+        """Update the card's ``selected_candidates`` tuple after a toggle."""
+        if self._session_screen is None:
+            return
+        current = self._session_screen._data  # noqa: SLF001
+        if not (0 <= index < len(current.sources)):
+            return
+        old_card = current.sources[index]
+        selected = set(old_card.selected_candidates)
+        if checked:
+            selected.add(filename)
+        else:
+            selected.discard(filename)
+        # Preserve the candidate order as stored, filtered to the set.
+        new_selected = tuple(
+            name for name in old_card.candidate_files if name in selected
+        )
+
+        new_card = SourceCardData(
+            title=old_card.title,
+            subtitle=old_card.subtitle,
+            files=new_selected,  # pipeline reads .files
+            files_hint=old_card.files_hint,
+            status=old_card.status,
+            status_text=old_card.status_text,
+            candidate_files=old_card.candidate_files,
+            selected_candidates=new_selected,
+            missing_hint=old_card.missing_hint,
+            parser_key=old_card.parser_key,
+            removable=old_card.removable,
+        )
+        self._replace_card_at(index, new_card)
+
+    def _replace_card_at(self, index: int, new_card: SourceCardData) -> None:
+        """Swap card ``index`` for ``new_card`` and rebuild the screen."""
+        assert self._session_screen is not None
+        current = self._session_screen._data  # noqa: SLF001
+        new_sources = (
+            current.sources[:index] + (new_card,) + current.sources[index + 1 :]
+        )
+        new_data = SessionScreenData(
+            project_name=current.project_name,
+            session_name=current.session_name,
+            active_tab=current.active_tab,
+            sources=new_sources,
+            merger=current.merger,
+            output=current.output,
+        )
         self._replace_session_screen(new_data)
 
     def _open_module_drawer(

@@ -10,6 +10,7 @@ immutable dataclasses, связь с хостом через Qt Signals. Они 
 from ui.widgets.source_card import (
     AddSourcePlaceholder,
     AddSourcePlaceholderData,
+    CardDisplayState,
     CardStatus,
     SourceCard,
     SourceCardData,
@@ -18,6 +19,7 @@ from ui.widgets.source_card import (
 __all__ = [
     "AddSourcePlaceholder",
     "AddSourcePlaceholderData",
+    "CardDisplayState",
     "CardStatus",
     "SourceCard",
     "SourceCardData",
