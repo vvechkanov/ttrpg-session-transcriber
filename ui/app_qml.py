@@ -22,6 +22,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from ui.engines import PipelineController
 from ui.models import (
     AppModel,
+    AppPreferences,
     ModelRegistry,
     SessionMeta,
     SourceListModel,
@@ -60,6 +61,7 @@ def main() -> int:
     engine.addImportPath(str(_QML_ROOT))
 
     app_model = AppModel()
+    preferences = AppPreferences()
     model_registry = ModelRegistry()
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
@@ -68,6 +70,7 @@ def main() -> int:
 
     root_ctx = engine.rootContext()
     root_ctx.setContextProperty("appModel",       app_model)
+    root_ctx.setContextProperty("preferences",    preferences)
     root_ctx.setContextProperty("modelRegistry",  model_registry)
     root_ctx.setContextProperty("tracksModel",    tracks_model)
     root_ctx.setContextProperty("sourcesModel",   sources_model)

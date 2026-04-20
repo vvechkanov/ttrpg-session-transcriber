@@ -9,6 +9,7 @@ The legacy QWidgets shell in ``ui/shell/`` is independent.
 """
 
 from ui.models.app_model import AppModel
+from ui.models.app_preferences import AppPreferences
 from ui.models.model_registry import ModelRegistry
 from ui.models.session_mock import (
     SEG1_END_PCT,
@@ -21,6 +22,7 @@ from ui.models.session_mock import (
 
 __all__ = [
     "AppModel",
+    "AppPreferences",
     "ModelRegistry",
     "SessionMeta",
     "SourceListModel",

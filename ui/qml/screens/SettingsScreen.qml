@@ -65,20 +65,24 @@ Rectangle {
                         TextInputField {
                             Layout.fillWidth: true
                             mono: true
-                            text: "~/Sessions"
+                            text: preferences.workingFolder
+                            onEditingFinished: preferences.workingFolder = text
                         }
 
                         GhostButton {
                             sizeTag: "md"
                             iconName: "folderOpen"
                             text: "Выбрать…"
+                            // Folder picker dialog lands with the drop-zone
+                            // wiring in Phase 4; for now the input field
+                            // is the authoritative source.
                         }
                     }
 
                     Text {
                         Layout.fillWidth: true
                         Layout.topMargin: -6
-                        text: "Занято: 4.2 GB · 14 сессий"
+                        text: "Занято: —"  // disk-usage probe lands with session discovery
                         color: Theme.ink4
                         font.family: Theme.fontMono
                         font.pixelSize: 11
@@ -102,7 +106,8 @@ Rectangle {
                             TextInputField {
                                 Layout.fillWidth: true
                                 mono: true
-                                text: "1.0"
+                                text: preferences.mergerMaxGap
+                                onEditingFinished: preferences.mergerMaxGap = text
                             }
                         }
 
@@ -111,13 +116,19 @@ Rectangle {
                             label: "OOC В FOUNDRY-ЧАТЕ"
 
                             SelectField {
+                                id: oocSelect
                                 Layout.fillWidth: true
+                                readonly property var values: ["skip", "italic", "include"]
                                 model: [
                                     { v: "skip",    l: "Пропускать" },
                                     { v: "italic",  l: "Добавлять курсивом" },
                                     { v: "include", l: "Включать как обычные" }
                                 ]
-                                currentIndex: 0
+                                currentIndex: Math.max(0, values.indexOf(preferences.mergerOocMode))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.mergerOocMode = values[currentIndex]
+                                }
                             }
                         }
                     }
@@ -131,24 +142,32 @@ Rectangle {
                         label: "ЯЗЫК"
 
                         SelectField {
+                            id: langSelect
                             Layout.fillWidth: true
+                            readonly property var values: ["ru", "en"]
                             model: [
                                 { v: "ru", l: "Русский" },
                                 { v: "en", l: "English" }
                             ]
-                            currentIndex: 0
+                            currentIndex: Math.max(0, values.indexOf(preferences.interfaceLanguage))
+                            onCurrentIndexChanged: {
+                                if (currentIndex >= 0)
+                                    preferences.interfaceLanguage = values[currentIndex]
+                            }
                         }
                     }
 
                     CheckRow {
                         Layout.topMargin: 6
                         text: "Показывать подсказки в интерфейсе"
-                        checked: true
+                        checked: preferences.showTooltips
+                        onCheckedChanged: preferences.showTooltips = checked
                     }
 
                     CheckRow {
                         text: "Звуковое уведомление по завершении обработки"
-                        checked: true
+                        checked: preferences.soundOnDone
+                        onCheckedChanged: preferences.soundOnDone = checked
                     }
                 }
 

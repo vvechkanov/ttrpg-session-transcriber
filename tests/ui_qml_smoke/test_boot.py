@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 from ui.engines import PipelineController  # noqa: E402
 from ui.models import (  # noqa: E402
     AppModel,
+    AppPreferences,
     ModelRegistry,
     SessionMeta,
     SourceListModel,
@@ -62,6 +63,7 @@ def main() -> int:
     engine.addImportPath(str(qml_root))
 
     app_model = AppModel()
+    preferences = AppPreferences()
     model_registry = ModelRegistry()
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
@@ -70,6 +72,7 @@ def main() -> int:
 
     ctx = engine.rootContext()
     ctx.setContextProperty("appModel", app_model)
+    ctx.setContextProperty("preferences", preferences)
     ctx.setContextProperty("modelRegistry", model_registry)
     ctx.setContextProperty("tracksModel", tracks_model)
     ctx.setContextProperty("sourcesModel", sources_model)
