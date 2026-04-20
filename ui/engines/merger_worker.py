@@ -1,73 +1,125 @@
-"""Simulated merger worker — stitches transcripts + chat logs.
+"""Merger worker — combines per-track ASR output + chat into merged.txt.
 
-Runs on its own QThread, emits progress ticks and `gapFilled`
-notifications as the merger bridges Craig gaps with chat-log events.
-For step 7 the "work" is just a timed loop; step 8+ swaps it for a
-real ``core.merger.run`` call. The public signal shape (``progress`` /
-``gapFilled`` / ``done`` / ``error`` / ``finished``) is what QML binds
-to, so the backing work can change without touching the UI.
+Phase 7 wiring: replaces the Phase 5 simulated loop with a real call
+into :class:`mergers.script_merger.ScriptMerger` +
+:class:`renderers.plain_text.PlainTextRenderer`. The "render" phase
+from ``core.pipeline.run`` is collapsed inside this worker — the
+handoff's timeline exposes only ``idle/asr/merge/done``, and the
+renderer call is an implementation detail of the merge step.
+
+Signals keep the Phase 5 shape so ``PipelineController`` and
+``StitchOverlay.qml`` don't have to move:
+
+* ``progress(float)`` — 0..1 overall merge progress
+* ``gapFilled(float, str)`` — ``(position_pct, source_id)`` per stitch
+  point; the UI animates a vertical marker per emission
+* ``done(str)`` — absolute path to the written merged.txt
+* ``error(str)`` — human-readable failure
+* ``finished()`` — fires once in ``finally`` so the owning thread quits
+  cleanly on every exit path
+
+Cancellation flows through :meth:`cancel` plus the worker-thread's
+:meth:`QThread.isInterruptionRequested` probe; checked between chat
+events and before the renderer write.
 """
 
 from __future__ import annotations
 
-import time
+from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from domain.annotations import ChatMessage, SpeechSegment
+from domain.timeline import Timeline
+from mergers.script_merger import ScriptMerger
+from renderers.plain_text import PlainTextRenderer
 
 
 class MergerWorker(QObject):
-    # 0..1 overall merge progress
+    """One-shot worker that glues segments + chat into a merged.txt file."""
+
+    #: 0..1 overall merge progress. Coarse — emissions land at the
+    #: boundaries of the four logical stages (chat parse, timeline
+    #: build, merge, render/write) rather than inside the tight
+    #: merger loop.
     progress = Signal(float)
-    # One vertical stitch has landed on the timeline — (pct, source_id).
-    # `pct` is 0..100 so QML can position the marker directly.
+
+    #: Per stitch (``position_pct`` 0..100, ``source_id``). Fires once
+    #: per chat message that lands inside the merged timeline so the
+    #: StitchOverlay staggers them in.
     gapFilled = Signal(float, str)
-    # Filesystem path to the produced merged.txt.
+
+    #: Filesystem path to the written merged.txt.
     done = Signal(str)
-    # Human-readable failure message.
+
+    #: Human-readable failure.
     error = Signal(str)
-    # Emitted in a finally so every exit path winds the thread down.
+
+    #: Always emitted in the ``finally`` block.
     finished = Signal()
 
-    #: Number of progress ticks.
-    TICKS: int = 40
-    TICK_INTERVAL: float = 0.05
-
-    #: Percent offsets along the timeline where stitches will land.
-    #: Taken from the HTML prototype's ``MergeStitches`` component so
-    #: the visual matches the handoff.
-    _STITCH_POSITIONS: tuple[float, ...] = (15, 28, 42, 58, 71, 85)
-
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        session_dir: Path,
+        speech_segments: list[SpeechSegment],
+        chat_log_path: Path | None = None,
+        total_duration: float = 0.0,
+        gap_sec: float = 1.0,
+    ) -> None:
         super().__init__()
+        self._session_dir = session_dir
+        self._speech = list(speech_segments)
+        self._chat_log_path = chat_log_path
+        self._total_duration = float(total_duration)
+        self._gap_sec = float(gap_sec)
         self._cancelled = False
 
     @Slot()
     def run(self) -> None:
         try:
-            # Fire stitches at evenly-spaced points along the progress
-            # arc so the overlay fills in as the merge advances.
-            stitch_ticks = [
-                int(self.TICKS * (i + 1) / (len(self._STITCH_POSITIONS) + 1))
-                for i in range(len(self._STITCH_POSITIONS))
-            ]
-            stitch_iter = iter(zip(stitch_ticks, self._STITCH_POSITIONS))
-            next_stitch = next(stitch_iter, None)
+            # ── Stage 1 of 4: parse chat (if any) ──────────────────
+            self.progress.emit(0.0)
+            chat_messages: list[ChatMessage] = self._parse_chat()
+            if self._should_cancel():
+                return
+            self.progress.emit(0.25)
 
-            for tick in range(self.TICKS + 1):
-                if self._cancelled:
-                    return
+            # ── Stage 2 of 4: fire stitch markers ──────────────────
+            # Stagger them deterministically so StitchOverlay's
+            # `NumberAnimation { delay: index * 60 }` has something
+            # to bite on, even for short sessions with few messages.
+            if chat_messages and self._total_duration > 0:
+                for msg in chat_messages:
+                    if self._should_cancel():
+                        return
+                    pct = max(0.0, min(100.0, (msg.at / self._total_duration) * 100.0))
+                    self.gapFilled.emit(pct, "foundry-chat")
+            self.progress.emit(0.5)
 
-                self.progress.emit(tick / self.TICKS)
+            # ── Stage 3 of 4: merge ────────────────────────────────
+            timeline = Timeline(
+                speech=self._speech,
+                emotions=[],
+                chat=chat_messages,
+                game_log=[],
+            )
+            if self._should_cancel():
+                return
+            events = ScriptMerger(gap_sec=self._gap_sec).merge(timeline)
+            self.progress.emit(0.8)
 
-                if next_stitch is not None and tick >= next_stitch[0]:
-                    self.gapFilled.emit(next_stitch[1], "foundry-chat")
-                    next_stitch = next(stitch_iter, None)
+            # ── Stage 4 of 4: render + write ───────────────────────
+            if self._should_cancel():
+                return
+            payload = PlainTextRenderer().render(events)
 
-                if tick < self.TICKS:
-                    time.sleep(self.TICK_INTERVAL)
+            output_path = self._session_dir / "merged.txt"
+            output_path.write_bytes(payload)
+            self.progress.emit(1.0)
 
-            self.done.emit("~/Sessions/2025-01-14/merged.txt")
-        except Exception as exc:   # defensive
+            self.done.emit(str(output_path))
+
+        except Exception as exc:  # noqa: BLE001 — surface any failure
             self.error.emit(str(exc))
         finally:
             self.finished.emit()
@@ -75,3 +127,28 @@ class MergerWorker(QObject):
     @Slot()
     def cancel(self) -> None:
         self._cancelled = True
+
+    # ── Internal ──────────────────────────────────────────────────
+    def _should_cancel(self) -> bool:
+        if self._cancelled:
+            return True
+        thread = QThread.currentThread()
+        if thread is not None and thread.isInterruptionRequested():
+            return True
+        return False
+
+    def _parse_chat(self) -> list[ChatMessage]:
+        if self._chat_log_path is None:
+            return []
+        # Lazy import so core-less tests don't need the whole
+        # sources chain — and the FvttChatSource init cost stays
+        # out of the worker's hot path for sessions without chat.
+        from sources.game_log.fvtt_chat import FvttChatSource
+
+        try:
+            src = FvttChatSource(chat_log_path=self._chat_log_path)
+            return src.extract(self._session_dir)
+        except FileNotFoundError:
+            # No info.txt — chat can't be time-aligned. Surface as
+            # "no chat" rather than failing the whole merge.
+            return []

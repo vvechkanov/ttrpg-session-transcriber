@@ -40,8 +40,10 @@ class AsrWorker(QObject):
     #: .setProgress`` through the default queued connection.
     progress = Signal(int, float)
 
-    #: Emitted once when the track finishes cleanly.
-    done = Signal(int)
+    #: Emitted once when the track finishes cleanly. Carries
+    #: ``(row, segments)`` so ``PipelineController`` can accumulate
+    #: the list for the subsequent merge pass without a side channel.
+    done = Signal(int, list)
 
     #: Emitted once when the ASR backend raises; ``message`` is the
     #: exception's ``str()``.
@@ -83,7 +85,7 @@ class AsrWorker(QObject):
             return False
 
         try:
-            transcribe_one_track(
+            segments = transcribe_one_track(
                 self._source,
                 self._audio_path,
                 on_progress=_on_progress,
@@ -94,7 +96,7 @@ class AsrWorker(QObject):
             # in that case, the PipelineController's own ``_cancelled``
             # flag decides whether to advance or bail.
             if not _should_cancel():
-                self.done.emit(self._row)
+                self.done.emit(self._row, segments)
         except Exception as exc:  # noqa: BLE001 — surface any failure
             self.error.emit(self._row, str(exc))
         finally:

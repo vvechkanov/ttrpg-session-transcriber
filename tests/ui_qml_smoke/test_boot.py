@@ -68,7 +68,7 @@ def main() -> int:
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
     session_meta = SessionMeta()
-    pipeline = PipelineController(app_model, tracks_model)
+    pipeline = PipelineController(app_model, tracks_model, session_meta)
 
     ctx = engine.rootContext()
     ctx.setContextProperty("appModel", app_model)

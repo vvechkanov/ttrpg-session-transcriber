@@ -79,11 +79,11 @@ def test_asr_worker_emits_progress_then_done(qtbot, tmp_path: Path) -> None:
     worker = AsrWorker(row=3, source=source, audio_path=tmp_path / "x.flac")
 
     progress_seen: list[tuple[int, float]] = []
-    done_seen: list[int] = []
+    done_seen: list[tuple[int, list]] = []
     error_seen: list[tuple[int, str]] = []
 
     worker.progress.connect(lambda row, pct: progress_seen.append((row, pct)))
-    worker.done.connect(lambda row: done_seen.append(row))
+    worker.done.connect(lambda row, segs: done_seen.append((row, segs)))
     worker.error.connect(lambda row, msg: error_seen.append((row, msg)))
 
     _run_on_thread(qtbot, worker)
@@ -92,7 +92,12 @@ def test_asr_worker_emits_progress_then_done(qtbot, tmp_path: Path) -> None:
     # Progress emissions are queued through the worker thread; all three
     # should have been delivered before finished ran.
     assert [p for _, p in progress_seen] == [0.1, 0.5, 1.0]
-    assert done_seen == [3]
+    assert len(done_seen) == 1
+    row, segs = done_seen[0]
+    assert row == 3
+    # FakeSource returns one segment (see its transcribe_track impl).
+    assert len(segs) == 1
+    assert segs[0].text == "hi"
     assert error_seen == []
 
 
@@ -100,10 +105,10 @@ def test_asr_worker_emits_error_on_exception(qtbot, tmp_path: Path) -> None:
     source = _FakeSource(raises=RuntimeError("model not installed"))
     worker = AsrWorker(row=7, source=source, audio_path=tmp_path / "x.flac")
 
-    done_seen: list[int] = []
+    done_seen: list[tuple[int, list]] = []
     error_seen: list[tuple[int, str]] = []
 
-    worker.done.connect(lambda row: done_seen.append(row))
+    worker.done.connect(lambda row, segs: done_seen.append((row, segs)))
     worker.error.connect(lambda row, msg: error_seen.append((row, msg)))
 
     _run_on_thread(qtbot, worker)
@@ -117,10 +122,10 @@ def test_asr_worker_respects_cancel_flag(qtbot, tmp_path: Path) -> None:
     worker = AsrWorker(row=2, source=source, audio_path=tmp_path / "x.flac")
 
     progress_seen: list[float] = []
-    done_seen: list[int] = []
+    done_seen: list[tuple[int, list]] = []
 
     worker.progress.connect(lambda _r, p: progress_seen.append(p))
-    worker.done.connect(lambda row: done_seen.append(row))
+    worker.done.connect(lambda row, segs: done_seen.append((row, segs)))
 
     # Cancel BEFORE starting — fake source's loop will see should_cancel
     # return True on the very first iteration and bail with no ticks.

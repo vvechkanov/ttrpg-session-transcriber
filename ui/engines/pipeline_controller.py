@@ -28,11 +28,13 @@ from pathlib import Path
 from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
 from core.asr import make_source
+from core.discovery import find_fvtt_chat_log
+from domain.annotations import SpeechSegment
 from sources.base import Source
 from ui.engines.asr_worker import AsrWorker
 from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
-from ui.models.session_mock import TrackListModel
+from ui.models.session_mock import SessionMeta, TrackListModel
 
 
 # Mock cache policy: pretend row 1 (Boris) already has a transcript on
@@ -64,11 +66,13 @@ class PipelineController(QObject):
         self,
         app_model: AppModel,
         tracks: TrackListModel,
+        session_meta: SessionMeta | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._app = app_model
         self._tracks = tracks
+        self._session = session_meta
 
         # Active ASR worker (Phase 6).
         self._thread: QThread | None = None
@@ -88,6 +92,10 @@ class PipelineController(QObject):
         #: hundred milliseconds; the cache amortises that to once per
         #: model even if every track picks the same override.
         self._sources: dict[str, Source] = {}
+
+        #: Accumulates per-row segment lists as each AsrWorker completes.
+        #: Flattened when the merge pass spawns.
+        self._collected_segments: dict[int, list[SpeechSegment]] = {}
 
         #: Filesystem path reported by the merger on success. QML reads
         #: it through :pyattr:`outputPath` once the done phase is up.
@@ -114,6 +122,7 @@ class PipelineController(QObject):
             self._output_path = ""
             self.outputPathChanged.emit()
         self._cancelled = False
+        self._collected_segments = {}
 
         # Initial marking: every non-excluded row goes into the queue
         # as "queued", cached rows are removed from the queue and get
@@ -254,8 +263,35 @@ class PipelineController(QObject):
 
     # ── Merger orchestration ──────────────────────────────────────────
     def _spawn_merger(self) -> None:
+        # Flatten per-row segments into one list for the merger input.
+        # Rows that didn't produce segments (cached, failed, excluded)
+        # silently contribute nothing — merger handles an empty speech
+        # list fine.
+        all_segments: list[SpeechSegment] = []
+        for row in sorted(self._collected_segments.keys()):
+            all_segments.extend(self._collected_segments[row])
+
+        session_dir_str = self._session.sessionDir() if self._session is not None else ""
+        if not session_dir_str:
+            # No real session open — nothing to write merged.txt to.
+            # Surface as an error phase so the UI stops on "failed"
+            # rather than spinning.
+            self._app.phase = "failed"
+            self._sources.clear()
+            self.finished.emit()
+            return
+
+        session_dir = Path(session_dir_str)
+        chat_log = find_fvtt_chat_log(session_dir)
+        total_seconds = float(self._session.totalSeconds) if self._session is not None else 0.0
+
         thread = QThread(self)
-        worker = MergerWorker()
+        worker = MergerWorker(
+            session_dir=session_dir,
+            speech_segments=all_segments,
+            chat_log_path=chat_log,
+            total_duration=total_seconds,
+        )
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -325,8 +361,9 @@ class PipelineController(QObject):
     def _onProgress(self, row: int, pct: float) -> None:
         self._tracks.setProgress(row, pct)
 
-    @Slot(int)
-    def _onDone(self, row: int) -> None:
+    @Slot(int, list)
+    def _onDone(self, row: int, segments: list) -> None:
+        self._collected_segments[row] = list(segments)
         self._tracks.setProgress(row, 1.0)
         self._tracks.setState(row, "done")
 

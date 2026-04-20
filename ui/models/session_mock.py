@@ -107,6 +107,23 @@ class SessionMeta(QObject):
         m = self._total_min % 60
         return f"2 сегмента · {h}ч {m:02d}м"
 
+    @Slot(result=str)
+    def sessionDir(self) -> str:
+        """Absolute path of the currently-open session or "".
+
+        Phase 7's MergerWorker needs this to resolve the chat log and
+        write merged.txt. Returning a string instead of a Path keeps
+        the slot QML-friendly.
+        """
+
+        return str(self._session_dir) if self._session_dir is not None else ""
+
+    @Property(float, notify=totalMinutesChanged)
+    def totalSeconds(self) -> float:
+        """Duration in seconds. MergerWorker uses it to position stitches."""
+
+        return float(self._total_min) * 60.0
+
     @Slot(str)
     def openSession(self, folder_url_or_path: str) -> None:
         """Load a real session folder. QML drag/drop hands us a file:// URL.

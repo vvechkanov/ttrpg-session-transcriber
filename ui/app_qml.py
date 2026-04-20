@@ -67,7 +67,7 @@ def main() -> int:
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
     session_meta = SessionMeta()
-    pipeline = PipelineController(app_model, tracks_model)
+    pipeline = PipelineController(app_model, tracks_model, session_meta)
 
     # Real ingest: on folder drop, SessionMeta emits the session dir
     # and both list models refresh from core.file_matchers.
