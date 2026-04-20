@@ -240,6 +240,9 @@ Rectangle {
                                 active: model.active
                                 lastRow: index === modelRegistry.rowCount() - 1
                                 onRowClicked: drawer.openFor(modelRegistry.entryAt(index))
+                                onActivateClicked: modelRegistry.setActive(index)
+                                onInstallClicked:  modelRegistry.install(index)
+                                onUninstallClicked: modelRegistry.uninstall(index)
                             }
                         }
                     }
@@ -326,6 +329,15 @@ Rectangle {
                         GhostButton {
                             sizeTag: "sm"
                             text: "Открыть папку моделей"
+                            enabled: modelRegistry.modelsRoot().length > 0
+                            onClicked: {
+                                var p = modelRegistry.modelsRoot()
+                                if (p.length === 0) return
+                                var u = p.replace(/\\/g, "/")
+                                Qt.openUrlExternally(u.charAt(0) === "/"
+                                    ? ("file://" + u)
+                                    : ("file:///" + u))
+                            }
                         }
                     }
                 }

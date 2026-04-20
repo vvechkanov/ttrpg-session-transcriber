@@ -38,6 +38,7 @@ from core.backend_installers import (
     is_backend_installed,
     list_backends,
 )
+from sources.speech._gigaam_paths import default_models_root
 from ui.engines.install_worker import InstallWorker
 
 
@@ -237,11 +238,48 @@ class ModelRegistry(QAbstractListModel):
 
         self._rebuild_and_reset()
 
+    @Slot(result=str)
+    def modelsRoot(self) -> str:
+        """Absolute path to the directory where backends are installed.
+
+        Returns ``""`` if the directory does not exist yet (first run,
+        no backend ever installed). QML uses this to open the folder
+        in the OS file manager — a missing directory can't be opened.
+        """
+
+        root = default_models_root()
+        return str(root) if root.exists() else ""
+
     # ── Internal ──────────────────────────────────────────────────────
     def _build_rows(self) -> list[ModelEntry]:
         rows: list[ModelEntry] = []
         for info in list_backends():
             rows.append(self._row_from(info))
+
+        # Only keep the active flag on a row that's actually installed.
+        # Otherwise the table renders "активна" next to "Установить",
+        # which reads as a contradiction. If the QSettings default
+        # points at an uninstalled model, promote the first installed
+        # row instead (still deterministic, since list_backends() is
+        # a fixed order).
+        active_rows = [r for r in rows if r.active and r.installed]
+        if not active_rows:
+            for r in rows:
+                if r.installed:
+                    rows = [
+                        ModelEntry(**{**r.__dict__, "active": True})
+                        if entry is r
+                        else ModelEntry(**{**entry.__dict__, "active": False})
+                        for entry in rows
+                    ]
+                    self._active_id = r.backend_id
+                    break
+            else:
+                # No backend installed at all — clear active.
+                rows = [
+                    ModelEntry(**{**entry.__dict__, "active": False})
+                    for entry in rows
+                ]
         return rows
 
     def _row_from(self, info: BackendInfo) -> ModelEntry:

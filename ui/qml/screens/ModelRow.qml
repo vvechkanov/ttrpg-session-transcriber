@@ -41,13 +41,12 @@ Rectangle {
 
     color: {
         if (active)   return activeBg
-        if (hoverMa.containsMouse) return hoverBg
+        if (hoverHandler.hovered) return hoverBg
         return "transparent"
     }
-
-    Behavior on color {
-        ColorAnimation { duration: Theme.animFast }
-    }
+    // No Behavior on color — see controls/PrimaryButton for why a
+    // 140 ms animation makes single-frame hover toggles visible as
+    // a flash.
 
     // Bottom separator. Last row skips it (container's bottom radius
     // handles the clean edge).
@@ -60,12 +59,23 @@ Rectangle {
         color: Theme.borderSoft
     }
 
-    MouseArea {
-        id: hoverMa
-        anchors.fill: parent
-        hoverEnabled: true
+    // Input handlers (Qt 6 idiomatic): HoverHandler for the row tint,
+    // TapHandler for the drawer-open click on blank areas. Both are
+    // pointer-event handlers that coexist with child Button-s without
+    // blocking their hover/press delivery — unlike a MouseArea, which
+    // per QTBUG-72843 and mousearea docs propagates only CLICK events
+    // (not hover) even with propagateComposedEvents: true, so it would
+    // silently eat Button.hovered and make the background flicker on
+    // enter/exit. TapHandler by default uses gesturePolicy that only
+    // claims the grab after release+inside — a child Button that
+    // accepts the press first pre-empts it cleanly.
+    HoverHandler {
+        id: hoverHandler
         cursorShape: Qt.PointingHandCursor
-        onClicked: root.rowClicked()
+    }
+
+    TapHandler {
+        onTapped: root.rowClicked()
     }
 
     RowLayout {

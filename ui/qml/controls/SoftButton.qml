@@ -18,10 +18,7 @@ Button {
     implicitHeight: sizeTag === "sm" ? 28 : 36
 
     hoverEnabled: true
-
-    HoverHandler {
-        cursorShape: root.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    }
+    // No overlaid pointer handler — see GhostButton for the write-up.
 
     contentItem: RowLayout {
         spacing: 6
@@ -49,13 +46,10 @@ Button {
         radius: Theme.radiusSm + 1
         border.width: 1
         border.color: Theme.borderSoft
+        // No Behavior on color — see PrimaryButton for the rationale.
         color: root.pressed
             ? Theme.hover
             : (root.hovered ? Qt.darker(Theme.cardAlt, 1.02) : Theme.cardAlt)
-
-        Behavior on color {
-            ColorAnimation { duration: Theme.animFast }
-        }
         opacity: root.enabled ? 1.0 : 0.5
     }
 }

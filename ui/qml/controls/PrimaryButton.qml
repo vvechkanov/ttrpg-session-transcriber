@@ -23,12 +23,7 @@ Button {
     implicitHeight: sizeTag === "sm" ? 28 : 36
 
     hoverEnabled: true
-
-    // Button has no built-in cursor property; HoverHandler gives us one
-    // without intercepting the click (MouseArea would).
-    HoverHandler {
-        cursorShape: root.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    }
+    // No overlaid pointer handler — see GhostButton for the write-up.
 
     contentItem: RowLayout {
         spacing: sizeTag === "sm" ? 6 : 8
@@ -69,13 +64,13 @@ Button {
             // Darker wash on hover / press
             anchors.fill: parent
             radius: parent.radius
+            // No Behavior: a 140 ms ColorAnimation on hover/unhover
+            // makes single-frame hovered toggles visible as a smooth
+            // flash. Snap-change is indistinguishable from a static
+            // hover tint and avoids the artefact.
             color: root.pressed
                 ? Qt.rgba(0, 0, 0, 0.10)
                 : (root.hovered ? Qt.rgba(0, 0, 0, 0.05) : "transparent")
-
-            Behavior on color {
-                ColorAnimation { duration: Theme.animFast }
-            }
         }
 
         opacity: root.enabled ? 1.0 : 0.5

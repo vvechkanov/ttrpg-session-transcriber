@@ -24,9 +24,12 @@ Button {
 
     hoverEnabled: true
 
-    HoverHandler {
-        cursorShape: root.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-    }
+    // No overlaid MouseArea / HoverHandler. Any child pointer handler
+    // sits on top of Button's internal hover tracker and makes
+    // root.hovered oscillate (hover briefly true on entry, false while
+    // actually hovering, true again on exit — perceived as a flash).
+    // The tradeoff is a default arrow cursor instead of pointing-hand;
+    // the button's visual affordance is already obvious.
 
     readonly property color textColor: danger ? Theme.red : Theme.ink2
     readonly property color borderColor: danger
@@ -60,13 +63,13 @@ Button {
         radius: Theme.radiusSm + 1
         border.width: 1
         border.color: root.borderColor
+        // No Behavior: removing the 140 ms ColorAnimation to isolate
+        // whether the flicker is from hovered oscillation or from
+        // animation interruption. Re-add once hover stability is
+        // confirmed.
         color: root.pressed
             ? Theme.cardAlt
             : (root.hovered ? Theme.hover : "transparent")
-
-        Behavior on color {
-            ColorAnimation { duration: Theme.animFast }
-        }
 
         opacity: root.enabled ? 1.0 : 0.5
     }

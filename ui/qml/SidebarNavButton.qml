@@ -23,10 +23,8 @@ Rectangle {
     color: active
         ? Theme.accentWash
         : (hoverArea.containsMouse ? Theme.cardAlt : "transparent")
-
-    Behavior on color {
-        ColorAnimation { duration: Theme.animFast }
-    }
+    // No Behavior on color — see controls/PrimaryButton for why a
+    // 140 ms animation makes single-frame hover toggles flash.
 
     RowLayout {
         anchors.fill: parent
