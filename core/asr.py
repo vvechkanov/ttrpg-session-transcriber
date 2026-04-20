@@ -18,6 +18,7 @@ path could call this synchronously.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,19 @@ from domain.annotations import SpeechSegment
 from sources.base import Source
 from sources.speech.faster_whisper import FasterWhisperSource
 from sources.speech.gigaam import GigaAMPrecision, GigaAMSource, GigaAMVariant
+
+
+@dataclass(frozen=True)
+class AsrOptions:
+    """Per-backend knobs forwarded from UI preferences into ``make_source``."""
+
+    device: str | None = None
+    compute_type: str | None = None
+    beam_size: int | None = None
+    language: str | None = None
+    gigaam_variant: str | None = None
+    gigaam_precision: str | None = None
+    num_threads: int | None = None
 
 
 #: Alias re-exporting :class:`sources.base.Source` for UI callers.
@@ -53,6 +67,7 @@ def make_source(
     device: str = "cuda",
     language: str = "ru",
     speaker_map: dict[str, str] | None = None,
+    options: AsrOptions | None = None,
 ) -> Source:
     """Resolve ``model_id`` → configured speech source.
 
@@ -66,23 +81,53 @@ def make_source(
             the size distinction is informational for the user; the
             shipped install is currently a single size.
 
+    When ``options`` is provided, its non-``None`` fields override the
+    positional ``device`` / ``language`` defaults and feed backend-specific
+    knobs (compute_type, gigaam variant/precision, num_threads).
+
     Raises ``ValueError`` on unknown IDs so the worker surfaces the
     typo to the UI instead of silently falling back.
     """
 
+    if options is None:
+        options = AsrOptions()
+
+    effective_device = options.device or device
+    effective_language = options.language or language
+
     if model_id == "gigaam":
-        return GigaAMSource(
-            variant=GigaAMVariant.RNNT,
-            precision=GigaAMPrecision.FP32,
-            device=device,
+        variant = (
+            GigaAMVariant(options.gigaam_variant)
+            if options.gigaam_variant is not None
+            else GigaAMVariant.RNNT
+        )
+        precision = (
+            GigaAMPrecision(options.gigaam_precision)
+            if options.gigaam_precision is not None
+            else GigaAMPrecision.FP32
+        )
+        kwargs: dict[str, object] = dict(
+            variant=variant,
+            precision=precision,
+            device=effective_device,
             speaker_map=speaker_map,
         )
+        if options.num_threads is not None:
+            kwargs["num_threads"] = options.num_threads
+        return GigaAMSource(**kwargs)
     if model_id in {"faster-whisper", "whisper", "whisper-lg", "whisper-med"}:
-        return FasterWhisperSource(
-            device=device,
-            language=language,
+        fw_kwargs: dict[str, object] = dict(
+            device=effective_device,
+            language=effective_language,
             speaker_map=speaker_map,
         )
+        if options.compute_type is not None:
+            fw_kwargs["compute_type"] = options.compute_type
+        if options.beam_size is not None:
+            fw_kwargs["beam_size"] = options.beam_size
+        if options.num_threads is not None:
+            fw_kwargs["num_threads"] = options.num_threads
+        return FasterWhisperSource(**fw_kwargs)
     raise ValueError(f"unknown ASR model_id: {model_id!r}")
 
 

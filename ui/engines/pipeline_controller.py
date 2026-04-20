@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     # ModelRegistry imports InstallWorker, which imports this module
     # through ``ui.engines.__init__``. Keep the type-only import here
     # so the runtime load order stays linear.
+    from ui.models.app_preferences import AppPreferences
     from ui.models.model_registry import ModelRegistry
 
 
@@ -78,6 +79,7 @@ class PipelineController(QObject):
         tracks: TrackListModel,
         session_meta: SessionMeta | None = None,
         model_registry: "ModelRegistry | None" = None,
+        preferences: "AppPreferences | None" = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -89,6 +91,10 @@ class PipelineController(QObject):
         #: active backend. Optional so unit tests can construct the
         #: controller with just a :class:`TrackListModel`.
         self._registry = model_registry
+        #: Optional link to :class:`ui.models.app_preferences.AppPreferences`.
+        #: When present, :meth:`_get_or_make_source` snapshots the global
+        #: ASR options into every freshly-created backend.
+        self._preferences = preferences
 
         # Active ASR worker (Phase 6).
         self._thread: QThread | None = None
@@ -241,7 +247,12 @@ class PipelineController(QObject):
         """
 
         if model_id not in self._sources:
-            self._sources[model_id] = make_source(model_id)
+            options = (
+                self._preferences.build_asr_options()
+                if self._preferences is not None
+                else None
+            )
+            self._sources[model_id] = make_source(model_id, options=options)
         return self._sources[model_id]
 
     def _spawn(self, row: int, source: AsrSource, audio_path: Path) -> None:

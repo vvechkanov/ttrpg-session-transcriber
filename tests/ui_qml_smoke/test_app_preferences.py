@@ -64,7 +64,13 @@ def main() -> int:
     _assert(prefs.interfaceLanguage == "ru", f"default lang: {prefs.interfaceLanguage!r}")
     _assert(prefs.showTooltips is True, "default tooltips")
     _assert(prefs.soundOnDone is True, "default sound")
-    _assert(prefs.defaultDevice == "cuda", f"default device: {prefs.defaultDevice!r}")
+    _assert(prefs.asrDevice == "cuda", f"default device: {prefs.asrDevice!r}")
+    _assert(prefs.asrComputeType == "float16", f"default compute: {prefs.asrComputeType!r}")
+    _assert(prefs.asrBeamSize == "5", f"default beam: {prefs.asrBeamSize!r}")
+    _assert(prefs.asrLanguage == "ru", f"default asr lang: {prefs.asrLanguage!r}")
+    _assert(prefs.gigaamVariant == "rnnt", f"default variant: {prefs.gigaamVariant!r}")
+    _assert(prefs.gigaamPrecision == "fp32", f"default precision: {prefs.gigaamPrecision!r}")
+    _assert(prefs.asrNumThreads == "4", f"default threads: {prefs.asrNumThreads!r}")
 
     # Mutate every field.
     prefs.workingFolder = "D:/TTRPG/Sessions"
@@ -73,7 +79,13 @@ def main() -> int:
     prefs.interfaceLanguage = "en"
     prefs.showTooltips = False
     prefs.soundOnDone = False
-    prefs.defaultDevice = "cpu"
+    prefs.asrDevice = "cpu"
+    prefs.asrComputeType = "int8"
+    prefs.asrBeamSize = "8"
+    prefs.asrLanguage = "en"
+    prefs.gigaamVariant = "e2e_rnnt"
+    prefs.gigaamPrecision = "int8"
+    prefs.asrNumThreads = "2"
 
     # A second instance should pick up the persisted values.
     prefs2 = AppPreferences()
@@ -83,7 +95,23 @@ def main() -> int:
     _assert(prefs2.interfaceLanguage == "en", f"round-trip lang: {prefs2.interfaceLanguage!r}")
     _assert(prefs2.showTooltips is False, "round-trip tooltips")
     _assert(prefs2.soundOnDone is False, "round-trip sound")
-    _assert(prefs2.defaultDevice == "cpu", f"round-trip device: {prefs2.defaultDevice!r}")
+    _assert(prefs2.asrDevice == "cpu", f"round-trip device: {prefs2.asrDevice!r}")
+    _assert(prefs2.asrComputeType == "int8", f"round-trip compute: {prefs2.asrComputeType!r}")
+    _assert(prefs2.asrBeamSize == "8", f"round-trip beam: {prefs2.asrBeamSize!r}")
+    _assert(prefs2.asrLanguage == "en", f"round-trip asr lang: {prefs2.asrLanguage!r}")
+    _assert(prefs2.gigaamVariant == "e2e_rnnt", f"round-trip variant: {prefs2.gigaamVariant!r}")
+    _assert(prefs2.gigaamPrecision == "int8", f"round-trip precision: {prefs2.gigaamPrecision!r}")
+    _assert(prefs2.asrNumThreads == "2", f"round-trip threads: {prefs2.asrNumThreads!r}")
+
+    # build_asr_options snapshot — strings coerced to ints, others pass through.
+    opts = prefs2.build_asr_options()
+    _assert(opts.device == "cpu", f"opts.device: {opts.device!r}")
+    _assert(opts.compute_type == "int8", f"opts.compute_type: {opts.compute_type!r}")
+    _assert(opts.beam_size == 8, f"opts.beam_size: {opts.beam_size!r}")
+    _assert(opts.language == "en", f"opts.language: {opts.language!r}")
+    _assert(opts.gigaam_variant == "e2e_rnnt", f"opts.gigaam_variant: {opts.gigaam_variant!r}")
+    _assert(opts.gigaam_precision == "int8", f"opts.gigaam_precision: {opts.gigaam_precision!r}")
+    _assert(opts.num_threads == 2, f"opts.num_threads: {opts.num_threads!r}")
 
     print("OK: AppPreferences round-trips through QSettings(IniFormat)")
     return 0

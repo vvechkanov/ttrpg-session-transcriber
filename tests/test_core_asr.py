@@ -13,11 +13,11 @@ import pytest
 # init circular import error.
 from core.pipeline import run as _  # noqa: F401
 
-from core.asr import make_source, transcribe_one_track
+from core.asr import AsrOptions, make_source, transcribe_one_track
 from domain.annotations import SpeechSegment
 from sources.base import Source
 from sources.speech.faster_whisper import FasterWhisperSource
-from sources.speech.gigaam import GigaAMSource
+from sources.speech.gigaam import GigaAMPrecision, GigaAMSource, GigaAMVariant
 
 
 class _FakeSource(Source):
@@ -83,6 +83,49 @@ def test_make_source_passes_device_and_language() -> None:
 def test_make_source_raises_on_unknown_id() -> None:
     with pytest.raises(ValueError, match="unknown ASR model_id"):
         make_source("not-a-model")
+
+
+# ── AsrOptions propagation ───────────────────────────────────────────
+
+
+def test_make_source_applies_options_to_faster_whisper() -> None:
+    opts = AsrOptions(
+        device="cpu",
+        language="en",
+        compute_type="int8",
+        beam_size=3,
+        num_threads=6,
+    )
+    src = make_source("faster-whisper", options=opts)
+    assert isinstance(src, FasterWhisperSource)
+    assert src.device == "cpu"
+    assert src.language == "en"
+    assert src.compute_type == "int8"
+    assert src.beam_size == 3
+    assert src.num_threads == 6
+
+
+def test_make_source_applies_options_to_gigaam() -> None:
+    opts = AsrOptions(
+        device="cpu",
+        gigaam_variant="e2e_rnnt",
+        gigaam_precision="int8",
+        num_threads=2,
+    )
+    src = make_source("gigaam", options=opts)
+    assert isinstance(src, GigaAMSource)
+    assert src.device == "cpu"
+    assert src.variant == GigaAMVariant.E2E_RNNT
+    assert src.precision == GigaAMPrecision.INT8
+    assert src.num_threads == 2
+
+
+def test_make_source_options_override_positional_device() -> None:
+    # options.device wins over the positional default when both set.
+    opts = AsrOptions(device="cpu")
+    src = make_source("faster-whisper", device="cuda", options=opts)
+    assert isinstance(src, FasterWhisperSource)
+    assert src.device == "cpu"
 
 
 # ── transcribe_one_track pass-through ────────────────────────────────

@@ -16,17 +16,22 @@ Keys grouped by section:
 * ``interface/language``     — "ru" | "en"
 * ``interface/show_tooltips`` — bool
 * ``interface/sound_on_done`` — bool
-* ``devices/default``        — "cuda" | "cpu" | "mps" (hidden in MVP,
-                               used when PipelineController spawns ASR
-                               workers in Phase 6)
+* ``asr/device``             — "cuda" | "cpu"
+* ``asr/compute_type``       — faster-whisper compute type
+* ``asr/beam_size``          — faster-whisper beam size (string)
+* ``asr/language``           — "ru" | "en" | "auto"
+* ``asr/gigaam_variant``     — "rnnt" | "e2e_rnnt"
+* ``asr/gigaam_precision``   — "fp32" | "int8"
+* ``asr/num_threads``        — CPU threads (string)
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QSettings, Signal
+
+from core.asr import AsrOptions
 
 
 def _default_working_folder() -> str:
@@ -48,7 +53,13 @@ class AppPreferences(QObject):
     interfaceLanguageChanged = Signal()
     showTooltipsChanged = Signal()
     soundOnDoneChanged = Signal()
-    defaultDeviceChanged = Signal()
+    asrDeviceChanged = Signal()
+    asrComputeTypeChanged = Signal()
+    asrBeamSizeChanged = Signal()
+    asrLanguageChanged = Signal()
+    gigaamVariantChanged = Signal()
+    gigaamPrecisionChanged = Signal()
+    asrNumThreadsChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -78,8 +89,33 @@ class AppPreferences(QObject):
         self._sound_on_done: bool = _to_bool(
             self._settings.value("interface/sound_on_done", True)
         )
-        self._default_device: str = str(
-            self._settings.value("devices/default", "cuda")
+        # One-shot migration: fall back to the old ``devices/default``
+        # key if ``asr/device`` has never been written. The legacy key
+        # is left untouched; first write of ``asrDevice`` seats the new
+        # key, after which reads skip the fallback naturally.
+        self._asr_device: str = str(
+            self._settings.value(
+                "asr/device",
+                self._settings.value("devices/default", "cuda"),
+            )
+        )
+        self._asr_compute_type: str = str(
+            self._settings.value("asr/compute_type", "float16")
+        )
+        self._asr_beam_size: str = str(
+            self._settings.value("asr/beam_size", "5")
+        )
+        self._asr_language: str = str(
+            self._settings.value("asr/language", "ru")
+        )
+        self._gigaam_variant: str = str(
+            self._settings.value("asr/gigaam_variant", "rnnt")
+        )
+        self._gigaam_precision: str = str(
+            self._settings.value("asr/gigaam_precision", "fp32")
+        )
+        self._asr_num_threads: str = str(
+            self._settings.value("asr/num_threads", "4")
         )
 
     # ── workingFolder ────────────────────────────────────────────────
@@ -166,19 +202,123 @@ class AppPreferences(QObject):
         self._settings.sync()
         self.soundOnDoneChanged.emit()
 
-    # ── defaultDevice ────────────────────────────────────────────────
-    @Property(str, notify=defaultDeviceChanged)
-    def defaultDevice(self) -> str:
-        return self._default_device
+    # ── asrDevice ────────────────────────────────────────────────────
+    @Property(str, notify=asrDeviceChanged)
+    def asrDevice(self) -> str:
+        return self._asr_device
 
-    @defaultDevice.setter  # type: ignore[no-redef]
-    def defaultDevice(self, value: str) -> None:
-        if value == self._default_device:
+    @asrDevice.setter  # type: ignore[no-redef]
+    def asrDevice(self, value: str) -> None:
+        if value == self._asr_device:
             return
-        self._default_device = value
-        self._settings.setValue("devices/default", value)
+        self._asr_device = value
+        self._settings.setValue("asr/device", value)
         self._settings.sync()
-        self.defaultDeviceChanged.emit()
+        self.asrDeviceChanged.emit()
+
+    # ── asrComputeType ───────────────────────────────────────────────
+    @Property(str, notify=asrComputeTypeChanged)
+    def asrComputeType(self) -> str:
+        return self._asr_compute_type
+
+    @asrComputeType.setter  # type: ignore[no-redef]
+    def asrComputeType(self, value: str) -> None:
+        if value == self._asr_compute_type:
+            return
+        self._asr_compute_type = value
+        self._settings.setValue("asr/compute_type", value)
+        self._settings.sync()
+        self.asrComputeTypeChanged.emit()
+
+    # ── asrBeamSize ──────────────────────────────────────────────────
+    @Property(str, notify=asrBeamSizeChanged)
+    def asrBeamSize(self) -> str:
+        return self._asr_beam_size
+
+    @asrBeamSize.setter  # type: ignore[no-redef]
+    def asrBeamSize(self, value: str) -> None:
+        if value == self._asr_beam_size:
+            return
+        self._asr_beam_size = value
+        self._settings.setValue("asr/beam_size", value)
+        self._settings.sync()
+        self.asrBeamSizeChanged.emit()
+
+    # ── asrLanguage ──────────────────────────────────────────────────
+    @Property(str, notify=asrLanguageChanged)
+    def asrLanguage(self) -> str:
+        return self._asr_language
+
+    @asrLanguage.setter  # type: ignore[no-redef]
+    def asrLanguage(self, value: str) -> None:
+        if value == self._asr_language:
+            return
+        self._asr_language = value
+        self._settings.setValue("asr/language", value)
+        self._settings.sync()
+        self.asrLanguageChanged.emit()
+
+    # ── gigaamVariant ────────────────────────────────────────────────
+    @Property(str, notify=gigaamVariantChanged)
+    def gigaamVariant(self) -> str:
+        return self._gigaam_variant
+
+    @gigaamVariant.setter  # type: ignore[no-redef]
+    def gigaamVariant(self, value: str) -> None:
+        if value == self._gigaam_variant:
+            return
+        self._gigaam_variant = value
+        self._settings.setValue("asr/gigaam_variant", value)
+        self._settings.sync()
+        self.gigaamVariantChanged.emit()
+
+    # ── gigaamPrecision ──────────────────────────────────────────────
+    @Property(str, notify=gigaamPrecisionChanged)
+    def gigaamPrecision(self) -> str:
+        return self._gigaam_precision
+
+    @gigaamPrecision.setter  # type: ignore[no-redef]
+    def gigaamPrecision(self, value: str) -> None:
+        if value == self._gigaam_precision:
+            return
+        self._gigaam_precision = value
+        self._settings.setValue("asr/gigaam_precision", value)
+        self._settings.sync()
+        self.gigaamPrecisionChanged.emit()
+
+    # ── asrNumThreads ────────────────────────────────────────────────
+    @Property(str, notify=asrNumThreadsChanged)
+    def asrNumThreads(self) -> str:
+        return self._asr_num_threads
+
+    @asrNumThreads.setter  # type: ignore[no-redef]
+    def asrNumThreads(self, value: str) -> None:
+        if value == self._asr_num_threads:
+            return
+        self._asr_num_threads = value
+        self._settings.setValue("asr/num_threads", value)
+        self._settings.sync()
+        self.asrNumThreadsChanged.emit()
+
+    # ── options builder ──────────────────────────────────────────────
+    def build_asr_options(self) -> AsrOptions:
+        """Snapshot current preferences into an :class:`AsrOptions`."""
+
+        def _to_int(raw: str, fallback: int) -> int:
+            try:
+                return int(raw)
+            except ValueError:
+                return fallback
+
+        return AsrOptions(
+            device=self._asr_device,
+            compute_type=self._asr_compute_type,
+            beam_size=_to_int(self._asr_beam_size, 5),
+            language=self._asr_language,
+            gigaam_variant=self._gigaam_variant,
+            gigaam_precision=self._gigaam_precision,
+            num_threads=_to_int(self._asr_num_threads, 4),
+        )
 
 
 def _to_bool(raw: object) -> bool:

@@ -89,6 +89,149 @@ Rectangle {
                     }
                 }
 
+                // ── ASR defaults ─────────────────────────────────
+                SettingsGroup {
+                    title: "ASR (распознавание речи)"
+                    description: "Где крутится модель и её параметры по умолчанию. Применяется ко всем дорожкам, если для дорожки не задан override."
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 14
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "УСТРОЙСТВО"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["cuda", "cpu"]
+                                model: [
+                                    { v: "cuda", l: "GPU (CUDA)" },
+                                    { v: "cpu",  l: "CPU" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.asrDevice))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.asrDevice = values[currentIndex]
+                                }
+                            }
+                        }
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "ЯЗЫК"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["ru", "en", "auto"]
+                                model: [
+                                    { v: "ru",   l: "Русский" },
+                                    { v: "en",   l: "English" },
+                                    { v: "auto", l: "Авто" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.asrLanguage))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.asrLanguage = values[currentIndex]
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 14
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "COMPUTE TYPE (faster-whisper)"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["float16", "int8_float16", "int8"]
+                                model: [
+                                    { v: "float16",      l: "float16" },
+                                    { v: "int8_float16", l: "int8_float16" },
+                                    { v: "int8",         l: "int8 (экономия)" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.asrComputeType))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.asrComputeType = values[currentIndex]
+                                }
+                            }
+                        }
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "BEAM SIZE (faster-whisper)"
+
+                            TextInputField {
+                                Layout.fillWidth: true
+                                mono: true
+                                text: preferences.asrBeamSize
+                                onEditingFinished: preferences.asrBeamSize = text
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 14
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "GIGAAM ВАРИАНТ"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["rnnt", "e2e_rnnt"]
+                                model: [
+                                    { v: "rnnt",     l: "RNNT (быстрее)" },
+                                    { v: "e2e_rnnt", l: "E2E RNNT (точнее)" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.gigaamVariant))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.gigaamVariant = values[currentIndex]
+                                }
+                            }
+                        }
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            label: "GIGAAM PRECISION"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["fp32", "int8"]
+                                model: [
+                                    { v: "fp32", l: "fp32 (точнее)" },
+                                    { v: "int8", l: "int8 (быстрее на CPU)" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.gigaamPrecision))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.gigaamPrecision = values[currentIndex]
+                                }
+                            }
+                        }
+                    }
+
+                    SettingField {
+                        Layout.fillWidth: true
+                        label: "ПОТОКОВ CPU (для CPU-режима / sherpa-onnx)"
+                        hint: "Количество потоков для CPU-инференса"
+
+                        TextInputField {
+                            Layout.fillWidth: true
+                            mono: true
+                            text: preferences.asrNumThreads
+                            onEditingFinished: preferences.asrNumThreads = text
+                        }
+                    }
+                }
+
                 // ── Merger defaults ───────────────────────────────
                 SettingsGroup {
                     title: "Мержер по умолчанию"

@@ -81,6 +81,8 @@ class FasterWhisperSource(Source):
         device: str = "cuda",
         compute_type: str = "float16",
         language: str = "ru",
+        beam_size: int = 5,
+        num_threads: int = 0,
         speaker_map: dict[str, str] | None = None,
         models_root: Path | None = None,
     ) -> None:
@@ -88,6 +90,8 @@ class FasterWhisperSource(Source):
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.beam_size = beam_size
+        self.num_threads = num_threads
         self.speaker_map = speaker_map or {}
         self.models_root = models_root
         # Lazy-loaded WhisperModel, cached across transcribe_track calls
@@ -234,11 +238,13 @@ class FasterWhisperSource(Source):
         from faster_whisper import WhisperModel
 
         model_path = str(fw_model_dir(params))
-        self._wm = WhisperModel(
-            model_path,
-            device=self.device,
-            compute_type=self.compute_type,
-        )
+        wm_kwargs: dict[str, object] = {
+            "device": self.device,
+            "compute_type": self.compute_type,
+        }
+        if self.num_threads > 0:
+            wm_kwargs["cpu_threads"] = self.num_threads
+        self._wm = WhisperModel(model_path, **wm_kwargs)
 
     def transcribe_track(
         self,
@@ -270,7 +276,7 @@ class FasterWhisperSource(Source):
         segments_iter, info = wm.transcribe(
             str(audio_path),
             language=self.language,
-            beam_size=5,
+            beam_size=self.beam_size,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )

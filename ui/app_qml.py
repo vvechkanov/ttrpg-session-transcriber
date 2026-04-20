@@ -69,7 +69,8 @@ def main() -> int:
     sources_model = SourceListModel()
     session_meta = SessionMeta()
     pipeline = PipelineController(
-        app_model, tracks_model, session_meta, model_registry
+        app_model, tracks_model, session_meta, model_registry,
+        preferences=preferences,
     )
 
     # Real ingest: on folder drop, SessionMeta emits the session dir
