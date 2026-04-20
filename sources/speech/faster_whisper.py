@@ -20,6 +20,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
@@ -105,6 +106,10 @@ class FasterWhisperSource(Source):
         self.language = language
         self.speaker_map = speaker_map or {}
         self.models_root = models_root
+        # Lazy-loaded WhisperModel, cached across transcribe_track calls
+        # so the 3 GB model doesn't reload per file. Populated by
+        # _ensure_loaded on the first extract() / transcribe_track().
+        self._wm: object | None = None
 
     # ---- Installable ----------------------------------------------------
 
@@ -189,20 +194,47 @@ class FasterWhisperSource(Source):
 
         Побочный эффект: пишет canonical JSON на каждый трек в
         ``session_dir/transcripts/<stem>.json``.
-
-        Runtime изоляция:
-            1. Убеждаемся, что bundle установлен (иначе RuntimeError с
-               подсказкой запустить installer).
-            2. Вставляем ``<backend_dir>/site-packages`` в начало
-               ``sys.path`` — именно из этого каталога должен
-               импортироваться ``faster_whisper`` и все его
-               транзитивные зависимости (ctranslate2, tokenizers,
-               huggingface_hub, onnxruntime, av, numpy, ...).
-            3. Создаём ``WhisperModel`` с model path, указывающим на
-               локальный ``<backend_dir>/models/`` — faster-whisper
-               просто читает файлы оттуда, без походов в интернет
-               или в системный HF cache.
         """
+        self._ensure_loaded()
+        audio_files = _scan_audio_files(session_dir)
+        if not audio_files:
+            return []
+
+        transcripts_dir = session_dir / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+
+        all_segments: list[SpeechSegment] = []
+        for audio_path in audio_files:
+            track_segments = self.transcribe_track(audio_path)
+            _write_canonical_json(
+                track_segments,
+                transcripts_dir / f"{audio_path.stem}.json",
+                source_engine=_SOURCE_ENGINE,
+            )
+            all_segments.extend(track_segments)
+
+        all_segments.sort(key=lambda s: s.start)
+        return all_segments
+
+    def _ensure_loaded(self) -> None:
+        """Load and cache the ``WhisperModel`` on first use.
+
+        Subsequent :meth:`extract` / :meth:`transcribe_track` calls
+        reuse the cached model — a 3 GB weights file should not
+        reload per track.
+
+        Runtime isolation:
+            1. Bail with a clear message if the bundle is not
+               installed.
+            2. Prepend ``<backend_dir>/site-packages`` to ``sys.path``
+               so ``faster_whisper`` and its transitive deps load from
+               the isolated install, not the system site-packages.
+            3. Point ``WhisperModel`` at the local model directory so
+               it never reaches out to HF cache / internet.
+        """
+
+        if self._wm is not None:
+            return
         params = self._params_from_self()
         if not self.is_installed(params):
             raise RuntimeError(
@@ -213,77 +245,89 @@ class FasterWhisperSource(Source):
 
         _prepend_site_packages(fw_site_packages(params))
 
-        # Lazy import: модуль sources импортируется при старте, но faster-whisper
-        # — тяжёлая опциональная зависимость. Держим import локально чтобы
-        # sources/__init__.py не падал если пакет не установлен. После
-        # _prepend_site_packages этот импорт резолвится в каталог backend-а.
+        # Lazy import — faster-whisper is an opional heavyweight.
+        # After _prepend_site_packages it resolves to the backend dir.
         from faster_whisper import WhisperModel
 
-        audio_files = _scan_audio_files(session_dir)
-        if not audio_files:
-            return []
-
-        transcripts_dir = session_dir / "transcripts"
-        transcripts_dir.mkdir(parents=True, exist_ok=True)
-
-        # Передаём локальный путь напрямую (а не HF repo ID), чтобы
-        # faster-whisper не пытался скачать модель через huggingface_hub.
-        # Каталог содержит config.json/tokenizer.json/vocabulary.json/
-        # model.bin — ровно тот layout, который ожидает WhisperModel.
         model_path = str(fw_model_dir(params))
-        wm = WhisperModel(
+        self._wm = WhisperModel(
             model_path,
             device=self.device,
             compute_type=self.compute_type,
         )
 
-        all_segments: list[SpeechSegment] = []
-        for audio_path in audio_files:
-            segments_iter, _info = wm.transcribe(
-                str(audio_path),
-                language=self.language,
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
-            )
+    def transcribe_track(
+        self,
+        audio_path: Path,
+        speaker: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[SpeechSegment]:
+        """Per-track public API for the Qt shell (Phase 6).
 
-            raw_segments = list(segments_iter)
+        Progress is derived from ``seg.end / info.duration`` — faster-
+        whisper's iterator yields segments ordered by start time, so
+        each emission advances monotonically towards 1.0. The loop
+        polls ``should_cancel()`` between segments and returns partial
+        results on cancellation.
+        """
+
+        self._ensure_loaded()
+        wm = self._wm
+        if wm is None:
+            # Defensive: _ensure_loaded either populated self._wm or
+            # raised; reaching here means someone mutated state
+            # behind our back.
+            raise RuntimeError("WhisperModel failed to load")
+
+        if speaker is None:
             speaker = resolve_speaker(audio_path.stem, self.speaker_map)
 
-            track_segments: list[SpeechSegment] = []
-            for seg in raw_segments:
-                # Фильтр шума: faster-whisper выставляет no_speech_prob > 0.6
-                # на сегментах, где VAD/decoder подозревает отсутствие речи.
-                no_speech_prob = getattr(seg, "no_speech_prob", 0.0) or 0.0
-                if no_speech_prob > 0.6:
-                    continue
+        segments_iter, info = wm.transcribe(
+            str(audio_path),
+            language=self.language,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
 
-                text = (seg.text or "").strip()
-                if not text:
-                    continue
+        duration = float(getattr(info, "duration", 0.0) or 0.0)
+        track_segments: list[SpeechSegment] = []
+        for seg in segments_iter:
+            if should_cancel is not None and should_cancel():
+                # Caller will get whatever we have so far — no raise.
+                return track_segments
 
-                avg_logprob = getattr(seg, "avg_logprob", None)
-                confidence = math.exp(avg_logprob) if avg_logprob is not None else None
+            # Фильтр шума: faster-whisper выставляет no_speech_prob > 0.6
+            # на сегментах, где VAD/decoder подозревает отсутствие речи.
+            no_speech_prob = getattr(seg, "no_speech_prob", 0.0) or 0.0
+            if no_speech_prob > 0.6:
+                continue
 
-                track_segments.append(
-                    SpeechSegment(
-                        start=float(seg.start),
-                        end=float(seg.end),
-                        speaker=speaker,
-                        text=text,
-                        confidence=confidence,
-                    )
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+
+            avg_logprob = getattr(seg, "avg_logprob", None)
+            confidence = math.exp(avg_logprob) if avg_logprob is not None else None
+
+            track_segments.append(
+                SpeechSegment(
+                    start=float(seg.start),
+                    end=float(seg.end),
+                    speaker=speaker,
+                    text=text,
+                    confidence=confidence,
                 )
-
-            _write_canonical_json(
-                track_segments,
-                transcripts_dir / f"{audio_path.stem}.json",
-                source_engine=_SOURCE_ENGINE,
             )
-            all_segments.extend(track_segments)
 
-        all_segments.sort(key=lambda s: s.start)
-        return all_segments
+            if on_progress is not None and duration > 0:
+                on_progress(min(1.0, float(seg.end) / duration))
+
+        if on_progress is not None:
+            on_progress(1.0)
+
+        return track_segments
 
 
 def _prepend_site_packages(site_packages: Path) -> None:

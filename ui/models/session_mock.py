@@ -160,7 +160,7 @@ class TrackEntry:
     role: str              # "GM" | "Игрок" | "Слушатель"
     character: str         # "" for listeners
     excluded: bool         # True when the player has no audio
-    model_id: str          # "gigaam" | "whisper" | ""
+    model_id: str          # "gigaam" | "faster-whisper" | "whisper-lg" | ""
     model_override: bool
     peaks: list[float] = field(default_factory=list)
     # 0.0 → 1.0 share of this track that has been transcribed. Mutable
@@ -178,6 +178,11 @@ class TrackEntry:
     state: str = "idle"
     # Set when `state == "failed"` — message shown to the user.
     error_message: str = ""
+    # Absolute path to this track's audio file on disk. ``None`` for
+    # prototype mock rows that exist before a folder is dropped; the
+    # Phase 6 PipelineController errors-out such rows with a clear
+    # message instead of crashing.
+    audio_path: Path | None = None
 
 
 def _gen_peaks(seed: int, count: int = 80) -> list[float]:
@@ -471,6 +476,7 @@ class TrackListModel(QAbstractListModel):
                 model_id="gigaam",
                 model_override=False,
                 peaks=[],
+                audio_path=path,
             )
             for path in audio_files
         ]
@@ -479,6 +485,28 @@ class TrackListModel(QAbstractListModel):
         self.audioPathsChanged.emit(
             [(i, str(p)) for i, p in enumerate(audio_files)]
         )
+
+    @Slot(int, result=str)
+    def audioPathFor(self, row: int) -> str:
+        """Return the absolute audio path for ``row`` or "" if unknown.
+
+        Phase 6's PipelineController uses this to hand each AsrWorker
+        the file it should transcribe. Mock rows (no drop yet) return
+        an empty string and the worker reports a user-visible error.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return ""
+        path = self._rows[row].audio_path
+        return str(path) if path is not None else ""
+
+    @Slot(int, result=str)
+    def modelIdFor(self, row: int) -> str:
+        """Return the per-track model_id, empty string for out-of-range."""
+
+        if not (0 <= row < len(self._rows)):
+            return ""
+        return self._rows[row].model_id
 
     @Slot(int, list)
     def setPeaks(self, row: int, peaks: list[float]) -> None:

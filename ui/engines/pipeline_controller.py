@@ -4,19 +4,31 @@ Sits between :class:`AppModel` (phase state) and
 :class:`TrackListModel` (per-track progress / state). QML calls
 :py:meth:`runAsr` to start processing and :py:meth:`cancel` to abort.
 
-Step 6 runs **all non-excluded tracks sequentially** — one
-:class:`AsrWorker` at a time, reusing the same thread slot. Sequential
-is the right default per the handoff's threading note: each worker
+Phase 6 runs **all non-excluded tracks sequentially**, one
+:class:`AsrWorker` at a time on a fresh :class:`QThread`. Sequential
+is the right default per the handoff threading note: each backend
 loads its own model unless shared carefully, and for local use the
-RAM cost of parallel usually outweighs the wall-clock saving.
+RAM cost of parallelism usually outweighs the wall-clock saving.
 
-Any row marked *cached* is skipped with its progress snapped to 1.0.
+Source instances are cached by ``model_id`` across the batch so a
+3 GB faster-whisper weights file loads once even if every track
+picks the same override. Rows that declare an unknown ``model_id``
+or are missing an ``audio_path`` (common when the user has not yet
+dropped a folder) fail fast with a user-visible error.
+
+Cache/per-track skip is still driven by a mock ``_CACHED_ROWS`` set
+— real on-disk cache (``.transcripts/<stem>.json``) lookup lands in
+Phase 8 together with session settings.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
+from core.asr import make_source
+from sources.base import Source
 from ui.engines.asr_worker import AsrWorker
 from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
@@ -58,11 +70,11 @@ class PipelineController(QObject):
         self._app = app_model
         self._tracks = tracks
 
-        # Active ASR worker (step 6).
+        # Active ASR worker (Phase 6).
         self._thread: QThread | None = None
         self._worker: AsrWorker | None = None
 
-        # Active merger worker (step 7). Kept as a separate pair — the
+        # Active merger worker (Phase 7). Kept as a separate pair — the
         # merge pass starts *after* the ASR queue drains and plays a
         # completely different role in the pipeline.
         self._merge_thread: QThread | None = None
@@ -70,6 +82,12 @@ class PipelineController(QObject):
 
         self._queue: list[int] = []
         self._cancelled: bool = False
+
+        #: ASR source cache: one Source per ``model_id`` across the
+        #: batch. Loading a faster-whisper weights file costs several
+        #: hundred milliseconds; the cache amortises that to once per
+        #: model even if every track picks the same override.
+        self._sources: dict[str, Source] = {}
 
         #: Filesystem path reported by the merger on success. QML reads
         #: it through :pyattr:`outputPath` once the done phase is up.
@@ -128,10 +146,14 @@ class PipelineController(QObject):
         We flag the controller first so the pipeline-level ``cancel``
         is decisive: even if the in-flight worker's ``run`` happens to
         emit a final ``done`` before the cancel flag is seen, we still
-        skip spawning the next row.
+        skip spawning the next row. Both channels converge inside the
+        source's ASR loop — ``requestInterruption`` is the idiomatic
+        Qt cross-thread flag, ``worker.cancel`` a defensive fallback.
         """
 
         self._cancelled = True
+        if self._thread is not None:
+            self._thread.requestInterruption()
         if self._worker is not None:
             self._worker.cancel()
         if self._merge_worker is not None:
@@ -150,12 +172,47 @@ class PipelineController(QObject):
             return
 
         row = self._queue.pop(0)
-        self._tracks.setState(row, "running")
-        self._spawn(row)
 
-    def _spawn(self, row: int) -> None:
+        # Resolve the backend + audio path for this row BEFORE flipping
+        # its state to "running". Missing audio or an unknown model_id
+        # are user-visible errors, not crashes.
+        audio_path_str = self._tracks.audioPathFor(row)
+        if not audio_path_str:
+            self._tracks.setError(
+                row,
+                "Нет аудиофайла — перетащите папку сессии перед запуском",
+            )
+            self._advance()
+            return
+
+        model_id = self._tracks.modelIdFor(row) or "gigaam"
+        try:
+            source = self._get_or_make_source(model_id)
+        except (ValueError, RuntimeError) as exc:
+            self._tracks.setError(row, str(exc))
+            self._advance()
+            return
+
+        self._tracks.setState(row, "running")
+        self._spawn(row, source, Path(audio_path_str))
+
+    def _get_or_make_source(self, model_id: str) -> Source:
+        """Return the cached Source for ``model_id``, creating it on miss.
+
+        Caching across the batch ensures each weights file loads once
+        per session even if every track picks the same override.
+        ``make_source`` raises ``ValueError`` on unknown IDs and
+        ``RuntimeError`` if the backend isn't installed — both are
+        converted to per-track errors upstream.
+        """
+
+        if model_id not in self._sources:
+            self._sources[model_id] = make_source(model_id)
+        return self._sources[model_id]
+
+    def _spawn(self, row: int, source: Source, audio_path: Path) -> None:
         thread = QThread(self)
-        worker = AsrWorker(row)
+        worker = AsrWorker(row, source, audio_path)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
@@ -185,6 +242,7 @@ class PipelineController(QObject):
                     self._tracks.setProgress(row, 0.0)
             self._app.clearMergeState()
             self._app.phase = "idle"
+            self._sources.clear()
             self.finished.emit()
             return
 

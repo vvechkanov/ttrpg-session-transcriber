@@ -1,96 +1,112 @@
-"""Single-track ASR worker, run on its own QThread.
+"""Single-track ASR worker — invokes ``core.asr.transcribe_one_track``.
 
-For step 5 this is a **simulator** — it sleeps in small increments and
-emits synthetic progress so the progress-overlay wiring can be
-exercised without dragging in the real ``core/asr.py`` stack (GPU
-probe, model download, faster-whisper/GigaAM imports).
+Phase 6 wiring: replaces the Phase 5 time.sleep simulator with a
+real call into the decomposed ASR entry point. Given a pre-built
+speech :class:`sources.base.Source` (shared across the batch so
+weights load once) plus an audio path, this worker:
 
-Step 6 swaps the simulated loop for the real ``core.asr.transcribe_*``
-call; the signal shape (``progress(int, float)`` /
-``done(int)`` / ``error(int, str)``) stays the same so nothing in
-QML-land has to move.
+* runs :func:`core.asr.transcribe_one_track` on the path;
+* emits ``progress(row, pct)`` periodically (callback fires from
+  inside the ASR loop — queued back to the UI thread);
+* emits ``done(row)`` on success, ``error(row, msg)`` on failure;
+* always emits ``finished()`` at the end so the owning QThread can
+  quit cleanly regardless of which branch ran.
+
+Cancellation flows through two paths that both land on the same
+check inside the source's loop:
+
+* ``QThread.requestInterruption()`` — the Qt-idiomatic cross-thread
+  flag the :class:`PipelineController` sets when the user hits Cancel;
+* :meth:`cancel` — a belt-and-braces internal flag for the rare case
+  where the worker's thread isn't the current one (e.g. unit tests
+  that don't spin up a real QThread).
 """
 
 from __future__ import annotations
 
-import time
+from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from core.asr import transcribe_one_track
+from sources.base import Source
 
 
 class AsrWorker(QObject):
-    """Runs ASR for a single track, reports progress and completion.
+    """Runs ASR on one track, reports progress / completion / errors."""
 
-    Lifecycle (per-worker instance):
-
-        worker = AsrWorker(row=0)
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.done.connect(thread.quit)
-        thread.start()
-
-    The orchestration above lives in :class:`PipelineController`.
-    """
-
-    # row, pct(0..1)
+    #: Emitted periodically during ASR. ``pct`` is 0..1 fraction of the
+    #: track that has been processed. Routes to ``TrackListModel
+    #: .setProgress`` through the default queued connection.
     progress = Signal(int, float)
-    # row
+
+    #: Emitted once when the track finishes cleanly.
     done = Signal(int)
-    # row, human message
+
+    #: Emitted once when the ASR backend raises; ``message`` is the
+    #: exception's ``str()``.
     error = Signal(int, str)
-    # Emitted once at the very end of ``run``, whatever branch took.
-    # The orchestrator connects this to the owning QThread's ``quit``
-    # slot so cancellation cleanly tears the thread down too.
+
+    #: Always emitted exactly once in the ``finally`` block, after the
+    #: per-outcome signal. ``PipelineController`` wires it to the
+    #: owning QThread's ``quit`` so every branch tears down the thread.
     finished = Signal()
 
-    #: Number of progress ticks per simulated transcription. Higher →
-    #: smoother bar motion; lower → quicker completion during tests.
-    TICKS: int = 60
-
-    #: Seconds of sleep between ticks. ``TICKS * TICK_INTERVAL`` is the
-    #: total simulated runtime — tuned to roughly 8 seconds so the
-    #: wiring is observable during a manual click-through without being
-    #: tedious.
-    TICK_INTERVAL: float = 0.13
-
-    def __init__(self, row: int) -> None:
+    def __init__(self, row: int, source: Source, audio_path: Path) -> None:
         super().__init__()
         self._row = row
+        self._source = source
+        self._audio_path = audio_path
         self._cancelled = False
 
     @Slot()
     def run(self) -> None:
-        """Emit progress ticks in a simulated work loop.
+        """Transcribe ``_audio_path`` via ``_source``, emit signals.
 
-        Runs on the worker thread. Progress is emitted via a direct
-        Qt signal, which becomes a queued call on any main-thread
-        connected slot — so the UI update happens without explicit
-        ``QMetaObject.invokeMethod`` dancing.
-
-        ``finished`` is emitted in a ``finally`` so cancellation,
-        natural completion, and errors all wind the thread down the
-        same way.
+        ``on_progress`` / ``should_cancel`` are closures so Qt doesn't
+        marshal them — they run inside the source's tight loop. Only
+        the signal ``emit`` at the end is thread-boundary-crossing.
         """
 
+        def _on_progress(pct: float) -> None:
+            self.progress.emit(self._row, pct)
+
+        def _should_cancel() -> bool:
+            if self._cancelled:
+                return True
+            thread = QThread.currentThread()
+            # When the worker is moved onto a QThread, currentThread()
+            # returns that worker thread; isInterruptionRequested is
+            # the Qt-safe cross-thread cancel flag.
+            if thread is not None and thread.isInterruptionRequested():
+                return True
+            return False
+
         try:
-            for tick in range(self.TICKS + 1):
-                if self._cancelled:
-                    return
-                self.progress.emit(self._row, tick / self.TICKS)
-                if tick < self.TICKS:
-                    time.sleep(self.TICK_INTERVAL)
-            self.done.emit(self._row)
-        except Exception as exc:   # defensive — surface to UI
+            transcribe_one_track(
+                self._source,
+                self._audio_path,
+                on_progress=_on_progress,
+                should_cancel=_should_cancel,
+            )
+            # If cancellation landed mid-file the source returned
+            # partial segments and didn't raise — don't signal "done"
+            # in that case, the PipelineController's own ``_cancelled``
+            # flag decides whether to advance or bail.
+            if not _should_cancel():
+                self.done.emit(self._row)
+        except Exception as exc:  # noqa: BLE001 — surface any failure
             self.error.emit(self._row, str(exc))
         finally:
             self.finished.emit()
 
     @Slot()
     def cancel(self) -> None:
-        """Request early termination. Safe to call from any thread —
-        ``_cancelled`` is a plain Python bool, but reads/writes on it
-        are atomic enough for this single-flag use.
+        """Request early termination from any thread.
+
+        Reads and writes on a single bool attribute are atomic enough
+        for this single-flag use; cross-thread visibility is carried
+        by the GIL / signal slot machinery.
         """
 
         self._cancelled = True

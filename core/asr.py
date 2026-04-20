@@ -1,0 +1,98 @@
+"""Single-track ASR dispatch for the Qt shell.
+
+Resolves a ``model_id`` (the string the TrackListModel rows carry —
+``"gigaam"``, ``"faster-whisper"``, ``"whisper-lg"`` …) to a
+configured speech :class:`sources.base.Source` instance, and provides
+:func:`transcribe_one_track`, a thin pass-through that hands the
+per-track hooks (progress + cancel) through to the source.
+
+Model loading is amortised: :class:`ui.engines.asr_worker.AsrWorker`
+calls :func:`make_source` once at the start of a batch and reuses the
+returned instance for every track. A single 3 GB faster-whisper weight
+file should not reload six times per session.
+
+The module deliberately does **not** import PySide6 — core/ stays
+toolkit-agnostic. The QML shell wraps it in a QThread; a future CLI
+path could call this synchronously.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from domain.annotations import SpeechSegment
+from sources.base import Source
+from sources.speech.faster_whisper import FasterWhisperSource
+from sources.speech.gigaam import GigaAMPrecision, GigaAMSource, GigaAMVariant
+
+
+#: Fraction 0..1 of this track's audio that has been processed so far.
+TrackProgress = Callable[[float], None]
+
+#: Polled between ASR chunks; returning ``True`` stops the loop and
+#: returns whatever segments have been collected up to that point.
+CancelProbe = Callable[[], bool]
+
+
+def make_source(
+    model_id: str,
+    *,
+    device: str = "cuda",
+    language: str = "ru",
+    speaker_map: dict[str, str] | None = None,
+) -> Source:
+    """Resolve ``model_id`` → configured speech source.
+
+    Accepted IDs mirror the ones :class:`ui.models.TrackListModel`
+    stores in its ``ModelIdRole``, including the whisper-size aliases
+    the override popover can pick:
+
+        ``"gigaam"``                  → GigaAM RNNT FP32
+        ``"faster-whisper"``          → faster-whisper large-v3-ru
+        ``"whisper"``, ``"whisper-lg"``, ``"whisper-med"`` → same bundle,
+            the size distinction is informational for the user; the
+            shipped install is currently a single size.
+
+    Raises ``ValueError`` on unknown IDs so the worker surfaces the
+    typo to the UI instead of silently falling back.
+    """
+
+    if model_id == "gigaam":
+        return GigaAMSource(
+            variant=GigaAMVariant.RNNT,
+            precision=GigaAMPrecision.FP32,
+            device=device,
+            speaker_map=speaker_map,
+        )
+    if model_id in {"faster-whisper", "whisper", "whisper-lg", "whisper-med"}:
+        return FasterWhisperSource(
+            device=device,
+            language=language,
+            speaker_map=speaker_map,
+        )
+    raise ValueError(f"unknown ASR model_id: {model_id!r}")
+
+
+def transcribe_one_track(
+    source: Source,
+    audio_path: Path,
+    *,
+    speaker: str | None = None,
+    on_progress: TrackProgress | None = None,
+    should_cancel: CancelProbe | None = None,
+) -> list[SpeechSegment]:
+    """Run ASR on ``audio_path`` via the given source.
+
+    Thin pass-through to ``source.transcribe_track`` — separating
+    dispatch (``make_source``) from per-track invocation lets a batch
+    worker hold one source across many tracks without callers
+    reaching into backend-specific classes.
+    """
+
+    return source.transcribe_track(  # type: ignore[attr-defined]
+        audio_path,
+        speaker=speaker,
+        on_progress=on_progress,
+        should_cancel=should_cancel,
+    )

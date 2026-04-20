@@ -15,7 +15,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
@@ -217,8 +217,7 @@ class GigaAMSource(Source):
 
         all_segments: list[SpeechSegment] = []
         for audio_path in audio_files:
-            speaker = resolve_speaker(audio_path.stem, self.speaker_map)
-            track_segments = self._transcribe_track(audio_path, speaker)
+            track_segments = self.transcribe_track(audio_path)
             _write_canonical_json(
                 track_segments,
                 transcripts_dir / f"{audio_path.stem}.json",
@@ -228,6 +227,38 @@ class GigaAMSource(Source):
 
         all_segments.sort(key=lambda s: s.start)
         return all_segments
+
+    def transcribe_track(
+        self,
+        audio_path: Path,
+        speaker: str | None = None,
+        on_progress: Callable[[float], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> list[SpeechSegment]:
+        """Per-track public API for the Qt shell (Phase 6).
+
+        Equivalent to :meth:`extract` but scoped to one file and with
+        hooks for UI progress and cancellation:
+
+        * ``on_progress(0..1)`` is invoked periodically as the VAD
+          accepts audio windows. Guarantees at least one final call
+          with ``1.0`` when the track finishes.
+        * ``should_cancel()`` is polled between windows; a truthy
+          return value stops the loop and returns the partial segment
+          list collected up to that point (no exception raised).
+
+        Speaker defaults to the speaker_map resolution, matching
+        :meth:`extract`'s behaviour when called from the CLI.
+        """
+
+        if speaker is None:
+            speaker = resolve_speaker(audio_path.stem, self.speaker_map)
+        return self._transcribe_track(
+            audio_path,
+            speaker,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+        )
 
     # ---- Internal ------------------------------------------------------
 
@@ -262,11 +293,21 @@ class GigaAMSource(Source):
         self,
         audio_path: Path,
         speaker: str | None,
+        on_progress: Callable[[float], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> list[SpeechSegment]:
         """Обработать один per-speaker трек.
 
         Pipeline: 48 kHz int16 PCM → 16 kHz float32 mono → Silero VAD →
         chunked recognizer → ``list[SpeechSegment]``.
+
+        Hooks (added in Phase 6 for the Qt shell):
+
+        * ``on_progress(0..1)`` fires every ~500 VAD windows (~16 s of
+          audio). Called once more with ``1.0`` when the flush
+          completes.
+        * ``should_cancel()`` is polled every window; a truthy return
+          breaks the loop and returns partial segments.
 
         TODO(python-dev): точный API ``sherpa_onnx.VoiceActivityDetector``
         (1.12+) — уточнить имена ``front``/``pop``/``flush``/``empty``.
@@ -285,11 +326,25 @@ class GigaAMSource(Source):
         window = 512  # 32 ms @ 16 kHz — стандартный Silero work window
         n = len(samples_16k)
 
+        #: One progress emission per `_PROGRESS_EVERY_WINDOWS` VAD windows.
+        #: 500 windows ≈ 16 s of audio — smooth enough for the waveform
+        #: overlay, cheap enough to not flood the signal queue.
+        progress_every = 500
+        windows_since_last = 0
+
         i = 0
         while i + window <= n:
+            if should_cancel is not None and should_cancel():
+                # Return whatever we collected so far; the caller's
+                # TrackListModel will still show partial text.
+                return segments_out
             vad.accept_waveform(samples_16k[i : i + window])
             self._drain_vad(vad, segments_out, speaker)
             i += window
+            windows_since_last += 1
+            if on_progress is not None and windows_since_last >= progress_every:
+                on_progress(min(1.0, i / n))
+                windows_since_last = 0
 
         # Остаток короче window — flush финальный chunk.
         if i < n:
@@ -304,6 +359,9 @@ class GigaAMSource(Source):
         # Финальный flush — вытолкнуть всё что накопилось
         _flush_vad(vad)
         self._drain_vad(vad, segments_out, speaker)
+
+        if on_progress is not None:
+            on_progress(1.0)
 
         return segments_out
 
