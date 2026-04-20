@@ -399,3 +399,66 @@ class GigaAMSource(Source):
   переводится в статус «tech notes / implementation details» —
   канонический источник решений теперь этот ADR. Старые open
   questions в том файле считаются снятыми этим ADR.
+
+---
+
+## Amendment (2026-04-20) — Uptake of design handoff: drop UI template-factory
+
+**Status:** Accepted
+**Trigger:** `_ _.zip` design handoff (`docs/handoff/README.md`,
+`docs/handoff/QML_MAPPING.md`) и `plan`
+`docs/architecture/ui-qml-migration.md`.
+
+### Context
+
+Миграция UI с Qt Widgets на PySide6 + QtQuick/QML (см.
+`docs/architecture/ui-qml-migration.md`). Handoff предписывает
+**другой шелл-паттерн**: единый `AppModel` + per-entity
+`QAbstractListModel` (tracks, sources, models) + декларативные QML-
+экраны, биндящиеся напрямую к `Q_PROPERTY`-полям моделей. Нет понятия
+«home-card / runtime-panel / settings-panel» на уровне модуля — всё
+это живёт на уровне экранов (`TimelineScreen.qml` содержит карточки
+источников, `ModelsScreen.qml` — каталог моделей, `SettingsScreen.qml`
+— формы). Per-template QWidget-фабрики становятся избыточным слоем
+косвенности.
+
+### Decision
+
+1. **Удалить** из контракта три фабрики `make_home_card`,
+   `make_runtime_panel`, `make_settings_panel` и `SettingsPanelProtocol`
+   из `core/ui_contract.py`. Вместе с ними — всю папку
+   `ui/templates/*` и `core/ui_registry.py`.
+2. **Удалить** атрибут `ui_config: UIConfig | None` у модулей
+   `sources/*`, `mergers/*`, `renderers/*`. Модули больше ничего не
+   несут в UI-сторону.
+3. **Сохранить** плагинные регистры backend-ов — `SPEECH_SOURCES`,
+   `MERGERS`, `RENDERERS`. Они остаются механизмом подключения
+   alternatives (GigaAM vs faster-whisper vs WhisperX). Эти dict-ы
+   читает `ui/models/model_registry.py` и показывает пользователю
+   список моделей в `ModelsScreen.qml`.
+4. **Сохранить** инвариант «sources/mergers/renderers/domain не
+   импортят ни PySide6, ни ui/» — единственный controlled upward
+   (core → ui) теперь вообще отсутствует, потому что `core/ui_registry.py`
+   уходит в Phase 10.
+5. Новая UI-раскладка фиксируется в `docs/handoff/QML_MAPPING.md`
+   (источник правды) и в `docs/architecture/ui-qml-migration.md`
+   (фазовый план). Этот ADR — ссылка для истории «почему
+   template-factory был и почему ушёл».
+
+### Consequences
+
+- **Плюс:** меньше файлов (4 template-ов по 100–700 строк каждый
+  уходят), одна ментальная модель (QML-экран → ViewModel →
+  `Q_PROPERTY`), никаких импортов PySide6 через шаблоны.
+- **Плюс:** добавление нового ASR-backend-а стоит **меньше одной
+  строчки** — только запись в `SPEECH_SOURCES`. UI появляется
+  автоматически в `ModelsScreen`, так как `model_registry.py` читает
+  тот же dict.
+- **Минус:** если когда-нибудь один backend потребует радикально
+  другого UI (не просто полей в settings, а уникальных элементов —
+  спектрограммы, плагинные визуализации), появится давление опять
+  ввести per-module UI-слой. Ответ: к тому моменту пересматриваем
+  решение открыто, а не тащим неиспользуемую абстракцию для
+  «потенциального будущего».
+- **Нейтральное:** CLI (`scripts/*`, `core.pipeline.run` standalone)
+  никак не затронут — у них никогда и не было UI-потребностей.

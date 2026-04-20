@@ -23,8 +23,10 @@ launcher/*.zip
 # PyInstaller
 *.spec.bak
 
-# Design handoff bundle — extracted from "_ _.zip" for local browsing
-handoff/
+# Design handoff bundle — canonical copy lives in docs/handoff/ (markdown).
+# Root-level handoff/ was the extraction target for the now-deleted zip; keep
+# the path ignored so any local re-extraction does not sneak into commits.
+/handoff/
 
 # E2E fixture generation artifacts (canonical baseline is expected_merged.txt)
 tests/fixtures/e2e_p2/session/merged.txt

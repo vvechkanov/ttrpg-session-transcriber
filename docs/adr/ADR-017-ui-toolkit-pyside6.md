@@ -132,3 +132,82 @@
 - Все GUI-зависимости кончаются в `ui/`. Слои `sources/`, `mergers/`,
   `renderers/`, `domain/`, `core/pipeline.py` не импортируют
   `PySide6.*` — это инвариант, обеспечиваемый ADR-016.
+
+---
+
+## Amendment (2026-04-20) — QML как основной шелл, Widgets снимается
+
+**Status:** Accepted
+**Trigger:** дизайн-handoff `_ _.zip` (извлечён в `docs/handoff/`) +
+`docs/architecture/ui-qml-migration.md` (фазовый план).
+
+### Context
+
+Исходное решение «PySide6» было сформулировано в терминах **Qt
+Widgets** (`QFrame`, `QScrollArea`, `QPropertyAnimation(b"geometry")`,
+QSS). По нему построен `ui/shell/*` (~4559 строк, production на
+2026-04-19).
+
+Дизайн-handoff, пришедший 2026-04-20, предписывает **декларативный
+QtQuick/QML-шелл**: `ApplicationWindow` + `StackLayout` + `ListView` +
+`Behavior on x/opacity` + `Drawer` + `Popup`, Theme как `pragma
+Singleton QtObject`. `QML_MAPPING.md` в handoff-е даёт готовую раскладку
+(`ui/qml/screens/`, `ui/qml/timeline/`, `ui/qml/controls/`), готовый
+`Theme.qml` и рекомендации по `QAbstractListModel` + `QThread + Worker`.
+
+Qt Widgets-шелл этому handoff-у не отвечает: amber-parchment палитра,
+waveform canvas с per-track прогрессом, stitch overlay с стаггер
+анимациями, drawer справа с бэкдропом — всё это в Widgets потребует
+много QSS-костылей и custom paintEvent-ов. QML собирает это
+декларативно.
+
+### Decision
+
+**PySide6 остаётся** (LGPL, thread-safe signals, PyInstaller, Qt for
+Python). Меняется **подсет**: с `QtWidgets` на
+`QtQuick + QtQuickControls2 (стиль Basic) + QtQuickTemplates2 +
+QtQml + QtSvg`. Qt 6.5+.
+
+- Шелл — `QQmlApplicationEngine` + `Main.qml`, а не
+  `QApplication + QMainWindow`.
+- Экраны — QML-файлы в `ui/qml/screens/*`, не `QWidget`-подклассы в
+  `ui/shell/screens/*`.
+- Темизация — `Theme.qml` singleton, не `QSS` строка в `theme.py`.
+- Persistence — `QSettings(IniFormat)` →
+  `%APPDATA%\ttrpg-transcriber\settings.ini`.
+- Воркеры — `QThread + worker.moveToThread(thread)` (паттерн handoff-а)
+  вместо `QThread` subclass.
+
+### Consequences
+
+- **Плюс:** handoff воспроизводится декларативно и близко к 1:1,
+  без custom paintEvent. Anim-ы (drawer slide, stitch fade-in,
+  phase-bar pulse) — встроенный `Behavior { NumberAnimation }`.
+- **Плюс:** меньше Python-кода в шелле (`ui/shell/app.py` сжимается с
+  1165 строк до ~80 строк loader-а).
+- **Плюс:** модели данных (`ui/models/*`) тестируются pytest-qt без
+  запуска QML-движка — чистый QObject-интерфейс.
+- **Минус (bundle):** QtQuick + QtQuickControls2 добавляют ~30 MB к
+  PyInstaller-сборке поверх Widgets-базы. Ожидаемый total — ~110 MB
+  (был ~80 MB). Порог 120 MB из исходного ADR всё ещё держится.
+- **Минус (PyInstaller):** QtQuickControls2 Basic style plugin не
+  подхватывается автоматически — нужен явный `hiddenimports` в
+  `build.spec`. Риск mitigated smoke-тестом на чистой Windows-VM в
+  Phase 9.
+- **Нейтральное (LGPL):** та же схема, что и для Widgets — dynamic
+  DLL рядом с exe, `onefile=False`, LGPL-notice в `licenses/`. Не
+  меняется.
+
+### Переходный план
+
+См. `docs/architecture/ui-qml-migration.md`, фазы 0–11. Widgets-шелл
+удаляется в Phase 10 одним PR-ом вместе с `ui/gui_legacy.py`,
+`ui/templates/*`, тестами `tests/ui/test_*.py` под Widgets и старой
+дизайн-документацией (`docs/design/flowstep-prompts/`,
+`docs/design/mockups/figma-make/`, `docs/design/screen-3-session.md`).
+Перед этим снимается тэг `v0.9-widgets-frozen` — last-known-good
+Widgets-сборка для отката.
+
+Документ `docs/architecture/ui-qt-migration.md` (завершённый фазовый
+план Widgets-миграции) архивируется в `.archived.md` — он полезен как
+история, но больше не руководство.
