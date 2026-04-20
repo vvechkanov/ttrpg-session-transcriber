@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-import subprocess
 import sys
 from pathlib import Path
 
 from core import PipelineParams, run, run_batch
+from core.asr import list_speech_backends
+from core.chunking import chunk_text_file
 from core.speaker_map import load_speaker_map
-from sources import SPEECH_SOURCES  # only for argparse choices=
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--speech_backend",
         default="faster-whisper",
-        choices=sorted(SPEECH_SOURCES.keys()),
+        choices=sorted(list_speech_backends()),
         help="Speech backend (default: faster-whisper).",
     )
     ap.add_argument("--model", default="bzikst/faster-whisper-large-v3-ru-podlodka")
@@ -87,25 +87,26 @@ def _warn_ignored_flags(args: argparse.Namespace) -> None:
 
 
 def _run_chunk_post_step(session_dir: Path, chunk_chars: int, chunk_overlap: float) -> None:
-    chunk_script = Path(__file__).resolve().parents[1] / "scripts" / "chunk_text.py"
-    if not chunk_script.exists():
-        logger.warning("chunk_text.py not found at %s, skipping chunking", chunk_script)
-        return
+    """Run the post-merge chunker on ``session_dir/merged.txt``.
+
+    Used to spawn ``scripts/chunk_text.py`` via ``subprocess`` — that
+    path silently failed inside the PyInstaller bundle (``scripts/``
+    isn't packaged and ``sys.executable`` points at the bundle exe,
+    not at Python). Now delegates to :func:`core.chunking.chunk_text_file`
+    directly so it works in both source and frozen forms.
+    """
+
     merged_txt = session_dir / "merged.txt"
     if not merged_txt.exists():
         logger.warning("merged.txt not found for chunking: %s", merged_txt)
         return
-    cmd = [
-        sys.executable,
-        str(chunk_script),
-        str(merged_txt),
-        "--chunk_chars",
-        str(chunk_chars),
-        "--overlap",
-        str(chunk_overlap),
-    ]
     logger.info("Chunking %s", merged_txt)
-    subprocess.run(cmd, cwd=str(session_dir), check=True)
+    out_dir = chunk_text_file(
+        merged_txt,
+        chunk_chars=chunk_chars,
+        overlap_ratio=chunk_overlap,
+    )
+    logger.info("Chunks written to %s", out_dir)
 
 
 def cli_main() -> int:
@@ -151,7 +152,7 @@ def cli_main() -> int:
         for d in session_dirs:
             try:
                 _run_chunk_post_step(d, args.chunk_chars, args.chunk_overlap)
-            except subprocess.CalledProcessError:
-                logger.exception("chunk_text.py failed for %s", d)
+            except (FileNotFoundError, ValueError, OSError):
+                logger.exception("chunk_text_file failed for %s", d)
 
     return 0

@@ -12,9 +12,9 @@ The first-run installer has exactly two stages:
 
 Speech-recognition models are **not** installed here — the user is
 asked about them lazily, only when they actually add a speech parser
-to a session from inside the shell (see
-``ui.shell.install_wizard.ensure_backend_installed`` and
-``ui.shell.app`` → ``_on_add_source``). This keeps first-run free of
+to a session from inside the shell. Install / uninstall of individual
+backends is handled through :mod:`core.backend_installers` and driven
+from the Models screen in the QML shell. This keeps first-run free of
 multi-GB questions and lets chat-only users skip the ASR download
 entirely.
 """
@@ -288,8 +288,9 @@ class InstallerWindow:
             self._complete_step("ffmpeg")
 
             # Step 2: PySide6 runtime zip from GitHub Release.
-            # Models are NOT installed here — see
-            # ``ui.shell.install_wizard.ensure_backend_installed``.
+            # Models are NOT installed here — the shell installs each
+            # backend lazily via :mod:`core.backend_installers` when
+            # the user picks it on the Models screen.
             self._begin_step("runtime")
             download_runtime_zip(
                 self.data_dir,

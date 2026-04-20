@@ -12,10 +12,20 @@ import "../controls"
 Item {
     id: root
 
-    property int totalMinutes: 227
-    property real segmentSplitPct: 66.0
+    // Defaults are zero — the ruler renders empty until the host
+    // assigns real session metadata. Hardcoded mock durations used
+    // to live here to make the prototype look alive; they confused
+    // debugging because the ruler carried on showing "3h 47m" even
+    // on a just-opened empty shell.
+    property int totalMinutes: 0
+    property real segmentSplitPct: 0.0
 
     implicitHeight: 22
+
+    // Skip tick-mark and split-marker rendering when the session
+    // has no known duration. Avoids the degenerate Repeater run
+    // (model = 1) that used to paint a single tick at x=0.
+    readonly property bool _hasDuration: totalMinutes > 0
 
     // Thin bottom separator.
     Rectangle {
@@ -28,7 +38,7 @@ Item {
 
     // Tick marks
     Repeater {
-        model: Math.floor(root.totalMinutes / 30) + 1
+        model: root._hasDuration ? Math.floor(root.totalMinutes / 30) + 1 : 0
 
         delegate: Item {
             readonly property int minute: index * 30
@@ -63,6 +73,7 @@ Item {
     // Segment split — vertical dashed line with a scissors badge.
     Item {
         id: splitMark
+        visible: root._hasDuration && root.segmentSplitPct > 0
         x: root.width * (root.segmentSplitPct / 100.0)
         y: 0
         width: 0

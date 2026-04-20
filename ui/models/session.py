@@ -95,10 +95,20 @@ class SessionMeta(QObject):
 
     @Property(str, notify=totalMinutesChanged)
     def segmentsCaption(self) -> str:
-        # "2 сегмента · 3ч 47м" — same string the prototype renders.
+        """Duration caption for the session top bar.
+
+        Returns ``""`` while no duration is known (no session open or
+        peaks worker still running). Previously prepended "2 сегмента"
+        unconditionally — that was a prototype leftover that lied to
+        the user about having detected a Craig split. Segment count
+        can be added back once split discovery is implemented.
+        """
+
+        if self._total_min <= 0:
+            return ""
         h = self._total_min // 60
         m = self._total_min % 60
-        return f"2 сегмента · {h}ч {m:02d}м"
+        return f"{h}ч {m:02d}м"
 
     @Slot(result=str)
     def sessionDir(self) -> str:
@@ -165,9 +175,13 @@ class SessionMeta(QObject):
         if total_min <= self._total_min:
             return
         self._total_min = total_min
-        self._seg_split_min = int(total_min * 2 // 3)
+        # Craig-segment split position is unknown until a real split
+        # discovery step lands — we used to fake it as 2/3 of the
+        # total, which drew a convincing-looking but fabricated split
+        # marker on every fresh session. Leave it at 0 so the ruler
+        # and CraigSegmentsStrip hide themselves until a real value
+        # comes in.
         self.totalMinutesChanged.emit()
-        self.segmentSplitMinutesChanged.emit()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -182,7 +196,11 @@ class TrackEntry:
     role: str              # "GM" | "Игрок" | "Слушатель"
     character: str         # "" for listeners
     excluded: bool         # True when the player has no audio
-    model_id: str          # "gigaam" | "faster-whisper" | "whisper-lg" | ""
+    #: Per-track ASR model id. Empty string means "use the active
+    #: model from :class:`ui.models.model_registry.ModelRegistry`";
+    #: non-empty values pin the row to a specific model regardless
+    #: of what the user later sets as active.
+    model_id: str
     model_override: bool
     peaks: list[float] = field(default_factory=list)
     # 0.0 → 1.0 share of this track that has been transcribed. Mutable
@@ -395,10 +413,16 @@ class TrackListModel(QAbstractListModel):
         """Pick a model for this row from the override popover.
 
         Accepted option IDs:
-          "default"     — clears the override, uses the active default
-          "gigaam"      — GigaAM-v3 (no override flag, same model as default)
-          "whisper-med" — whisper medium override
-          "whisper-lg"  — whisper large override
+          "default"         — clear override; follow ``ModelRegistry.activeModelId``
+          "gigaam"          — pin to GigaAM regardless of active default
+          "faster-whisper"  — pin to faster-whisper regardless of active default
+
+        Earlier builds accepted ``"whisper-med"`` / ``"whisper-lg"`` as
+        separate options, but every whisper-family id resolved to the
+        same ``FasterWhisperSource`` with the single shipped model —
+        the size distinction was cosmetic. Those ids are treated as
+        legacy aliases for ``"faster-whisper"`` to keep any saved
+        per-track state from breaking on first launch after upgrade.
         """
 
         if not (0 <= row < len(self._rows)):
@@ -406,13 +430,13 @@ class TrackListModel(QAbstractListModel):
         t = self._rows[row]
         match option_id:
             case "default":
-                t.model_id = "gigaam"
+                t.model_id = ""
                 t.model_override = False
             case "gigaam":
                 t.model_id = "gigaam"
-                t.model_override = False
-            case "whisper-med" | "whisper-lg":
-                t.model_id = "whisper"
+                t.model_override = True
+            case "faster-whisper" | "whisper" | "whisper-med" | "whisper-lg":
+                t.model_id = "faster-whisper"
                 t.model_override = True
             case _:
                 return
@@ -471,7 +495,7 @@ class TrackListModel(QAbstractListModel):
                 role="Игрок",
                 character="",
                 excluded=False,
-                model_id="gigaam",
+                model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
                 audio_path=path,
@@ -525,7 +549,7 @@ class TrackListModel(QAbstractListModel):
                 role="Игрок",
                 character="",
                 excluded=False,
-                model_id="gigaam",
+                model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
                 audio_path=path,

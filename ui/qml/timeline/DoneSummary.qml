@@ -11,6 +11,7 @@ import "../controls"
 // here beyond the Rectangle.
 Rectangle {
     id: root
+    objectName: "doneSummary"
 
     property string durationLabel: ""
     property string statsLine: ""

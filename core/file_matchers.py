@@ -15,8 +15,7 @@ All ``detect_*`` helpers:
       minimal security sanity check.
 
 The companion :func:`accepts_file_for` is the drop-validation
-gate: it takes a parser key (one of the ``KEY_*`` constants in
-``ui.shell.add_source_dialog``) and a candidate path and returns
+gate: it takes a parser key string and a candidate path and returns
 ``True`` iff the extension matches what that parser can read. The
 parser keys themselves live in the UI layer — we accept them as
 plain strings so this module stays UI-free.
@@ -26,9 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-#: Extensions recognised as speech audio. Kept identical to the
-#: legacy ``ui.shell.app._AUDIO_EXTENSIONS`` set so swapping the
-#: old helper for this one produces the same results.
+#: Extensions recognised as speech audio.
 AUDIO_EXTENSIONS: tuple[str, ...] = (
     ".flac",
     ".wav",
@@ -164,8 +161,7 @@ def detect_combat_logs(session_dir: Path) -> tuple[Path, ...]:
 
 #: Parser keys are duplicated here as module-level strings so
 #: ``core/file_matchers`` doesn't import from ``ui/``. They must
-#: stay in sync with ``ui.shell.add_source_dialog.KEY_*``. The test
-#: suite pins this invariant.
+#: stay in sync with the parser ids the UI picker dialogs emit.
 _KEY_GIGAAM = "gigaam"
 _KEY_FASTER_WHISPER = "faster-whisper"
 _KEY_FVTT_CHAT = "fvtt-chat"

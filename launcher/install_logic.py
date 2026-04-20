@@ -5,8 +5,8 @@ PyInstaller-frozen Python process and lays down only the fixed cost
 payload: ``ffmpeg`` and the PySide6 runtime. No embedded Python, no
 ``pip install`` — everything model-related lives inside
 ``core.backend_installers.install_backend`` and is invoked **lazily**
-from inside the running shell when the user actually needs a speech
-parser (see ``ui.shell.install_wizard.ensure_backend_installed``).
+from inside the running shell when the user picks a backend on the
+Models screen.
 
 What this module is responsible for:
     * ffmpeg download into ``DATA_DIR/tools/ffmpeg`` (the runtime EXE
@@ -79,9 +79,9 @@ RUNTIME_ASSET = "session-transcriber.zip"
 #:     * runtime ~80 MB  -> 75 % (session-transcriber.zip from GitHub
 #:       Release, downloaded + unzipped by bootstrap)
 #:
-#: ASR models are installed on demand from inside the shell (see
-#: ``ui.shell.install_wizard``) and therefore do not participate in
-#: this progress weighting.
+#: ASR models are installed on demand from inside the shell (via
+#: :mod:`core.backend_installers` driven from the Models screen) and
+#: therefore do not participate in this progress weighting.
 STEP_WEIGHTS = {
     "ffmpeg": 25,
     "runtime": 75,

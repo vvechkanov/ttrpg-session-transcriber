@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+from pathlib import Path
 
 from sources.base import Installable, InstallProgress
+from sources.speech._gigaam_paths import default_models_root
 from sources.speech.faster_whisper import (
     FasterWhisperInstallParams,
     FasterWhisperSource,
@@ -116,6 +118,18 @@ def uninstall_backend(backend_id: BackendId) -> None:
     """
     source, params = _resolve(backend_id)
     source.uninstall(params)
+
+
+def models_root_path() -> Path:
+    """Filesystem root under which all installed backends live.
+
+    Thin passthrough to :func:`sources.speech._gigaam_paths
+    .default_models_root` so UI (``ui.models.ModelRegistry``) can
+    surface "Open models folder" without reaching into ``sources/``
+    directly (``ARCHITECTURE.md §3`` dependency rule ``ui → core``).
+    """
+
+    return default_models_root()
 
 
 def _resolve(backend_id: BackendId) -> tuple[Installable, object]:

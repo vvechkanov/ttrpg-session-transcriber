@@ -38,13 +38,27 @@ from core.backend_installers import (
     installed_size_bytes,
     is_backend_installed,
     list_backends,
+    models_root_path,
 )
-from sources.speech._gigaam_paths import default_models_root
 from ui.engines.install_worker import InstallWorker
 
 
 _SETTINGS_KEY_ACTIVE = "models/active_backend"
 _SETTINGS_DEFAULT_ACTIVE = BackendId.GIGAAM_RNNT_FP32
+
+
+#: ModelRegistry enum → ``core.asr.make_source`` string id.
+#:
+#: ModelRegistry speaks install semantics (enum rows in a table),
+#: whereas the ASR dispatcher in ``core.asr`` takes the lowercase
+#: string ids that also live in ``TrackListModel.ModelIdRole``. This
+#: dict is the one place that maps between the two vocabularies, so
+#: :meth:`ModelRegistry.activeModelId` can tell the pipeline which
+#: model to instantiate for tracks that have no per-row override.
+_BACKEND_TO_ASR_ID: dict[BackendId, str] = {
+    BackendId.GIGAAM_RNNT_FP32:           "gigaam",
+    BackendId.FASTER_WHISPER_LARGE_V3_RU: "faster-whisper",
+}
 
 
 @dataclass(frozen=True)
@@ -142,6 +156,12 @@ class ModelRegistry(QAbstractListModel):
     #: worker completes (plain Slot-only would cache the first call).
     installedStateChanged = Signal()
 
+    #: Fires when the user picks a new active backend (or the
+    #: registry promotes one because the QSettings default was
+    #: uninstalled). ``activeModelId`` bindings in QML and the
+    #: pipeline refresh on this signal.
+    activeModelIdChanged = Signal()
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
 
@@ -217,6 +237,20 @@ class ModelRegistry(QAbstractListModel):
         self._settings.setValue(_SETTINGS_KEY_ACTIVE, target.backend_id.value)
         self._settings.sync()
         self._rebuild_and_reset()
+        self.activeModelIdChanged.emit()
+
+    @Property(str, notify=activeModelIdChanged)
+    def activeModelId(self) -> str:
+        """ASR model id for the currently-active backend.
+
+        Returns the same lowercase identifiers that
+        ``core.asr.make_source`` accepts — ``"gigaam"`` or
+        ``"faster-whisper"`` for the two bundled backends. The
+        pipeline reads this when a track has no explicit override so
+        that the Models screen's "active" flag actually drives ASR.
+        """
+
+        return _BACKEND_TO_ASR_ID.get(self._active_id, "gigaam")
 
     @Slot(int)
     def install(self, row: int) -> None:
@@ -255,7 +289,7 @@ class ModelRegistry(QAbstractListModel):
         in the OS file manager — a missing directory can't be opened.
         """
 
-        root = default_models_root()
+        root = models_root_path()
         return str(root) if root.exists() else ""
 
     @Property(int, notify=installedStateChanged)
@@ -323,6 +357,7 @@ class ModelRegistry(QAbstractListModel):
         )
 
     def _rebuild_and_reset(self) -> None:
+        prior_active = self._active_id
         self.beginResetModel()
         self._rows = self._build_rows()
         self.endResetModel()
@@ -330,6 +365,11 @@ class ModelRegistry(QAbstractListModel):
         # installedSizeLabel) so the bottom-of-screen label refreshes
         # after an install/uninstall finishes.
         self.installedStateChanged.emit()
+        # ``_build_rows`` can promote a different backend to active
+        # when the QSettings default is uninstalled. Surface that
+        # shift so bindings on ``activeModelId`` refresh.
+        if self._active_id != prior_active:
+            self.activeModelIdChanged.emit()
 
     def _load_active_id(self) -> BackendId:
         raw = self._settings.value(_SETTINGS_KEY_ACTIVE, _SETTINGS_DEFAULT_ACTIVE.value)

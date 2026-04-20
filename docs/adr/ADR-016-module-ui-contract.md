@@ -1,12 +1,46 @@
 # ADR-016: Module UI Contract
 
-**Status:** Accepted
-**Date:** 2026-04-11
+**Status:** Superseded (2026-04-21) — см. «Superseded by» ниже.
+**Original status:** Accepted — 2026-04-11
 **Related:** ADR-017 (UI toolkit — PySide6),
 `docs/architecture/ui-qt-migration.md`,
 `docs/design/screen-3-session.md`,
 `docs/architecture/module-ui-template-di.md` (теперь — implementation notes,
 канонический источник решения — этот ADR)
+
+---
+
+## Superseded by
+
+Phase 0..11 миграции на QML (ветка `claude/implement-ui-foundation-KviVz`)
+заменили планируемый Qt Widgets + Python-шаблоны подход на QML-шелл с
+QAbstractListModel + контекст-проперти. В этой траектории Module UI
+Contract оказался не нужен:
+
+- Карточки source/merger/renderer стали QML-делегатами (`ui/qml/timeline/
+  TrackLaneRow.qml`, `SourceLaneRow.qml`, `MergerChip.qml`, `OutputChip.qml`).
+  Re-use достигается за счёт биндингов к role-ам модели, а не через
+  фабрики виджетов в Python.
+- Регистрация backend-ов для Models-экрана и per-track override выполнена
+  захардкоженным registry в `core.backend_installers.BACKENDS` и
+  `ui.models.model_registry._PRESENTATION` — простой dict вместо
+  декларативного `UIConfig`. UI-editorial метаданные (vendor, language,
+  subjective speed) живут в UI-слое отдельно от install facts в core.
+- Dependency rules (`ui → core → sources`) по-прежнему соблюдены: UI не
+  импортирует `sources.*` напрямую, всё идёт через `core.asr` и
+  `core.backend_installers` (см. коммит архитектурного рефактора от
+  2026-04-21).
+
+Соответственно, файлы `core/ui_contract.py`, `core/ui_registry.py` и
+`ui/templates/*_template.py` не создавались и не планируются. Файл
+`docs/architecture/module-ui-template-di.md` остаётся как исторический
+контекст, но больше не описывает действующую реализацию.
+
+Этот ADR оставлен в репозитории для истории — он отражает проектное
+решение, принятое для Widgets-ветки миграции, которая была отменена в
+Phase 10 («retire Widgets shell»). Если когда-либо появится третий UI-
+стек (веб-шелл, альтернативный тулкит), пересмотр этого контракта
+разумно начать с нового ADR, а не воскрешения этого.
 
 ---
 

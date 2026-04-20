@@ -11,7 +11,7 @@ Per-session state (phase, tracks, sources, merger settings) lives on
 
 from __future__ import annotations
 
-from PySide6.QtCore import Property, QObject, Signal
+from PySide6.QtCore import Property, QObject, Signal, Slot
 
 
 SCREENS = ("empty", "timeline", "models", "settings")
@@ -31,6 +31,7 @@ class AppModel(QObject):
     mergeProgressChanged = Signal()
     mergeStitchesChanged = Signal()
     doneSummaryChanged = Signal()
+    errorMessageChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -48,9 +49,13 @@ class AppModel(QObject):
 
         # Done-phase summary numbers. Populated when the pipeline
         # finishes; QML reads them for the DoneSummary banner and the
-        # TranscriptPreview stats row. Mock values for the layout
-        # slice — real numbers arrive with the core wiring step.
+        # TranscriptPreview stats row.
         self._done_summary: dict[str, str | int] = {}
+
+        # Set by :class:`ui.engines.pipeline_controller.PipelineController`
+        # when the merger worker errors out — QML renders a FailedBanner
+        # off this string. Cleared on the next ``runAsr`` and on done.
+        self._error_message: str = ""
 
     # ── screen ────────────────────────────────────────────────────────
     @Property(str, notify=screenChanged)
@@ -157,3 +162,22 @@ class AppModel(QObject):
             return
         self._done_summary = dict(data)
         self.doneSummaryChanged.emit()
+
+    # ── errorMessage (surfaces a merge/pipeline failure to QML) ──────
+    @Property(str, notify=errorMessageChanged)
+    def errorMessage(self) -> str:
+        return self._error_message
+
+    @Slot(str)
+    def setErrorMessage(self, message: str) -> None:
+        """Set/clear the failure message. Empty string hides the banner.
+
+        Exposed as a ``Slot`` so QML (the FailedBanner's "Скрыть"
+        handler) can clear the string directly without a controller
+        indirection. Python callers use the same entry point.
+        """
+
+        if self._error_message == message:
+            return
+        self._error_message = message
+        self.errorMessageChanged.emit()

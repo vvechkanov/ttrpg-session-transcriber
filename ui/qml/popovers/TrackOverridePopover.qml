@@ -47,9 +47,17 @@ Popup {
     }
 
     // Which radio option matches the track's current model state.
+    // Whisper sizes (medium / large) used to be separate options, but
+    // the installer ships a single faster-whisper bundle — picking a
+    // size was cosmetic and resolved to the same backend. Sizes will
+    // return once the installer supports multiple ``BackendId``s per
+    // vendor.
     function _currentOptionId() {
         if (!currentOverride) return "default"
-        if (currentModelId === "whisper") return "whisper-med"
+        if (currentModelId === "whisper"
+            || currentModelId === "faster-whisper"
+            || currentModelId === "whisper-med"
+            || currentModelId === "whisper-lg") return "faster-whisper"
         return "gigaam"
     }
 
@@ -58,10 +66,9 @@ Popup {
 
     readonly property var _hue: Hues.forName(trackName)
     readonly property var _options: [
-        { id: "default",     title: "Как у всех (GigaAM-v3 int8)", note: "Активная по умолчанию" },
-        { id: "gigaam",      title: "GigaAM-v3 RNNT",              note: "Быстро, RU, 420 MB" },
-        { id: "whisper-med", title: "faster-whisper medium",       note: "Точнее для тихой речи, RU/EN" },
-        { id: "whisper-lg",  title: "faster-whisper large-v3",     note: "Максимум точности, медленно" }
+        { id: "default",        title: "Как у всех",                 note: "Активная модель с экрана «Модели»" },
+        { id: "gigaam",         title: "GigaAM-v3 RNNT",             note: "Быстро, RU, ~900 MB" },
+        { id: "faster-whisper", title: "faster-whisper large-v3 RU", note: "Точнее для тихой речи, ~3 GB" }
     ]
 
     background: Rectangle {

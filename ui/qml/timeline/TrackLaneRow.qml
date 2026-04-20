@@ -14,7 +14,10 @@ Item {
     id: root
 
     property int gutterWidth: 220
-    property real segmentSplitPct: 66.0
+    // Default 0 — the host passes real SessionMeta.segmentSplitPct
+    // (0 until a folder is opened). The split overlay is hidden at
+    // 0 to avoid drawing a dashed line at the start of the waveform.
+    property real segmentSplitPct: 0.0
 
     // Model row index — needed by inline-edit commit handlers so the
     // TrackListModel can be updated by absolute position.
@@ -42,6 +45,18 @@ Item {
 
     signal nameEdited(string newName)
     signal characterEdited(string newCharacter)
+
+    // When no per-track override is set, the badge falls back to the
+    // globally-active model from ``ModelRegistry``. ``modelRegistry``
+    // is a context property in the QML engine, but unit-test harnesses
+    // that skip it would leave this binding undefined — use optional
+    // chaining and default to "gigaam" so the badge still reads
+    // something rather than going blank.
+    readonly property string _effectiveModelId: modelId.length > 0
+        ? modelId
+        : (typeof modelRegistry !== "undefined" && modelRegistry
+            ? modelRegistry.activeModelId
+            : "gigaam")
 
     // Phase-aware accent colour for the fill overlay.
     //   cached  → green (bars read as "already on disk")
@@ -206,7 +221,12 @@ Item {
                     spacing: 3
 
                     Text {
-                        text: root.modelId === "whisper" ? "Whs" : "gAM"
+                        // "Whs" for any whisper-family id (current
+                        // canonical "faster-whisper", plus legacy
+                        // aliases from saved per-track state), "gAM"
+                        // for gigaam and the empty fallback.
+                        text: root._effectiveModelId.indexOf("whisper") >= 0
+                            ? "Whs" : "gAM"
                         color: root.modelOverride ? Theme.accentDeep : Theme.ink3
                         font.family: Theme.fontMono
                         font.pixelSize: 10
@@ -265,6 +285,7 @@ Item {
 
         // Vertical dashed segment-split line across the waveform.
         Rectangle {
+            visible: root.segmentSplitPct > 0
             x: track.width * (root.segmentSplitPct / 100.0) - 0.5
             y: -6
             width: 1

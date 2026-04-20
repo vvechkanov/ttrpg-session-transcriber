@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 #: Progress stages emitted by :func:`run` through the ``on_stage`` callback.
 #:
 #: The pipeline is synchronous and stage-granular — there's no per-track
-#: progress, intentionally. UI hosts (``ui/shell/run_controller.py``) map
-#: these five stages onto a 0..1 progress bar. The callback is invoked
-#: inside the pipeline thread; hosts are responsible for marshalling the
-#: signal to the GUI thread (QThread.queued connection does this for us).
+#: progress, intentionally. UI hosts map these five stages onto a 0..1
+#: progress bar. The callback is invoked inside the pipeline thread;
+#: hosts are responsible for marshalling the signal to the GUI thread
+#: (``QThread.QueuedConnection`` does this for us).
 PipelineStage = Literal["start", "speech", "chat", "merge", "render", "done"]
 
 #: Callable type for progress callbacks. Receives stage name and optional

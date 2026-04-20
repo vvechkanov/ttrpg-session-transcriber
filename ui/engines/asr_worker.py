@@ -2,7 +2,7 @@
 
 Phase 6 wiring: replaces the Phase 5 time.sleep simulator with a
 real call into the decomposed ASR entry point. Given a pre-built
-speech :class:`sources.base.Source` (shared across the batch so
+speech :class:`core.asr.AsrSource` (shared across the batch so
 weights load once) plus an audio path, this worker:
 
 * runs :func:`core.asr.transcribe_one_track` on the path;
@@ -28,8 +28,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from core.asr import transcribe_one_track
-from sources.base import Source
+from core.asr import AsrSource, transcribe_one_track
 
 
 class AsrWorker(QObject):
@@ -54,7 +53,7 @@ class AsrWorker(QObject):
     #: owning QThread's ``quit`` so every branch tears down the thread.
     finished = Signal()
 
-    def __init__(self, row: int, source: Source, audio_path: Path) -> None:
+    def __init__(self, row: int, source: AsrSource, audio_path: Path) -> None:
         super().__init__()
         self._row = row
         self._source = source

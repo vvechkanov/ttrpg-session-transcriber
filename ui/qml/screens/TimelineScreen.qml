@@ -124,7 +124,11 @@ Rectangle {
                                 overallProgress: root.phase === "merge"
                                     ? (appModel ? appModel.mergeProgress : 0.0)
                                     : (tracksModel ? tracksModel.overallProgress : 0.0)
-                                etaLabel: "~1 мин"
+                                // ETA is not computed yet — pipeline
+                                // emits stage-granular progress, not a
+                                // wall-clock estimate. RunControl hides
+                                // the second line when etaLabel is "".
+                                etaLabel: ""
                                 onRunClicked: pipeline.runAsr()
                                 onCancelClicked: pipeline.cancel()
                                 onOpenOutputClicked: {
@@ -145,6 +149,17 @@ Rectangle {
                         statsLine: (appModel && appModel.doneSummary.statsLine)
                             ? appModel.doneSummary.statsLine
                             : ""
+                    }
+
+                    // ── Failed banner (pipeline/merger errored out) ─
+                    FailedBanner {
+                        visible: root.phase === "failed"
+                        message: appModel ? appModel.errorMessage : ""
+                        onRetryClicked: pipeline.runAsr()
+                        onDismissClicked: {
+                            if (appModel) appModel.setErrorMessage("")
+                            if (appModel) appModel.phase = "idle"
+                        }
                     }
 
                     // ── Timeline card ─────────────────────────────
@@ -204,8 +219,8 @@ Rectangle {
                                     TimelineRuler {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        totalMinutes: sessionMeta ? sessionMeta.totalMinutes : 227
-                                        segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
+                                        totalMinutes: sessionMeta.totalMinutes
+                                        segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }
                             }
@@ -322,8 +337,8 @@ Rectangle {
                                     TimelineRuler {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        totalMinutes: sessionMeta ? sessionMeta.totalMinutes : 227
-                                        segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
+                                        totalMinutes: sessionMeta.totalMinutes
+                                        segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }
                             }
@@ -351,7 +366,7 @@ Rectangle {
                                             Layout.fillWidth: true
                                             trackIndex:    index
                                             gutterWidth:   root._gutterWidth
-                                            segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
+                                            segmentSplitPct: sessionMeta.segmentSplitPct
                                             playerName:    model.name
                                             playerRole:    model.playerRole
                                             character:     model.character
@@ -399,7 +414,7 @@ Rectangle {
                             CraigSegmentsStrip {
                                 Layout.fillWidth: true
                                 gutterWidth: root._gutterWidth
-                                segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
+                                segmentSplitPct: sessionMeta.segmentSplitPct
                             }
                         }
                     }

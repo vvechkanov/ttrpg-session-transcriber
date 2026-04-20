@@ -1,12 +1,13 @@
-"""Entry point for the new PySide6 + QML shell (ADR: QML migration).
+"""Entry point for the PySide6 + QML shell (ADR-017).
 
 Run:
     python -m ui.app_qml
+    # or, equivalently:
+    python -m ui
 
-This host is independent of the legacy QWidgets shell in
-:mod:`ui.shell.app`. Wiring it into ``ui.main()`` happens only after
-the QML shell reaches feature parity — keeping two entry points lets
-us iterate on QML without regressing the shipping GUI.
+The earlier Qt Widgets shell (``ui/shell/*``) and tkinter legacy
+(``ui/gui_legacy.py``) were retired in Phase 10 of the QML migration;
+this module is the only GUI entry point today.
 """
 
 from __future__ import annotations
@@ -67,7 +68,9 @@ def main() -> int:
     tracks_model = TrackListModel()
     sources_model = SourceListModel()
     session_meta = SessionMeta()
-    pipeline = PipelineController(app_model, tracks_model, session_meta)
+    pipeline = PipelineController(
+        app_model, tracks_model, session_meta, model_registry
+    )
 
     # Real ingest: on folder drop, SessionMeta emits the session dir
     # and both list models refresh from core.file_matchers.

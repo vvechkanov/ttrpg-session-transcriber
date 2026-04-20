@@ -24,8 +24,10 @@ Item {
     // values divided by the active-track count.
     property real overallProgress: 0.0
 
-    // Human-readable ETA (computed by the caller).
-    property string etaLabel: "~1 мин"
+    // Human-readable ETA (computed by the caller). Empty string
+    // hides the secondary line — no real estimator yet, so the
+    // default is empty rather than a mocked "~1 мин".
+    property string etaLabel: ""
 
     signal runClicked()
     signal pauseClicked()
@@ -164,9 +166,12 @@ Item {
                 }
 
                 Text {
+                    visible: text.length > 0
                     text: root.phase === "merge"
                         ? "Сборка…"
-                        : (root.etaLabel + " осталось")
+                        : (root.etaLabel.length > 0
+                            ? root.etaLabel + " осталось"
+                            : "")
                     color: Theme.accentDeep
                     opacity: 0.8
                     font.family: Theme.fontSans

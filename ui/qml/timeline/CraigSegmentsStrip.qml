@@ -8,11 +8,18 @@ Item {
     id: root
 
     property int gutterWidth: 220
-    property real segmentSplitPct: 66.0
-    property string segment1Label: "Часть 1 · 0:00 → 2:30"
-    property string segment2Label: "Часть 2 · 2:30 → 3:47"
+    // 0 means "no known Craig split" — the strip stays hidden until a
+    // real split is discovered. Labels are empty by default rather than
+    // the prototype's "Часть 1 · 0:00 → 2:30" mock that made every
+    // fresh launch look like it had already processed a session.
+    property real segmentSplitPct: 0.0
+    property string segment1Label: ""
+    property string segment2Label: ""
 
-    implicitHeight: 34
+    // Hide the strip entirely when there's no split to show. Leaves a
+    // clean bottom edge on the timeline card instead of two empty pills.
+    visible: segmentSplitPct > 0
+    implicitHeight: visible ? 34 : 0
 
     // Gutter caption
     Rectangle {

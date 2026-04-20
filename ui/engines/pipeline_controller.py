@@ -4,7 +4,7 @@ Sits between :class:`AppModel` (phase state) and
 :class:`TrackListModel` (per-track progress / state). QML calls
 :py:meth:`runAsr` to start processing and :py:meth:`cancel` to abort.
 
-Phase 6 runs **all non-excluded tracks sequentially**, one
+Runs **all non-excluded tracks sequentially**, one
 :class:`AsrWorker` at a time on a fresh :class:`QThread`. Sequential
 is the right default per the handoff threading note: each backend
 loads its own model unless shared carefully, and for local use the
@@ -15,32 +15,28 @@ Source instances are cached by ``model_id`` across the batch so a
 picks the same override. Rows that declare an unknown ``model_id``
 or are missing an ``audio_path`` (common when the user has not yet
 dropped a folder) fail fast with a user-visible error.
-
-Cache/per-track skip is still driven by a mock ``_CACHED_ROWS`` set
-— real on-disk cache (``.transcripts/<stem>.json``) lookup lands in
-Phase 8 together with session settings.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
-from core.asr import make_source
+from core.asr import AsrSource, make_source
 from core.discovery import find_fvtt_chat_log
 from domain.annotations import SpeechSegment
-from sources.base import Source
 from ui.engines.asr_worker import AsrWorker
 from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
 from ui.models.session import SessionMeta, TrackListModel
 
-
-# Mock cache policy: pretend row 1 (Boris) already has a transcript on
-# disk, so the pipeline skips it with the "cached" status chip. Real
-# cache lookup is a core/cache.py concern that arrives later.
-_CACHED_ROWS: frozenset[int] = frozenset({1})
+if TYPE_CHECKING:
+    # ModelRegistry imports InstallWorker, which imports this module
+    # through ``ui.engines.__init__``. Keep the type-only import here
+    # so the runtime load order stays linear.
+    from ui.models.model_registry import ModelRegistry
 
 
 def _format_bytes(size: int) -> str:
@@ -81,12 +77,18 @@ class PipelineController(QObject):
         app_model: AppModel,
         tracks: TrackListModel,
         session_meta: SessionMeta | None = None,
+        model_registry: "ModelRegistry | None" = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._app = app_model
         self._tracks = tracks
         self._session = session_meta
+        #: Optional link to :class:`ui.models.model_registry.ModelRegistry`.
+        #: Tracks with an empty ``model_id`` delegate to the registry's
+        #: active backend. Optional so unit tests can construct the
+        #: controller with just a :class:`TrackListModel`.
+        self._registry = model_registry
 
         # Active ASR worker (Phase 6).
         self._thread: QThread | None = None
@@ -105,7 +107,7 @@ class PipelineController(QObject):
         #: batch. Loading a faster-whisper weights file costs several
         #: hundred milliseconds; the cache amortises that to once per
         #: model even if every track picks the same override.
-        self._sources: dict[str, Source] = {}
+        self._sources: dict[str, AsrSource] = {}
 
         #: Accumulates per-row segment lists as each AsrWorker completes.
         #: Flattened when the merge pass spawns.
@@ -132,29 +134,26 @@ class PipelineController(QObject):
         self._tracks.resetProgress()
         self._tracks.resetStates()
         self._app.clearMergeState()
+        self._app.setErrorMessage("")
         if self._output_path:
             self._output_path = ""
             self.outputPathChanged.emit()
         self._cancelled = False
         self._collected_segments = {}
 
-        # Initial marking: every non-excluded row goes into the queue
-        # as "queued", cached rows are removed from the queue and get
-        # their progress snapped to 1.0 so the waveform reads "done".
+        # Initial marking: every non-excluded row is queued. On-disk
+        # cache lookup (skipping rows that already have a transcript)
+        # is a core/cache.py concern and is not wired yet — until it
+        # lands the pipeline re-runs ASR on every non-excluded row.
         self._queue = []
         for row in range(self._tracks.rowCount()):
             if self._is_excluded(row):
                 continue
-            if row in _CACHED_ROWS:
-                self._tracks.setState(row, "cached")
-                self._tracks.setProgress(row, 1.0)
-            else:
-                self._tracks.setState(row, "queued")
-                self._queue.append(row)
+            self._tracks.setState(row, "queued")
+            self._queue.append(row)
 
         if not self._queue:
-            # All eligible tracks were cached — skip ASR and go
-            # straight to the merge pass.
+            # No eligible tracks — skip ASR and go straight to merge.
             self._app.phase = "merge"
             self._spawn_merger()
             return
@@ -208,7 +207,7 @@ class PipelineController(QObject):
             self._advance()
             return
 
-        model_id = self._tracks.modelIdFor(row) or "gigaam"
+        model_id = self._tracks.modelIdFor(row) or self._active_model_id()
         try:
             source = self._get_or_make_source(model_id)
         except (ValueError, RuntimeError) as exc:
@@ -219,7 +218,19 @@ class PipelineController(QObject):
         self._tracks.setState(row, "running")
         self._spawn(row, source, Path(audio_path_str))
 
-    def _get_or_make_source(self, model_id: str) -> Source:
+    def _active_model_id(self) -> str:
+        """Resolve the fallback ASR model id for rows without an override.
+
+        Returns the registry's active backend when one was wired into
+        the controller, otherwise falls back to ``"gigaam"`` so tests
+        and older callers keep working.
+        """
+
+        if self._registry is not None:
+            return self._registry.activeModelId or "gigaam"
+        return "gigaam"
+
+    def _get_or_make_source(self, model_id: str) -> AsrSource:
         """Return the cached Source for ``model_id``, creating it on miss.
 
         Caching across the batch ensures each weights file loads once
@@ -233,7 +244,7 @@ class PipelineController(QObject):
             self._sources[model_id] = make_source(model_id)
         return self._sources[model_id]
 
-    def _spawn(self, row: int, source: Source, audio_path: Path) -> None:
+    def _spawn(self, row: int, source: AsrSource, audio_path: Path) -> None:
         thread = QThread(self)
         worker = AsrWorker(row, source, audio_path)
         worker.moveToThread(thread)
@@ -290,6 +301,9 @@ class PipelineController(QObject):
             # No real session open — nothing to write merged.txt to.
             # Surface as an error phase so the UI stops on "failed"
             # rather than spinning.
+            self._app.setErrorMessage(
+                "Сессия не выбрана — откройте папку перед запуском."
+            )
             self._app.phase = "failed"
             self._sources.clear()
             self.finished.emit()
@@ -377,8 +391,12 @@ class PipelineController(QObject):
 
     @Slot(str)
     def _onMergeError(self, message: str) -> None:
-        # No per-track error to set here — surface via phase=failed for
-        # the slice. A toast / banner shows up in the polish step.
+        # The merger either raised or reported a failure string. Stash
+        # the message on AppModel so QML's FailedBanner can render it
+        # and flip the phase — the banner is keyed on ``phase=failed``.
+        self._app.setErrorMessage(
+            message or "Сборка merged.txt не удалась."
+        )
         self._app.phase = "failed"
 
     @Slot()

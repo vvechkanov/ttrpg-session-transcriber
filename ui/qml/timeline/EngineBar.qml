@@ -9,10 +9,37 @@ import "../controls"
 Rectangle {
     id: root
 
-    // Strings for this slice. Real values come from ModelRegistry
-    // and device selection once those are wired.
-    property string modelName: "GigaAM-v3 RNNT"
-    property string qualifier: "int8 · CPU"
+    // The caller can override for testing. In the app, we leave these
+    // blank so the bindings below pull the active backend's name + disk
+    // size from ``ModelRegistry`` — whatever the user selects on the
+    // Models screen is immediately reflected here without an extra wire.
+    property string modelName: ""
+    property string qualifier: ""
+
+    // Resolve name + qualifier from ModelRegistry when not overridden.
+    // ``entryForActive`` walks the rows for the one flagged active; if
+    // none is installed yet we render a neutral "— · CPU" pill so the
+    // user isn't lied to about which engine is running.
+    function _entryForActive() {
+        if (typeof modelRegistry === "undefined" || !modelRegistry) return null
+        for (var i = 0; i < modelRegistry.rowCount(); i++) {
+            var entry = modelRegistry.entryAt(i)
+            if (entry && entry.active) return entry
+        }
+        return null
+    }
+    readonly property var _activeEntry: {
+        // Re-evaluate when ModelRegistry changes its active row.
+        if (typeof modelRegistry !== "undefined" && modelRegistry)
+            modelRegistry.activeModelId
+        return _entryForActive()
+    }
+    readonly property string _effectiveName: modelName.length > 0
+        ? modelName
+        : (_activeEntry ? _activeEntry.name : "—")
+    readonly property string _effectiveQualifier: qualifier.length > 0
+        ? qualifier
+        : (_activeEntry ? (_activeEntry.size + " · CPU") : "CPU")
 
     signal clicked()
 
@@ -41,7 +68,7 @@ Rectangle {
         RowLayout {
             spacing: 4
             Text {
-                text: root.modelName
+                text: root._effectiveName
                 color: Theme.ink
                 font.family: Theme.fontSans
                 font.pixelSize: 12
@@ -49,7 +76,7 @@ Rectangle {
                 font.letterSpacing: -0.05
             }
             Text {
-                text: "· " + root.qualifier
+                text: "· " + root._effectiveQualifier
                 color: Theme.ink4
                 font.family: Theme.fontSans
                 font.pixelSize: 12

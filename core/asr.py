@@ -27,6 +27,18 @@ from sources.speech.faster_whisper import FasterWhisperSource
 from sources.speech.gigaam import GigaAMPrecision, GigaAMSource, GigaAMVariant
 
 
+#: Alias re-exporting :class:`sources.base.Source` for UI callers.
+#:
+#: The UI layer cannot import from ``sources/`` directly (see
+#: ``ARCHITECTURE.md §3`` — ``ui → core`` only). It needs a type to
+#: annotate the opaque "configured ASR backend" handle that
+#: :func:`make_source` hands out and that :class:`ui.engines.asr_worker
+#: .AsrWorker` consumes; exposing the same class under a core name
+#: keeps the dependency rule clean without introducing a parallel
+#: protocol.
+AsrSource = Source
+
+
 #: Fraction 0..1 of this track's audio that has been processed so far.
 TrackProgress = Callable[[float], None]
 
@@ -72,6 +84,21 @@ def make_source(
             speaker_map=speaker_map,
         )
     raise ValueError(f"unknown ASR model_id: {model_id!r}")
+
+
+def list_speech_backends() -> list[str]:
+    """Names of available speech backends for UI surface area.
+
+    Returned in the same order as the underlying registry. Exposed
+    through ``core`` so UI (argparse ``choices=``, combobox) does not
+    need to reach into ``sources/`` directly.
+    """
+
+    # Local import — avoids paying the cost of loading every speech
+    # backend module just because a caller asked for the list.
+    from sources import list_speech_sources
+
+    return list_speech_sources()
 
 
 def transcribe_one_track(
