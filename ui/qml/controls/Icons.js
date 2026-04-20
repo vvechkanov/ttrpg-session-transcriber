@@ -63,20 +63,34 @@ var box      = "M21 8 V21 H3 V8 " +
                "M1 3 H23 V8 H1 Z " +
                "M10 12 H14";
 
+var folderOpen = "M6 14 L7.5 11.1 A2 2 0 0 1 9.24 10 H20 A2 2 0 0 1 21.94 12.5 L20.4 18.5 A2 2 0 0 1 18.45 20 H4 A2 2 0 0 1 2 18 V5 A2 2 0 0 1 4 3 H7.9 A2 2 0 0 1 9.59 3.9 L10.4 5.1 A2 2 0 0 0 12.07 6 H18 A2 2 0 0 1 20 8 V10";
+
+// Info: outline circle + "i" body (line + dot).
+var info = "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 Z " +
+           "M12 12 V16 " +
+           "M12 8 H12.01";
+
+var chevRight = "M9 6 L15 12 L9 18";
+var chevDown  = "M6 9 L12 15 L18 9";
+
 function byName(name) {
     switch (name) {
-        case "list":     return list;
-        case "zap":      return zap;
-        case "settings": return settings;
-        case "plus":     return plus;
-        case "x":        return xmark;
-        case "check":    return check;
-        case "search":   return search;
-        case "download": return download;
-        case "trash":    return trash;
-        case "folder":   return folder;
-        case "cpu":      return cpu;
-        case "box":      return box;
-        default:         return "";
+        case "list":       return list;
+        case "zap":        return zap;
+        case "settings":   return settings;
+        case "plus":       return plus;
+        case "x":          return xmark;
+        case "check":      return check;
+        case "search":     return search;
+        case "download":   return download;
+        case "trash":      return trash;
+        case "folder":     return folder;
+        case "folderOpen": return folderOpen;
+        case "cpu":        return cpu;
+        case "box":        return box;
+        case "info":       return info;
+        case "chevRight":  return chevRight;
+        case "chevDown":   return chevDown;
+        default:           return "";
     }
 }
