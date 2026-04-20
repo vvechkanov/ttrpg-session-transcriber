@@ -241,7 +241,7 @@ Item {
         anchors.topMargin: 6
         anchors.bottomMargin: 6
 
-        WaveformMock {
+        WaveformCanvas {
             anchors.fill: parent
             peaks: root.peaks
             muted: root.excluded

@@ -1,6 +1,6 @@
 // Per-player hue palette. 6 hand-picked warm colours, same mapping as
 // the HTML prototype's PLAYER_HUES. Avatars use `base`; waveforms use
-// `base` tinted (done inline in WaveformMock).
+// `base` tinted (done inline in WaveformCanvas).
 //
 // Unknown names fall back to the neutral listener hue.
 

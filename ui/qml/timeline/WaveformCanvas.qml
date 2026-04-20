@@ -2,16 +2,20 @@ import QtQuick
 import QtQuick.Layouts
 import App.Theme
 
-// Mock waveform with a phase-driven fill overlay.
+// Waveform with a phase-driven fill overlay.
+//
+// Peaks come from core.peaks.get_or_compute_peaks via PeaksWorker on
+// a background QThread — an ffmpeg-decoded max(abs(x)) reduction
+// cached as <audio>.peaks.bin. An empty peaks list renders an empty
+// lane (used before extraction finishes on ingest).
 //
 // Two passes:
 //   1. `baseColor` — every bar at the "dry" muted grey.
 //   2. `fillColor` — the first `progress * N` bars on top, tinted.
 //
-// When `progress == 0` nothing overlays. The prototype selects the
-// fill colour by per-track status (accent for normal ASR, green for
-// cached, purple for whisper-override, redSoft for failed); the
-// caller passes whichever is appropriate via `fillColor`.
+// The caller picks the fill colour by per-track status (accent for
+// normal ASR, green for cached, purple for whisper-override, redSoft
+// for failed) via the `fillColor` prop.
 Item {
     id: root
 

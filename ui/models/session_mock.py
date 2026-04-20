@@ -35,6 +35,7 @@ from core.file_matchers import (
     detect_combat_logs,
     detect_fvtt_chat_logs,
 )
+from core.peaks import probe_duration
 
 
 # Mock defaults mirror the prototype's hard-coded 3h47m session until a
@@ -111,8 +112,10 @@ class SessionMeta(QObject):
         """Load a real session folder. QML drag/drop hands us a file:// URL.
 
         Derives the session title from the folder name and the campaign
-        from its parent. Duration stays at a placeholder — real audio
-        decode + peaks extraction in Phase 5 will replace it.
+        from its parent. Total duration = max(audio file duration) via
+        ``ffprobe`` (metadata-only, no decode) — fast enough to run
+        synchronously on ingest. Peaks extraction runs on a background
+        thread, orchestrated by :mod:`ui.app_qml`.
         """
 
         path = _url_to_path(folder_url_or_path)
@@ -122,11 +125,22 @@ class SessionMeta(QObject):
         self._session_title = path.name
         parent = path.parent
         self._campaign_title = parent.name if parent and parent.exists() else ""
-        # Placeholder session length until Phase 5 lands peaks + ffprobe.
-        # 180 minutes keeps the ruler and segment-split visually close
-        # to the prototype's 3h47m even on very short tests.
-        self._total_min = 180
-        self._seg_split_min = 120
+
+        # Probe each audio file for duration; session length = longest
+        # track. Sub-second on even a dozen files, runs on the UI thread.
+        from core.file_matchers import detect_audio_files as _detect_audio
+
+        audio_paths = _detect_audio(path)
+        durations = [probe_duration(p) for p in audio_paths]
+        max_seconds = max(durations) if durations else 0.0
+        # Fall back to 180 min when probe fails or folder has no audio,
+        # so the prototype ruler still renders at a reasonable scale.
+        total_min = max(1, int(round(max_seconds / 60.0))) if max_seconds > 0 else 180
+        self._total_min = total_min
+        # Craig splits mid-session on long recordings; for unknown splits
+        # we fake a 2/3-point marker so the strip remains visible.
+        self._seg_split_min = int(total_min * 2 // 3)
+
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
         self.totalMinutesChanged.emit()
@@ -426,16 +440,19 @@ class TrackListModel(QAbstractListModel):
                 [TrackListModel.StateRole, TrackListModel.ErrorRole],
             )
 
+    #: Emitted after :meth:`loadFromDir` has populated rows. Carries
+    #: ``[(row, audio_path_str), ...]`` so :mod:`ui.app_qml` can hand
+    #: the list to a :class:`PeaksWorker` on a background QThread.
+    audioPathsChanged = Signal(list)
+
     @Slot(str)
     def loadFromDir(self, session_dir_str: str) -> None:
         """Replace rows with one per audio file discovered in ``session_dir``.
 
-        Uses :func:`core.file_matchers.detect_audio_files` — the same
-        helper the legacy shell relied on — so Craig mix-down files are
-        skipped automatically. Peaks stay empty until Phase 5 plugs in
-        ``core/peaks.py``; role/character/model defaults match the
-        prototype's initial assignment so the existing delegate
-        styling still reads right.
+        Uses :func:`core.file_matchers.detect_audio_files` — Craig mix-
+        down files are skipped automatically. Peaks start empty; the
+        shell connects :pysig:`audioPathsChanged` to a peaks worker
+        which progressively calls :meth:`setPeaks` per track.
 
         Connected in :mod:`ui.app_qml` to
         :pysig:`SessionMeta.sessionOpened`.
@@ -459,6 +476,24 @@ class TrackListModel(QAbstractListModel):
         ]
         self.endResetModel()
         self.overallProgressChanged.emit()
+        self.audioPathsChanged.emit(
+            [(i, str(p)) for i, p in enumerate(audio_files)]
+        )
+
+    @Slot(int, list)
+    def setPeaks(self, row: int, peaks: list[float]) -> None:
+        """Install waveform peaks for one row.
+
+        Called via a queued connection from :class:`PeaksWorker`. A
+        ``dataChanged`` emission with the single ``PeaksRole`` tells
+        QML to repaint only the affected delegate.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return
+        self._rows[row].peaks = list(peaks)
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.PeaksRole])
 
 
 # ─────────────────────────────────────────────────────────────────────
