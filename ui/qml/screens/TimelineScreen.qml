@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import App.Theme
 import "../controls"
@@ -44,6 +45,19 @@ Rectangle {
             if (tracksModel) {
                 tracksModel.setModelOverride(row, optionId)
             }
+        }
+    }
+
+    // "+ добавить аудиодорожку" → native file picker → append to
+    // TrackListModel. Accepts Craig's FLAC plus common lossy formats;
+    // filter is for convenience, nothing rejects other extensions at
+    // the core layer.
+    FileDialog {
+        id: audioPicker
+        title: "Добавить аудиодорожку"
+        nameFilters: ["Аудио (*.flac *.wav *.ogg *.mp3 *.m4a)", "Все файлы (*)"]
+        onAccepted: {
+            if (tracksModel) tracksModel.appendTrack(selectedFile.toString())
         }
     }
 
@@ -370,6 +384,7 @@ Rectangle {
                                         Layout.fillWidth: true
                                         gutterWidth: root._gutterWidth
                                         label: "добавить аудиодорожку"
+                                        onActivated: audioPicker.open()
                                     }
                                 }
 

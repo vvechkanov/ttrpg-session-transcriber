@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import App.Theme
 import "../controls"
@@ -14,6 +15,20 @@ import "../controls"
 Rectangle {
     id: root
     color: Theme.bg
+
+    // Native OS folder picker triggered by "Выбрать папку…".
+    // onAccepted forwards the selected path to SessionMeta.openSession
+    // the same way the window-wide DropArea does; Main.qml listens on
+    // sessionOpened to flip the screen to Timeline.
+    FolderDialog {
+        id: folderPicker
+        title: "Выберите папку сессии"
+        onAccepted: {
+            if (typeof sessionMeta !== "undefined" && sessionMeta) {
+                sessionMeta.openSession(selectedFolder.toString())
+            }
+        }
+    }
 
     Flickable {
         anchors.fill: parent
@@ -114,12 +129,19 @@ Rectangle {
                                 sizeTag: "md"
                                 iconName: "folderOpen"
                                 text: "Выбрать папку…"
+                                onClicked: folderPicker.open()
                             }
 
                             GhostButton {
                                 sizeTag: "md"
                                 iconName: "folder"
                                 text: "Собрать из нескольких"
+                                enabled: false
+                                // Multi-folder selection: post-MVP.
+                                // Native FolderDialog accepts one
+                                // folder at a time; aggregating
+                                // multiple roots needs its own
+                                // picker flow.
                             }
                         }
 
@@ -144,85 +166,12 @@ Rectangle {
                     }
                 }
 
-                // ── Recent sessions header ────────────────────────
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 40
-                    Layout.bottomMargin: 16
-                    Layout.leftMargin: 4
-                    Layout.rightMargin: 4
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: "Недавние сессии"
-                        color: Theme.ink
-                        font.family: Theme.fontSans
-                        font.pixelSize: 15
-                        font.weight: Font.Bold
-                        font.letterSpacing: -0.2
-                    }
-
-                    // "все сессии →" link-button.
-                    Item {
-                        Layout.preferredWidth: allRow.implicitWidth + 10
-                        Layout.preferredHeight: 20
-
-                        RowLayout {
-                            id: allRow
-                            anchors.centerIn: parent
-                            spacing: 4
-
-                            Text {
-                                text: "все сессии"
-                                color: Theme.ink3
-                                font.family: Theme.fontSans
-                                font.pixelSize: 12
-                            }
-                            SvgIcon {
-                                name: "chevRight"; size: 12
-                                color: Theme.ink3
-                                strokeWidth: 1.7
-                            }
-                        }
-
-                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                    }
-                }
-
-                // ── Recent cards (wrap on narrow widths) ──────────
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 16
-
-                    RecentCard {
-                        title: "Сессия 13 — Отступление"
-                        meta: "7 апр · 3ч 12м · 5 игроков"
-                        status: "done"
-                        gradientFrom: Theme.accentSoft
-                        gradientTo: Theme.accentWash
-                    }
-                    RecentCard {
-                        title: "Сессия 12 — Таверна «Дракон»"
-                        meta: "24 мар · 4ч 01м · 6 игроков"
-                        status: "done"
-                        gradientFrom: "#E6DCF2"
-                        gradientTo: "#F3EDF9"
-                    }
-                    RecentCard {
-                        title: "Сессия 14 — Битва на мосту"
-                        meta: "10 апр · 3ч 47м · 6 игроков"
-                        status: "draft"
-                        gradientFrom: Theme.accentSoft
-                        gradientTo: Theme.accentWash
-                    }
-                    RecentCard {
-                        title: "Сессия 11 — Вход в Подгорье"
-                        meta: "10 мар · 2ч 40м · 5 игроков"
-                        status: "failed"
-                        gradientFrom: Theme.redSoft
-                        gradientTo: "#FCEEE8"
-                    }
-                }
+                // "Недавние сессии" row removed in Phase 11 polish —
+                // the mock card data (Сессия 13/12/14/11) was the
+                // same fake content that tripped users into thinking
+                // the app was running on fixtures. Real recent-sessions
+                // wiring through core.recent_sessions is a post-MVP
+                // follow-up; until then this area stays empty.
 
                 // ── First-install banner ──────────────────────────
                 Rectangle {

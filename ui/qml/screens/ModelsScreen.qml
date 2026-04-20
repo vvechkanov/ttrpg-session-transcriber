@@ -326,14 +326,14 @@ Rectangle {
                                     font.weight: Font.DemiBold
                                 }
                                 Text {
-                                    text: modelRegistry.installedSizeLabel()
+                                    text: modelRegistry.installedSizeLabel
                                     color: Theme.ink2
                                     font.family: Theme.fontMono
                                     font.pixelSize: 12
                                     font.weight: Font.DemiBold
                                 }
                                 Text {
-                                    text: " · " + modelRegistry.installedCount()
+                                    text: " · " + modelRegistry.installedCount
                                           + " из " + modelRegistry.rowCount() + " моделей"
                                     color: Theme.ink2
                                     font.family: Theme.fontSans

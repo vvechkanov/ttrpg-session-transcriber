@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import (
+    Property,
     QAbstractListModel,
     QByteArray,
     QModelIndex,
@@ -133,6 +134,13 @@ class ModelRegistry(QAbstractListModel):
 
     #: Emitted when an install or uninstall fails — (row_index, message).
     installFailed = Signal(int, str)
+
+    #: Fires whenever the set of installed rows changes — install /
+    #: uninstall finished, QSettings setActive applied. QML binds to
+    #: installedCount / installedSizeLabel through this notify so the
+    #: bottom-of-screen "Занято на диске" label re-evaluates after a
+    #: worker completes (plain Slot-only would cache the first call).
+    installedStateChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -250,13 +258,13 @@ class ModelRegistry(QAbstractListModel):
         root = default_models_root()
         return str(root) if root.exists() else ""
 
-    @Slot(result=int)
+    @Property(int, notify=installedStateChanged)
     def installedCount(self) -> int:
         """Number of rows that are actually on disk."""
 
         return sum(1 for r in self._rows if r.installed)
 
-    @Slot(result=str)
+    @Property(str, notify=installedStateChanged)
     def installedSizeLabel(self) -> str:
         """Human-readable total size across installed backends."""
 
@@ -318,6 +326,10 @@ class ModelRegistry(QAbstractListModel):
         self.beginResetModel()
         self._rows = self._build_rows()
         self.endResetModel()
+        # Notify QML-bound Q_PROPERTY aggregates (installedCount,
+        # installedSizeLabel) so the bottom-of-screen label refreshes
+        # after an install/uninstall finishes.
+        self.installedStateChanged.emit()
 
     def _load_active_id(self) -> BackendId:
         raw = self._settings.value(_SETTINGS_KEY_ACTIVE, _SETTINGS_DEFAULT_ACTIVE.value)

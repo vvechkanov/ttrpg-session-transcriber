@@ -1,15 +1,12 @@
 """Session-level view-models for the Timeline screen.
 
-Ships with the prototype's hard-coded 3h47m / 6-player session as the
-first-launch default so the layout renders before the user opens
-anything. :meth:`SessionMeta.openSession` swaps those defaults for
-values discovered from a real folder via :mod:`core.file_matchers` —
-tracks come from ``detect_audio_files``, sources from
-``detect_fvtt_chat_logs`` + ``detect_combat_logs``.
-
-The file name still says ``_mock`` because Phase 4 keeps the mock
-defaults alongside the real-ingest path; Phase 10 renames to
-``session.py`` once the mocks are retired.
+Starts empty on first launch; populated only when the user drops a
+folder or picks one via the Empty-screen "Выбрать папку…" button.
+:meth:`SessionMeta.openSession` discovers tracks via
+:func:`core.file_matchers.detect_audio_files` and sources via
+:func:`core.file_matchers.detect_fvtt_chat_logs` +
+:func:`core.file_matchers.detect_combat_logs`, then emits
+``sessionOpened`` so the two list models refresh.
 """
 
 from __future__ import annotations
@@ -38,13 +35,6 @@ from core.file_matchers import (
 from core.peaks import probe_duration
 
 
-# Mock defaults mirror the prototype's hard-coded 3h47m session until a
-# real folder is dropped onto the Timeline. The ruler and the Craig-
-# segments strip both read these.
-TOTAL_MIN: int = 227        # 3h47m
-SEG_SPLIT_MIN: int = 150    # 2h30m
-
-SEG1_END_PCT: float = (SEG_SPLIT_MIN / TOTAL_MIN) * 100.0  # ~66%
 
 
 def _url_to_path(url_or_path: str) -> Path:
@@ -73,10 +63,9 @@ class SessionMeta(QObject):
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._session_dir: Path | None = None
-        # Clean defaults — no mock "Сессия 14" visible before the user
-        # drops a folder. openSession() populates real values; the
-        # EmptyScreen is shown until then (AppModel.screen defaults to
-        # "empty" now).
+        # Empty defaults — openSession() populates real values from
+        # the folder the user opens; until then the shell lands on
+        # EmptyScreen (AppModel.screen defaults to "empty").
         self._total_min = 0
         self._seg_split_min = 0
         self._session_title = ""
@@ -154,9 +143,8 @@ class SessionMeta(QObject):
         audio_paths = _detect_audio(path)
         durations = [probe_duration(p) for p in audio_paths]
         max_seconds = max(durations) if durations else 0.0
-        # No mock fallback duration — if ffprobe can't read a single
-        # track, the ruler renders empty rather than faking 3 h. User
-        # confusion about fake content > graceful degradation here.
+        # If ffprobe can't read a single track, the ruler renders
+        # empty rather than faking a duration.
         total_min = max(1, int(round(max_seconds / 60.0))) if max_seconds > 0 else 0
         self._total_min = total_min
         # Craig splits mid-session on long recordings; for unknown
@@ -200,17 +188,14 @@ class TrackEntry:
     state: str = "idle"
     # Set when `state == "failed"` — message shown to the user.
     error_message: str = ""
-    # Absolute path to this track's audio file on disk. ``None`` for
-    # prototype mock rows that exist before a folder is dropped; the
-    # Phase 6 PipelineController errors-out such rows with a clear
-    # message instead of crashing.
+    # Absolute path to this track's audio file on disk. ``None`` is
+    # reserved for tests; PipelineController surfaces the "no audio
+    # path" case as a per-track error rather than crashing.
     audio_path: Path | None = None
 
 
-#: TrackListModel starts empty. Mock players were removed in Phase 11
-#: polish — the app only ever shows real tracks after the user drops
-#: a session folder onto the shell (SessionMeta.openSession populates
-#: both list models through the sessionOpened signal).
+#: TrackListModel starts empty. Populated only after the user opens
+#: a folder — SessionMeta.openSession drives it through sessionOpened.
 _TRACK_ROWS: list[TrackEntry] = []
 
 
@@ -492,8 +477,8 @@ class TrackListModel(QAbstractListModel):
         """Return the absolute audio path for ``row`` or "" if unknown.
 
         Phase 6's PipelineController uses this to hand each AsrWorker
-        the file it should transcribe. Mock rows (no drop yet) return
-        an empty string and the worker reports a user-visible error.
+        the file it should transcribe. Tests (no drop yet) return an
+        empty string and the worker reports a user-visible error.
         """
 
         if not (0 <= row < len(self._rows)):
@@ -508,6 +493,37 @@ class TrackListModel(QAbstractListModel):
         if not (0 <= row < len(self._rows)):
             return ""
         return self._rows[row].model_id
+
+    @Slot(str)
+    def appendTrack(self, audio_path_url: str) -> None:
+        """Append one audio file to the list (used by the "+ добавить
+        аудиодорожку" row). Accepts a ``file://`` URL (QML FileDialog
+        emits one) or a plain path.
+        """
+
+        path = _url_to_path(audio_path_url)
+        if not path.is_file():
+            return
+
+        row = len(self._rows)
+        self.beginInsertRows(QModelIndex(), row, row)
+        self._rows.append(
+            TrackEntry(
+                name=path.stem,
+                role="Игрок",
+                character="",
+                excluded=False,
+                model_id="gigaam",
+                model_override=False,
+                peaks=[],
+                audio_path=path,
+            )
+        )
+        self.endInsertRows()
+        self.overallProgressChanged.emit()
+        # Trigger peaks extraction for just the new row via the same
+        # audioPathsChanged signal shape the shell listens on.
+        self.audioPathsChanged.emit([(row, str(path))])
 
     @Slot(int, list)
     def setPeaks(self, row: int, peaks: list[float]) -> None:

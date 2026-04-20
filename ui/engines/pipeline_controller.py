@@ -34,7 +34,7 @@ from sources.base import Source
 from ui.engines.asr_worker import AsrWorker
 from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
-from ui.models.session_mock import SessionMeta, TrackListModel
+from ui.models.session import SessionMeta, TrackListModel
 
 
 # Mock cache policy: pretend row 1 (Boris) already has a transcript on

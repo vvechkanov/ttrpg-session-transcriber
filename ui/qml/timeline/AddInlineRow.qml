@@ -44,8 +44,7 @@ Item {
         width: root.gutterWidth
         height: parent.height - 1
         color: hoverMa.containsMouse ? Theme.cardAlt : "transparent"
-
-        Behavior on color { ColorAnimation { duration: Theme.animFast } }
+        // Behavior on color removed — see controls/PrimaryButton for why.
 
         Rectangle {
             anchors.right: parent.right

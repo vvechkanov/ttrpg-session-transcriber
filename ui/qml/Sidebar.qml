@@ -110,81 +110,12 @@ Rectangle {
             }
         }
 
-        // Flexible gap pushes the "Recent" block to the bottom.
+        // Flexible gap pushes everything to the top.
         Item { Layout.fillHeight: true; Layout.fillWidth: true }
 
-        // ── Recent sessions (only on Sessions group) ──────────────
-        ColumnLayout {
-            visible: root.currentScreen === "timeline" || root.currentScreen === "empty"
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-            Layout.bottomMargin: 14
-            spacing: 6
-
-            Text {
-                text: "НЕДАВНИЕ"
-                color: Theme.ink4
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontMicro
-                font.weight: Font.Bold
-                font.letterSpacing: 1.2
-            }
-
-            // Placeholder data — real recent list comes from a model
-            // later in the implementation order (ModelsScreen / Session
-            // list step). Keeping it inline here preserves the visual
-            // weight of the sidebar while we wire models up.
-            Repeater {
-                model: [
-                    { date: "2025-01-14", name: "Сессия 14 · Мост Гоблинов", active: true },
-                    { date: "2025-01-07", name: "Сессия 13 · Таверна",       active: false },
-                    { date: "2024-12-20", name: "Сессия 12 · Пещера",        active: false }
-                ]
-
-                delegate: Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: column.implicitHeight + 12
-                    radius: Theme.radiusSm
-                    color: modelData.active ? Theme.cardAlt : "transparent"
-
-                    // 2px left accent bar on the active item.
-                    Rectangle {
-                        visible: modelData.active
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        width: 2
-                        color: Theme.accent
-                    }
-
-                    ColumnLayout {
-                        id: column
-                        anchors.fill: parent
-                        anchors.leftMargin: 8
-                        anchors.rightMargin: 8
-                        anchors.topMargin: 6
-                        anchors.bottomMargin: 6
-                        spacing: 1
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: modelData.name
-                            color: Theme.ink
-                            font.family: Theme.fontSans
-                            font.pixelSize: 11
-                            font.weight: modelData.active ? Font.DemiBold : Font.Medium
-                            elide: Text.ElideRight
-                        }
-                        Text {
-                            text: modelData.date
-                            color: Theme.ink4
-                            font.family: Theme.fontMono
-                            font.pixelSize: 10
-                        }
-                    }
-                }
-            }
-        }
+        // "НЕДАВНИЕ" sidebar block removed in Phase 11 polish — the
+        // hardcoded three-item list was the prototype's placeholder
+        // data. A real recent-sessions model (core.recent_sessions
+        // already has the storage) is a post-MVP follow-up.
     }
 }
