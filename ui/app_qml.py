@@ -77,6 +77,10 @@ def main() -> int:
     # and both list models refresh from core.file_matchers.
     session_meta.sessionOpened.connect(tracks_model.loadFromDir)
     session_meta.sessionOpened.connect(sources_model.loadFromDir)
+    # SourceListModel builds an absolute-time TimelineWindow during
+    # loadFromDir (feature #3 iter 3a); wiring the back-reference lets
+    # it publish the window into SessionMeta for other consumers.
+    sources_model.setSessionMeta(session_meta)
 
     # Peaks extraction: once tracks populate, kick off a background
     # PeaksWorker. Strong refs (_peaks_*) keep the QThread alive until

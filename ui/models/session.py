@@ -33,6 +33,13 @@ from core.file_matchers import (
     detect_fvtt_chat_logs,
 )
 from core.peaks import probe_duration
+from core.timeline_window import (
+    TimelineWindow,
+    build_window,
+    chat_span,
+    parse_combat_file,
+    parse_info_start,
+)
 
 
 
@@ -70,6 +77,13 @@ class SessionMeta(QObject):
         self._seg_split_min = 0
         self._session_title = ""
         self._campaign_title = ""
+        # Absolute-time window (Iteration 3a of feature #3). Internal
+        # — QML neither reads nor writes this. ``SourceListModel``
+        # queries it through :meth:`timelineWindow` when it needs to
+        # map combat / chat wall-clock timestamps to percentages.
+        # ``None`` means "no window was built" and source rows should
+        # fall back to the legacy 0..100% full-width layout.
+        self._timeline_window: TimelineWindow | None = None
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
@@ -151,12 +165,38 @@ class SessionMeta(QObject):
         self._campaign_title = parent.name if parent and parent.exists() else ""
         self._total_min = 0
         self._seg_split_min = 0
+        # Drop any stale window from a previous session — SourceListModel
+        # rebuilds it from scratch on the sessionOpened signal below.
+        self._timeline_window = None
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
         self.totalMinutesChanged.emit()
         self.segmentSplitMinutesChanged.emit()
         self.sessionOpened.emit(str(path))
+
+    def timelineWindow(self) -> TimelineWindow | None:
+        """Return the absolute-time window for this session, or ``None``.
+
+        Python-side accessor (not a ``Slot`` — QML has no use for the
+        raw datetimes). :class:`SourceListModel` calls this after
+        discovery to map combat / chat timestamps to ``startPct`` /
+        ``endPct``. ``None`` when no window could be built (e.g. no
+        ``info.txt``); callers should fall back to 0..100%.
+        """
+
+        return self._timeline_window
+
+    def setTimelineWindow(self, window: TimelineWindow | None) -> None:
+        """Store the timeline window for this session.
+
+        Called by :meth:`SourceListModel.loadFromDir` after it builds
+        the window from ``info.txt`` + discovered chat / combat files.
+        Not a ``Slot``: the type isn't QML-friendly and the UI has no
+        business mutating this anyway.
+        """
+
+        self._timeline_window = window
 
     @Slot(float)
     def setTotalSeconds(self, seconds: float) -> None:
@@ -611,6 +651,11 @@ class SourceListModel(QAbstractListModel):
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._rows: list[SourceEntry] = list(_SOURCE_ROWS)
+        #: Optional link back to the owning :class:`SessionMeta`.
+        #: Populated via :meth:`setSessionMeta` from :mod:`ui.app_qml`.
+        #: When present, :meth:`loadFromDir` publishes the timeline
+        #: window it builds so other consumers can read it back.
+        self._session_meta: SessionMeta | None = None
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -630,38 +675,98 @@ class SourceListModel(QAbstractListModel):
     def roleNames(self) -> dict[int, QByteArray]:
         return {role: QByteArray(name) for role, name in self._ROLES.items()}
 
+    def setSessionMeta(self, session_meta: SessionMeta) -> None:
+        """Attach the :class:`SessionMeta` instance this list belongs to.
+
+        Not a ``Slot`` — only Python glue (``ui.app_qml``) ever calls
+        this. Once attached, :meth:`loadFromDir` writes the built
+        :class:`TimelineWindow` back to the meta via
+        :meth:`SessionMeta.setTimelineWindow` so other Python code
+        (tests, future consumers) can read it.
+        """
+
+        self._session_meta = session_meta
+
     @Slot(str)
     def loadFromDir(self, session_dir_str: str) -> None:
         """Replace rows with discovered chat logs + combat logs.
 
-        Each match is rendered as a full-width lane (0..100%) because
-        precise timeline offsets require timestamp parsing that's out
-        of scope until Phase 7 when the merger actually consumes the
-        files. The label doubles as the section caption the
-        prototype's section header uses.
+        Row ``startPct`` / ``endPct`` are now computed against an
+        absolute-time :class:`TimelineWindow` (feature #3 iter 3a).
+        ``window`` is derived from Craig's ``info.txt`` + the
+        discovered chat log span + combat metadata. When no window
+        can be built (e.g. ``info.txt`` missing) every row falls back
+        to the legacy full-width 0..100% layout so the Timeline
+        screen still renders.
 
         Connected in :mod:`ui.app_qml` to
         :pysig:`SessionMeta.sessionOpened`.
         """
 
         session_dir = Path(session_dir_str)
+        chat_paths = detect_fvtt_chat_logs(session_dir)
+        combat_paths = detect_combat_logs(session_dir)
+
+        info_start = parse_info_start(session_dir / "info.txt")
+
+        # Chat span is derived from the *first* chat log only. Real
+        # sessions carry at most one fvtt-log-*.txt per export; if
+        # more show up later we'd need a policy for merging spans.
+        chat_range: tuple | None = None
+        if chat_paths:
+            chat_range = chat_span(chat_paths[0], info_start)
+
+        combat_metas: list = []
+        for combat_path in combat_paths:
+            meta = parse_combat_file(combat_path)
+            if meta is not None:
+                combat_metas.append(meta)
+
+        window = build_window(
+            info_start=info_start,
+            max_track_duration=None,  # tracks probe asynchronously; 3a ignores them
+            chat=chat_range,
+            combats=combat_metas,
+        )
+
+        # Publish the window back to SessionMeta so other Python-side
+        # consumers (tests, future ruler widgets) can read it.
+        if self._session_meta is not None:
+            self._session_meta.setTimelineWindow(window)
 
         new_rows: list[SourceEntry] = []
-        for path in detect_fvtt_chat_logs(session_dir):
+        for path in chat_paths:
+            span = chat_span(path, info_start) if window is not None else None
+            if window is not None and span is not None:
+                start_pct = window.pct_for(span[0])
+                end_pct = window.pct_for(span[1])
+            else:
+                start_pct, end_pct = 0.0, 100.0
             new_rows.append(SourceEntry(
                 parser_id="foundry-chat",
                 label="Foundry чат",
                 file_name=path.name,
-                start_pct=0.0,
-                end_pct=100.0,
+                start_pct=start_pct,
+                end_pct=end_pct,
             ))
-        for path in detect_combat_logs(session_dir):
+
+        # Re-parse each combat file so row order matches ``combat_paths``
+        # (discovery order). ``combat_metas`` filtered failures; we want
+        # to still render a full-width row for malformed combats so the
+        # user can tell something's off.
+        for path in combat_paths:
+            meta = parse_combat_file(path)
+            if window is not None and meta is not None:
+                start_pct = window.pct_for(meta.started_at)
+                end_pct = window.pct_for(meta.ended_at)
+            else:
+                start_pct, end_pct = 0.0, 100.0
             new_rows.append(SourceEntry(
                 parser_id="combat-log",
                 label="Боевой лог",
                 file_name=path.name,
-                start_pct=0.0,
-                end_pct=100.0,
+                start_pct=start_pct,
+                end_pct=end_pct,
             ))
 
         self.beginResetModel()
