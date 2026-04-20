@@ -15,9 +15,10 @@ Any row marked *cached* is skipped with its progress snapped to 1.0.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
 from ui.engines.asr_worker import AsrWorker
+from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
 from ui.models.session_mock import TrackListModel
 
@@ -41,6 +42,12 @@ class PipelineController(QObject):
     #: cancelled). QML can hook this to flip UI affordances.
     finished = Signal()
 
+    outputPathChanged = Signal()
+
+    @Property(str, notify=outputPathChanged)
+    def outputPath(self) -> str:
+        return self._output_path
+
     def __init__(
         self,
         app_model: AppModel,
@@ -50,11 +57,23 @@ class PipelineController(QObject):
         super().__init__(parent)
         self._app = app_model
         self._tracks = tracks
+
+        # Active ASR worker (step 6).
         self._thread: QThread | None = None
         self._worker: AsrWorker | None = None
 
+        # Active merger worker (step 7). Kept as a separate pair — the
+        # merge pass starts *after* the ASR queue drains and plays a
+        # completely different role in the pipeline.
+        self._merge_thread: QThread | None = None
+        self._merge_worker: MergerWorker | None = None
+
         self._queue: list[int] = []
         self._cancelled: bool = False
+
+        #: Filesystem path reported by the merger on success. QML reads
+        #: it through :pyattr:`outputPath` once the done phase is up.
+        self._output_path: str = ""
 
     # ── QML API ───────────────────────────────────────────────────────
     @Slot()
@@ -67,9 +86,15 @@ class PipelineController(QObject):
 
         if self._thread is not None and self._thread.isRunning():
             return
+        if self._merge_thread is not None and self._merge_thread.isRunning():
+            return
 
         self._tracks.resetProgress()
         self._tracks.resetStates()
+        self._app.clearMergeState()
+        if self._output_path:
+            self._output_path = ""
+            self.outputPathChanged.emit()
         self._cancelled = False
 
         # Initial marking: every non-excluded row goes into the queue
@@ -87,9 +112,10 @@ class PipelineController(QObject):
                 self._queue.append(row)
 
         if not self._queue:
-            # All eligible tracks were cached — jump straight to done.
-            self._app.phase = "done"
-            self.finished.emit()
+            # All eligible tracks were cached — skip ASR and go
+            # straight to the merge pass.
+            self._app.phase = "merge"
+            self._spawn_merger()
             return
 
         self._app.phase = "asr"
@@ -108,6 +134,8 @@ class PipelineController(QObject):
         self._cancelled = True
         if self._worker is not None:
             self._worker.cancel()
+        if self._merge_worker is not None:
+            self._merge_worker.cancel()
 
     # ── Internals ─────────────────────────────────────────────────────
     def _is_excluded(self, row: int) -> bool:
@@ -144,7 +172,7 @@ class PipelineController(QObject):
         thread.start()
 
     def _finish_pipeline(self) -> None:
-        """Close out the pipeline after the queue drains or is aborted."""
+        """Close out the ASR queue — either advance to merge, or abort."""
 
         if self._cancelled:
             # Leave any completed rows' "done" / "cached" status; clear
@@ -155,9 +183,72 @@ class PipelineController(QObject):
                 if state in ("queued", "running"):
                     self._tracks.setState(row, "idle")
                     self._tracks.setProgress(row, 0.0)
+            self._app.clearMergeState()
             self._app.phase = "idle"
-        else:
-            self._app.phase = "done"
+            self.finished.emit()
+            return
+
+        # ASR queue drained cleanly — start the merge pass. Even if
+        # every row failed, we still kick merger off (it will write an
+        # empty transcript) so the UI has a definitive done state.
+        self._app.phase = "merge"
+        self._spawn_merger()
+
+    # ── Merger orchestration ──────────────────────────────────────────
+    def _spawn_merger(self) -> None:
+        thread = QThread(self)
+        worker = MergerWorker()
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+
+        worker.progress.connect(self._onMergeProgress)
+        worker.gapFilled.connect(self._onGapFilled)
+        worker.done.connect(self._onMergeDone)
+        worker.error.connect(self._onMergeError)
+
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._onMergeThreadFinished)
+
+        self._merge_thread = thread
+        self._merge_worker = worker
+        thread.start()
+
+    @Slot(float)
+    def _onMergeProgress(self, pct: float) -> None:
+        self._app.mergeProgress = pct
+
+    @Slot(float, str)
+    def _onGapFilled(self, position_pct: float, source_id: str) -> None:
+        self._app.addStitch(position_pct)
+
+    @Slot(str)
+    def _onMergeDone(self, path: str) -> None:
+        self._output_path = path
+        self.outputPathChanged.emit()
+        self._app.phase = "done"
+
+    @Slot(str)
+    def _onMergeError(self, message: str) -> None:
+        # No per-track error to set here — surface via phase=failed for
+        # the slice. A toast / banner shows up in the polish step.
+        self._app.phase = "failed"
+
+    @Slot()
+    def _onMergeThreadFinished(self) -> None:
+        if self._merge_worker is not None:
+            self._merge_worker.deleteLater()
+            self._merge_worker = None
+        if self._merge_thread is not None:
+            self._merge_thread.deleteLater()
+            self._merge_thread = None
+
+        # If the user cancelled mid-merge we still need to return to
+        # idle — the natural done/error paths already moved phase.
+        if self._cancelled and self._app.phase == "merge":
+            self._app.clearMergeState()
+            self._app.phase = "idle"
+
         self.finished.emit()
 
     # ── Signal handlers (main thread) ─────────────────────────────────

@@ -11,6 +11,7 @@ Step 6 swaps the simulated loop for a real ``core.asr`` call.
 """
 
 from ui.engines.asr_worker import AsrWorker
+from ui.engines.merger_worker import MergerWorker
 from ui.engines.pipeline_controller import PipelineController
 
-__all__ = ["AsrWorker", "PipelineController"]
+__all__ = ["AsrWorker", "MergerWorker", "PipelineController"]

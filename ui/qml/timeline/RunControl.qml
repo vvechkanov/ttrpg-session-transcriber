@@ -109,7 +109,9 @@ Item {
                 }
             }
 
-            // Percent + ETA
+            // Percent + ETA. Merge phase shows "Сборка…" instead of a
+            // second-line ETA since gap stitching is quick enough that
+            // an ETA feels misleading.
             ColumnLayout {
                 spacing: 1
 
@@ -123,7 +125,9 @@ Item {
                 }
 
                 Text {
-                    text: root.etaLabel + " осталось"
+                    text: root.phase === "merge"
+                        ? "Сборка…"
+                        : (root.etaLabel + " осталось")
                     color: Theme.accentDeep
                     opacity: 0.8
                     font.family: Theme.fontSans

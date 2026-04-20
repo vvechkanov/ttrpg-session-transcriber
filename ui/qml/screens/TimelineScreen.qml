@@ -94,9 +94,9 @@ Rectangle {
 
                             RunControl {
                                 phase: root.phase
-                                overallProgress: tracksModel
-                                    ? tracksModel.overallProgress
-                                    : 0.0
+                                overallProgress: root.phase === "merge"
+                                    ? (appModel ? appModel.mergeProgress : 0.0)
+                                    : (tracksModel ? tracksModel.overallProgress : 0.0)
                                 etaLabel: "~1 мин"
                                 onRunClicked: pipeline.runAsr()
                                 onCancelClicked: pipeline.cancel()
@@ -275,35 +275,53 @@ Rectangle {
                                 }
                             }
 
-                            // ── Track rows ────────────────────────
-                            ColumnLayout {
+                            // ── Track rows (with stitch overlay) ──
+                            // Wrapped in an Item so StitchOverlay can
+                            // sit absolutely on top of just the track
+                            // lanes — not the whole timeline card.
+                            Item {
                                 Layout.fillWidth: true
-                                spacing: 0
+                                implicitHeight: tracksCol.implicitHeight
 
-                                Repeater {
-                                    model: tracksModel
+                                ColumnLayout {
+                                    id: tracksCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    spacing: 0
 
-                                    delegate: TrackLaneRow {
+                                    Repeater {
+                                        model: tracksModel
+
+                                        delegate: TrackLaneRow {
+                                            Layout.fillWidth: true
+                                            gutterWidth: root._gutterWidth
+                                            segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
+                                            playerName:    model.name
+                                            playerRole:    model.playerRole
+                                            character:     model.character
+                                            excluded:      model.excluded
+                                            modelId:       model.modelId
+                                            modelOverride: model.override
+                                            peaks:         model.peaks
+                                            progress:      model.progress
+                                            trackState:    model.trackState
+                                            errorMessage:  model.errorMessage
+                                        }
+                                    }
+
+                                    AddInlineRow {
                                         Layout.fillWidth: true
                                         gutterWidth: root._gutterWidth
-                                        segmentSplitPct: sessionMeta ? sessionMeta.segmentSplitPct : 66.0
-                                        playerName:    model.name
-                                        playerRole:    model.playerRole
-                                        character:     model.character
-                                        excluded:      model.excluded
-                                        modelId:       model.modelId
-                                        modelOverride: model.override
-                                        peaks:         model.peaks
-                                        progress:      model.progress
-                                        trackState:    model.trackState
-                                        errorMessage:  model.errorMessage
+                                        label: "добавить аудиодорожку"
                                     }
                                 }
 
-                                AddInlineRow {
-                                    Layout.fillWidth: true
+                                StitchOverlay {
+                                    anchors.fill: tracksCol
+                                    visible: root.phase === "merge"
                                     gutterWidth: root._gutterWidth
-                                    label: "добавить аудиодорожку"
+                                    stitches: appModel ? appModel.mergeStitches : []
                                 }
                             }
 
@@ -320,7 +338,10 @@ Rectangle {
                         Layout.fillWidth: true
                         spacing: 12
 
-                        MergerChip {}
+                        MergerChip {
+                            active: root.phase === "merge"
+                            gapCount: appModel ? appModel.mergeStitches.length : 0
+                        }
 
                         Rectangle {
                             Layout.fillWidth: true

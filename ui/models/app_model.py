@@ -28,6 +28,8 @@ class AppModel(QObject):
     screenChanged = Signal()
     currentSessionIdChanged = Signal()
     phaseChanged = Signal()
+    mergeProgressChanged = Signal()
+    mergeStitchesChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -37,6 +39,10 @@ class AppModel(QObject):
         self._screen: str = "timeline"
         self._current_session_id: str = ""
         self._phase: str = "idle"
+        self._merge_progress: float = 0.0
+        # Stitch positions in timeline %. Live-populated while the
+        # MergerWorker runs; QML renders one line per entry.
+        self._merge_stitches: list[float] = []
 
     # ── screen ────────────────────────────────────────────────────────
     @Property(str, notify=screenChanged)
@@ -77,3 +83,41 @@ class AppModel(QObject):
             return
         self._phase = value
         self.phaseChanged.emit()
+
+    # ── mergeProgress (0..1) ──────────────────────────────────────────
+    @Property(float, notify=mergeProgressChanged)
+    def mergeProgress(self) -> float:
+        return self._merge_progress
+
+    @mergeProgress.setter  # type: ignore[no-redef]
+    def mergeProgress(self, value: float) -> None:
+        clamped = 0.0 if value < 0.0 else (1.0 if value > 1.0 else value)
+        if self._merge_progress == clamped:
+            return
+        self._merge_progress = clamped
+        self.mergeProgressChanged.emit()
+
+    # ── mergeStitches (list of timeline-% positions) ──────────────────
+    @Property("QVariantList", notify=mergeStitchesChanged)
+    def mergeStitches(self) -> list[float]:
+        return list(self._merge_stitches)
+
+    def addStitch(self, position_pct: float) -> None:
+        """Append a stitch marker. Not a ``Slot`` — this is Python-only."""
+
+        self._merge_stitches.append(float(position_pct))
+        self.mergeStitchesChanged.emit()
+
+    def clearMergeState(self) -> None:
+        """Reset merge progress and stitches (called on re-run / cancel)."""
+
+        changed = False
+        if self._merge_progress != 0.0:
+            self._merge_progress = 0.0
+            self.mergeProgressChanged.emit()
+            changed = True
+        if self._merge_stitches:
+            self._merge_stitches = []
+            self.mergeStitchesChanged.emit()
+            changed = True
+        return changed

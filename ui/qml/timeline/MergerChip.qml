@@ -11,6 +11,8 @@ Rectangle {
 
     property string caption: "ScriptMerger · gap ≤ 1.0с"
     property bool active: false
+    // Live gap-fill count shown as "· N gap-ов" while active.
+    property int gapCount: 0
     signal clicked()
 
     implicitHeight: 38
@@ -45,13 +47,26 @@ Rectangle {
             }
         }
 
-        Text {
-            text: root.caption
-            color: root.active ? Theme.accentDeep : Theme.ink
-            font.family: Theme.fontSans
-            font.pixelSize: 12
-            font.weight: Font.DemiBold
-            font.letterSpacing: -0.05
+        RowLayout {
+            spacing: 4
+
+            Text {
+                text: root.caption
+                color: root.active ? Theme.accentDeep : Theme.ink
+                font.family: Theme.fontSans
+                font.pixelSize: 12
+                font.weight: Font.DemiBold
+                font.letterSpacing: -0.05
+            }
+
+            Text {
+                visible: root.active
+                text: "· " + root.gapCount + " gap-ов"
+                color: Theme.accentDeep
+                opacity: 0.8
+                font.family: Theme.fontMono
+                font.pixelSize: 11
+            }
         }
 
         SvgIcon {
