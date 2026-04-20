@@ -9,5 +9,6 @@ The legacy QWidgets shell in ``ui/shell/`` is independent.
 """
 
 from ui.models.app_model import AppModel
+from ui.models.model_registry import ModelRegistry
 
-__all__ = ["AppModel"]
+__all__ = ["AppModel", "ModelRegistry"]

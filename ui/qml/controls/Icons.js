@@ -39,11 +39,44 @@ var settings =
     "a2 2 0 0 1 0 4 h-.09 " +
     "a1.65 1.65 0 0 0 -1.51 1 z";
 
+var plus     = "M12 5 V19 M5 12 H19";
+var xmark    = "M18 6 L6 18 M6 6 L18 18";
+var check    = "M20 6 L9 17 L4 12";
+var search   = "M10 17 A7 7 0 1 0 10 3 A7 7 0 1 0 10 17 Z M20 20 L15.65 15.65";
+var download = "M21 15 V19 A2 2 0 0 1 19 21 H5 A2 2 0 0 1 3 19 V15 " +
+               "M7 10 L12 15 L17 10 " +
+               "M12 15 V3";
+var trash    = "M3 6 H21 " +
+               "M19 6 L18 20 A2 2 0 0 1 16 22 H8 A2 2 0 0 1 6 20 L5 6 " +
+               "M10 11 V17 M14 11 V17";
+var folder   = "M22 19 A2 2 0 0 1 20 21 H4 A2 2 0 0 1 2 19 V5 A2 2 0 0 1 4 3 H9 L11 6 H20 A2 2 0 0 1 22 8 Z";
+// Minimal CPU-ish glyph. Lucide's `cpu` has lots of leg-lines — drawn
+// here as the central square plus the inner processor.
+var cpu      = "M4 4 H20 V20 H4 Z " +
+               "M9 9 H15 V15 H9 Z " +
+               "M9 1 V4 M15 1 V4 " +
+               "M9 20 V23 M15 20 V23 " +
+               "M20 9 H23 M20 15 H23 " +
+               "M1 9 H4 M1 15 H4";
+// Storage box (Lucide `box`). Top arrow then body.
+var box      = "M21 8 V21 H3 V8 " +
+               "M1 3 H23 V8 H1 Z " +
+               "M10 12 H14";
+
 function byName(name) {
     switch (name) {
         case "list":     return list;
         case "zap":      return zap;
         case "settings": return settings;
+        case "plus":     return plus;
+        case "x":        return xmark;
+        case "check":    return check;
+        case "search":   return search;
+        case "download": return download;
+        case "trash":    return trash;
+        case "folder":   return folder;
+        case "cpu":      return cpu;
+        case "box":      return box;
         default:         return "";
     }
 }

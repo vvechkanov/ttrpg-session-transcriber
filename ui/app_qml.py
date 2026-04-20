@@ -19,7 +19,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from ui.models import AppModel
+from ui.models import AppModel, ModelRegistry
 
 
 _QML_ROOT = Path(__file__).resolve().parent / "qml"
@@ -53,7 +53,9 @@ def main() -> int:
     engine.addImportPath(str(_QML_ROOT))
 
     app_model = AppModel()
+    model_registry = ModelRegistry()
     engine.rootContext().setContextProperty("appModel", app_model)
+    engine.rootContext().setContextProperty("modelRegistry", model_registry)
 
     engine.load(QUrl.fromLocalFile(str(_QML_ROOT / "Main.qml")))
     if not engine.rootObjects():
