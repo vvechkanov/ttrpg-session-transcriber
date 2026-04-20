@@ -1120,9 +1120,40 @@ class MainWindow(QMainWindow):
             return cls  # type: ignore[return-value]
 
 
+def _setup_logging() -> Path:
+    """Install console + rotating-file logging.
+
+    Returns the log file path so the caller can surface it to the user.
+    File lives next to the recent-sessions JSON in the project config
+    dir (``%LOCALAPPDATA%/TTRPG-Session-Transcriber/`` on Windows) so
+    tracked installs and user state stay in one place.
+    """
+    from logging.handlers import RotatingFileHandler
+    from core.recent_sessions import config_dir
+
+    log_path = config_dir() / "app.log"
+    handlers: list[logging.Handler] = [
+        logging.StreamHandler(),  # stderr — visible when launched from a terminal
+        RotatingFileHandler(
+            log_path,
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        ),
+    ]
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,  # override any prior basicConfig from imports
+    )
+    return log_path
+
+
 def main() -> int:
     """Boot the Qt application and return its exit code."""
-    logging.basicConfig(level=logging.INFO)
+    log_path = _setup_logging()
+    _log.info("Session Transcriber starting; log file: %s", log_path)
     app = QApplication(sys.argv)
     app.setFont(_pick_ui_font())
     window = MainWindow()
