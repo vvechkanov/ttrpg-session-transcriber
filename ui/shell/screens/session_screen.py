@@ -188,6 +188,14 @@ class SessionScreen(QWidget):
     """
 
     source_configure_requested = Signal(int)
+    #: P3 — user clicked the "×" button on source card at this index.
+    source_remove_requested = Signal(int)
+    #: P3 — user dropped / picked a valid file onto source card at
+    #: index ``int``. Payload is the absolute path as a string.
+    source_file_dropped = Signal(int, str)
+    #: P3 — user toggled a candidate checkbox in State C. Args:
+    #: card index, filename, checked.
+    source_candidate_toggled = Signal(int, str, bool)
     add_source_requested = Signal()
     merger_configure_requested = Signal()
     output_configure_requested = Signal()
@@ -390,6 +398,19 @@ class SessionScreen(QWidget):
             )
             card.configure_clicked.connect(
                 lambda i=idx: self.source_configure_requested.emit(i)
+            )
+            # P3 — per-card signals need the index bound explicitly
+            # because ``Signal`` callbacks don't forward sender info.
+            card.remove_clicked.connect(
+                lambda i=idx: self.source_remove_requested.emit(i)
+            )
+            card.file_dropped.connect(
+                lambda path, i=idx: self.source_file_dropped.emit(i, path)
+            )
+            card.candidate_toggled.connect(
+                lambda name, checked, i=idx: self.source_candidate_toggled.emit(
+                    i, name, checked
+                )
             )
             cards_row.addWidget(card, stretch=1)
             self._source_cards.append(card)
