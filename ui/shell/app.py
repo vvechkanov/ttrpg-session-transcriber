@@ -36,7 +36,7 @@ from ui.shell import theme
 from ui.shell._demo_stub_panel import DemoStubPanel
 from ui.shell.install_wizard import ensure_backend_installed
 from ui.shell.run_controller import RunController, RunRequest
-from ui.shell.screens import SessionScreen, SessionScreenData
+from ui.shell.screens import ModelsScreen, SessionScreen, SessionScreenData
 from ui.shell.settings_drawer import SettingsDrawer
 from ui.widgets import SourceCardData
 
@@ -226,6 +226,19 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        # "Модели" top-level menu — available both before and after a
+        # session is loaded (managing backends is independent of the
+        # current session folder).
+        models_menu = menu.addMenu("&Модели")
+        manage_models_action = QAction("Управление моделями…", self)
+        manage_models_action.triggered.connect(self._on_manage_models)
+        models_menu.addAction(manage_models_action)
+
+    def _on_manage_models(self) -> None:
+        """Open the modal "Управление моделями" dialog."""
+        dialog = ModelsScreen(parent=self)
+        dialog.exec()
 
     def _wire_session_screen_signals(self) -> None:
         self._session_screen.source_configure_requested.connect(
