@@ -34,8 +34,19 @@ Item {
 
     implicitHeight: 52
 
+    //: Publish the width of whichever state-specific child is currently
+    //: visible so the surrounding RowLayout in TimelineScreen allocates
+    //: enough horizontal space — without this the Item is sized 0 and
+    //: its anchored children render on top of EngineBar to its left.
+    implicitWidth: {
+        if (root.phase === "done") return doneRow.implicitWidth
+        if (root.phase === "asr" || root.phase === "merge") return runningCard.implicitWidth
+        return idleButton.implicitWidth
+    }
+
     // Idle / failed → single primary "Запустить" button.
     PrimaryButton {
+        id: idleButton
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         visible: root.phase === "idle" || root.phase === "failed"
@@ -50,6 +61,7 @@ Item {
     // opens the produced .txt via OS default handler (wired at
     // TimelineScreen level through `openOutputClicked`).
     RowLayout {
+        id: doneRow
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         visible: root.phase === "done"

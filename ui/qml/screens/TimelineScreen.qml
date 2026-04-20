@@ -197,8 +197,16 @@ Rectangle {
                             }
 
                             // ── Source lanes ──────────────────────
+                            // Rectangle + ColumnLayout: the layout is
+                            // top-anchored (not anchors.fill) so the
+                            // Rectangle can derive its height from the
+                            // layout's implicitHeight. anchors.fill +
+                            // implicitHeight: childrenRect.height would
+                            // collapse to zero because anchored children
+                            // don't contribute to childrenRect.
                             Rectangle {
                                 Layout.fillWidth: true
+                                Layout.preferredHeight: sourcesCol.implicitHeight
                                 color: Theme.bg
 
                                 Rectangle {
@@ -207,10 +215,14 @@ Rectangle {
                                     anchors.top: parent.top
                                     height: 1
                                     color: Theme.borderSoft
+                                    z: 1
                                 }
 
                                 ColumnLayout {
-                                    anchors.fill: parent
+                                    id: sourcesCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
                                     spacing: 0
 
                                     Repeater {
@@ -233,8 +245,6 @@ Rectangle {
                                         label: "добавить источник"
                                     }
                                 }
-
-                                implicitHeight: childrenRect.height
                             }
 
                             // ── Tracks header ─────────────────────
