@@ -23,6 +23,8 @@ plain strings so this module stays UI-free.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 #: Extensions recognised as speech audio.
@@ -89,23 +91,159 @@ def _iter_session_files(session_dir: Path) -> list[Path]:
     return candidates
 
 
-def detect_audio_files(session_dir: Path) -> tuple[Path, ...]:
-    """Return audio files in ``session_dir`` excluding Craig mix exports.
+def _audio_files_in_flat_dir(dir_: Path) -> tuple[Path, ...]:
+    """Return per-speaker audio files in ``dir_`` sorted by path.
 
-    A Craig recording folder contains one per-speaker ``.flac`` per
-    Discord voice channel participant plus a single ``craig-*.flac``
-    file which is the mixed-down export we *don't* want to transcribe
-    separately. We skip any file whose stem starts with ``craig`` to
-    keep per-speaker diarisation intact.
+    The filter logic that :func:`detect_audio_files` used to own:
+    pick audio extensions, drop the Craig mix-down file (stem starts
+    with ``craig``), leave the rest. Shared by both the flat-layout
+    fallback and the per-segment discovery below.
     """
     matches: list[Path] = []
-    for path in _iter_session_files(session_dir):
+    for path in _iter_session_files(dir_):
         if path.suffix.lower() not in AUDIO_EXTENSIONS:
             continue
         if path.stem.lower().startswith("craig"):
             continue
         matches.append(path)
     return tuple(matches)
+
+
+#: Matches a Craig-segment subfolder name such as ``craig``,
+#: ``craig-1``, ``craig_2``, ``craig 3`` or their Cyrillic
+#: counterparts ``крэйг``, ``крэйг-2``. Case-insensitive via the
+#: caller's ``casefold()``. The optional separator (``-``, ``_`` or
+#: space) plus trailing digits are both optional so a lone ``craig``
+#: folder still counts.
+_CRAIG_SEGMENT_RE = re.compile(
+    r"^(?:craig|крэйг)(?:[-_ ]?\d*)$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CraigSegment:
+    """One Craig recording segment on disk.
+
+    A session folder may contain multiple Craig segments when the
+    recording was restarted mid-game (e.g. ``craig-1/`` and
+    ``крэйг-2/`` side by side). Each segment carries its own
+    ``info.txt`` with a ``Start time`` line, so consumers can map
+    audio offsets back to wall-clock times.
+    """
+
+    dir: Path
+    info_path: Path | None
+    audio_files: tuple[Path, ...]
+
+
+def _is_craig_segment_dir(candidate: Path) -> bool:
+    """Return True if ``candidate`` looks like a Craig segment folder.
+
+    Two ways a directory qualifies:
+        * its name matches :data:`_CRAIG_SEGMENT_RE` (``craig-1``,
+          ``крэйг 2`` etc.); OR
+        * it contains an ``info.txt`` plus at least one audio file
+          — covers manually-renamed dumps where someone stripped the
+          ``craig-`` prefix.
+    """
+    if not candidate.is_dir():
+        return False
+    if candidate.name.startswith("."):
+        return False
+    if _CRAIG_SEGMENT_RE.match(candidate.name.casefold()):
+        return True
+    info = candidate / "info.txt"
+    if info.is_file() and _audio_files_in_flat_dir(candidate):
+        return True
+    return False
+
+
+def detect_craig_segments(session_dir: Path) -> tuple[CraigSegment, ...]:
+    """Return ordered Craig segments discovered in ``session_dir``.
+
+    Scans top-level subfolders for entries that either match the
+    Craig naming convention (``craig``, ``craig-1``, ``крэйг-2`` —
+    case-insensitive; see :data:`_CRAIG_SEGMENT_RE`) or carry an
+    ``info.txt`` plus at least one audio file. The resulting segments
+    are sorted by ``dir.name.casefold()`` so ``craig-1`` precedes
+    ``крэйг-2`` alphabetically; if the caller needs chronological
+    ordering by Craig's ``Start time`` that's the
+    :mod:`core.timeline_window` layer's job, not this one's.
+
+    When no Craig-style subfolder is found we fall back to treating
+    ``session_dir`` itself as a single flat segment — this preserves
+    the legacy "audio files live directly in the session folder"
+    layout that every test fixture and real session before feature #4
+    was built on.
+    """
+    segments: list[CraigSegment] = []
+    if not session_dir.is_dir():
+        return ()
+
+    for entry in sorted(session_dir.iterdir(), key=lambda p: p.name.casefold()):
+        if not _is_craig_segment_dir(entry):
+            continue
+        info = entry / "info.txt"
+        segments.append(CraigSegment(
+            dir=entry,
+            info_path=info if info.is_file() else None,
+            audio_files=_audio_files_in_flat_dir(entry),
+        ))
+
+    if segments:
+        return tuple(segments)
+
+    # Fallback: flat layout — the whole session_dir is one segment.
+    flat_audio = _audio_files_in_flat_dir(session_dir)
+    flat_info = session_dir / "info.txt"
+    return (
+        CraigSegment(
+            dir=session_dir,
+            info_path=flat_info if flat_info.is_file() else None,
+            audio_files=flat_audio,
+        ),
+    )
+
+
+#: Strips Craig's ``N-`` track-index prefix so the same speaker can be
+#: grouped across multiple Craig segments. Craig assigns the leading
+#: digit by join order within *one* recording, so the same player gets
+#: different prefixes in different segments (``1-sir_o_genri`` vs
+#: ``2-sir_o_genri``). Matching on the post-prefix part fixes that.
+_SPEAKER_PREFIX_RE = re.compile(r"^\d+-")
+
+
+def match_speaker(file_stem: str) -> str:
+    """Normalise a file stem for per-speaker grouping across segments.
+
+    ``"1-sir_o_genri"`` → ``"sir_o_genri"``;
+    ``"2-sir_o_genri"`` → ``"sir_o_genri"`` (same speaker).
+
+    A stem without the numeric prefix is returned lowercased as-is
+    (``"Andrey"`` → ``"andrey"``), which keeps the key stable for
+    both Craig-segment and flat-layout sessions.
+    """
+    return _SPEAKER_PREFIX_RE.sub("", file_stem).lower()
+
+
+def detect_audio_files(session_dir: Path) -> tuple[Path, ...]:
+    """Return every per-speaker audio file across all Craig segments.
+
+    Thin compatibility shim over :func:`detect_craig_segments`: flat
+    single-segment sessions behave exactly as before, multi-segment
+    sessions get the union of audio files in a stable (path-sorted)
+    order so call-sites that predate feature #4 keep working.
+
+    A Craig recording folder contains one per-speaker ``.flac`` per
+    Discord voice channel participant plus a single ``craig-*.flac``
+    mix-down export we *don't* want to transcribe separately; the
+    mix-down is filtered by :func:`_audio_files_in_flat_dir`.
+    """
+    all_files: list[Path] = []
+    for seg in detect_craig_segments(session_dir):
+        all_files.extend(seg.audio_files)
+    return tuple(sorted(all_files))
 
 
 def detect_fvtt_chat_logs(session_dir: Path) -> tuple[Path, ...]:
@@ -199,9 +337,12 @@ def accepts_file_for(parser_key: str, path: Path) -> bool:
 
 __all__ = [
     "AUDIO_EXTENSIONS",
+    "CraigSegment",
     "accepted_extensions_for",
     "accepts_file_for",
     "detect_audio_files",
     "detect_combat_logs",
+    "detect_craig_segments",
     "detect_fvtt_chat_logs",
+    "match_speaker",
 ]

@@ -74,13 +74,19 @@ def main() -> int:
     )
 
     # Real ingest: on folder drop, SessionMeta emits the session dir
-    # and both list models refresh from core.file_matchers.
-    session_meta.sessionOpened.connect(tracks_model.loadFromDir)
+    # and both list models refresh from core.file_matchers. Source
+    # list goes *first* so the TimelineWindow is already published
+    # by the time TrackListModel's SegmentsRole gets queried for the
+    # per-Craig-segment overlay rects (feature #4 iter 4a).
     session_meta.sessionOpened.connect(sources_model.loadFromDir)
+    session_meta.sessionOpened.connect(tracks_model.loadFromDir)
     # SourceListModel builds an absolute-time TimelineWindow during
     # loadFromDir (feature #3 iter 3a); wiring the back-reference lets
     # it publish the window into SessionMeta for other consumers.
     sources_model.setSessionMeta(session_meta)
+    # TrackListModel reads the window back when resolving SegmentsRole
+    # to startPct/endPct for each Craig-segment overlay rect.
+    tracks_model.setSessionMeta(session_meta)
 
     # Peaks extraction: once tracks populate, kick off a background
     # PeaksWorker. Strong refs (_peaks_*) keep the QThread alive until

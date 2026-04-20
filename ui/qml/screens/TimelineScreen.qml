@@ -374,6 +374,7 @@ Rectangle {
                                             modelId:       model.modelId
                                             modelOverride: model.override
                                             peaks:         model.peaks
+                                            segments:      model.segments
                                             progress:      model.progress
                                             trackState:    model.trackState
                                             errorMessage:  model.errorMessage

@@ -12,6 +12,7 @@ folder or picks one via the Empty-screen "Выбрать папку…" button.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +29,10 @@ from PySide6.QtCore import (
 )
 
 from core.file_matchers import (
-    detect_audio_files,
     detect_combat_logs,
+    detect_craig_segments,
     detect_fvtt_chat_logs,
+    match_speaker,
 )
 from core.peaks import probe_duration
 from core.timeline_window import (
@@ -230,6 +232,32 @@ class SessionMeta(QObject):
 TRACK_STATES = ("idle", "queued", "running", "done", "cached", "failed")
 
 
+@dataclass(frozen=True)
+class TrackSegment:
+    """One Craig segment's contribution to a player's row.
+
+    A track in the UI is the union of every Craig-segment slice that
+    belongs to one speaker (matched via
+    :func:`core.file_matchers.match_speaker`). Feature #4 iteration 4a
+    captures the per-segment metadata so a later ASR iteration (4b)
+    can run each slice with the right absolute offset.
+
+    ``start_ts`` — wall-clock start of the segment (UTC) pulled from
+    that segment's ``info.txt``. ``None`` when the segment has no
+    ``info.txt`` or its ``Start time`` line is missing / malformed.
+
+    ``duration_sec`` — probed duration in seconds. Populated only
+    when cheaply available; 4a leaves it ``None`` because the ffprobe
+    pass moved off the UI thread in an earlier commit and a second
+    probe here would re-freeze folder-pick. 4b will either reuse the
+    async probe result or drop the field entirely.
+    """
+
+    audio_path: Path
+    start_ts: datetime | None
+    duration_sec: float | None
+
+
 @dataclass
 class TrackEntry:
     name: str
@@ -261,7 +289,18 @@ class TrackEntry:
     # Absolute path to this track's audio file on disk. ``None`` is
     # reserved for tests; PipelineController surfaces the "no audio
     # path" case as a per-track error rather than crashing.
+    #
+    # In multi-Craig sessions (feature #4 iter 4a) this points to the
+    # *first* segment's audio — the primary file ASR currently runs
+    # on. The full per-segment list lives in :attr:`segments`; a later
+    # iteration (4b) will drive ASR through every segment.
     audio_path: Path | None = None
+    #: All Craig-segment slices that make up this player's timeline,
+    #: ordered by ``start_ts`` (unknown starts sorted last). Invariant:
+    #: ``len(segments) >= 1`` and ``audio_path == segments[0].audio_path``
+    #: for any row built from :meth:`TrackListModel.loadFromDir`. Tests
+    #: constructing ``TrackEntry`` directly may leave the list empty.
+    segments: tuple[TrackSegment, ...] = ()
 
 
 #: TrackListModel starts empty. Populated only after the user opens
@@ -280,6 +319,7 @@ class TrackListModel(QAbstractListModel):
     ProgressRole  = Qt.ItemDataRole.UserRole + 8
     StateRole     = Qt.ItemDataRole.UserRole + 9
     ErrorRole     = Qt.ItemDataRole.UserRole + 10
+    SegmentsRole  = Qt.ItemDataRole.UserRole + 11
 
     _ROLES = {
         NameRole:      b"name",
@@ -292,11 +332,31 @@ class TrackListModel(QAbstractListModel):
         ProgressRole:  b"progress",
         StateRole:     b"trackState",
         ErrorRole:     b"errorMessage",
+        SegmentsRole:  b"segments",
     }
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._rows: list[TrackEntry] = list(_TRACK_ROWS)
+        #: Optional link back to :class:`SessionMeta`, set by the shell
+        #: glue (``ui.app_qml``) before the first folder load. When
+        #: present, :attr:`SegmentsRole` resolves each TrackSegment's
+        #: ``start_ts`` against :meth:`SessionMeta.timelineWindow` to
+        #: produce ``startPct`` / ``endPct`` percentages; otherwise
+        #: every row falls back to a single 0..100% segment so the
+        #: waveform still renders.
+        self._session_meta: SessionMeta | None = None
+
+    def setSessionMeta(self, session_meta: SessionMeta) -> None:
+        """Attach the :class:`SessionMeta` this list is bound to.
+
+        Not a ``Slot`` — only Python glue (``ui.app_qml``) ever calls
+        this. Used purely to read back the absolute-time
+        :class:`TimelineWindow` when computing per-segment percentages
+        for the :attr:`SegmentsRole` role.
+        """
+
+        self._session_meta = session_meta
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -316,7 +376,56 @@ class TrackListModel(QAbstractListModel):
             case TrackListModel.ProgressRole:  return t.progress
             case TrackListModel.StateRole:     return t.state
             case TrackListModel.ErrorRole:     return t.error_message
+            case TrackListModel.SegmentsRole:  return self._segments_payload(t)
         return None
+
+    def _segments_payload(self, entry: TrackEntry) -> list[dict[str, float]]:
+        """Return ``[{"startPct": x, "endPct": y}, ...]`` — one per segment.
+
+        Maps each :class:`TrackSegment` to its position on the shared
+        absolute-time ruler via the :class:`TimelineWindow` published
+        by :class:`SourceListModel`. The returned list length always
+        matches ``len(entry.segments)`` (or is a single-element
+        fallback when the entry carries no segments at all — e.g. a
+        unit-test stub or an explicitly-typed ``TrackEntry`` without
+        calling :meth:`loadFromDir`).
+
+        Per-segment fallback to ``{0.0, 100.0}`` triggers when:
+
+            * no :class:`SessionMeta` was attached via
+              :meth:`setSessionMeta`, OR
+            * the session has no :class:`TimelineWindow` (no
+              ``info.txt``, no chat, no combat), OR
+            * the specific segment has ``start_ts is None``.
+
+        Each segment's ``endPct`` defaults to 100 when its
+        ``duration_sec`` is unknown — 4a doesn't probe durations here
+        (that stays on the async ffprobe path) so segments without an
+        explicit end extend to the right edge of the ruler.
+        """
+
+        if not entry.segments:
+            return [{"startPct": 0.0, "endPct": 100.0}]
+
+        window: TimelineWindow | None = None
+        if self._session_meta is not None:
+            window = self._session_meta.timelineWindow()
+
+        payload: list[dict[str, float]] = []
+        for seg in entry.segments:
+            if window is None or seg.start_ts is None:
+                payload.append({"startPct": 0.0, "endPct": 100.0})
+                continue
+            start_pct = window.pct_for(seg.start_ts)
+            if seg.duration_sec is not None and seg.duration_sec > 0:
+                # Best-effort end: start_ts + duration, mapped through
+                # the same window.
+                end_ts = seg.start_ts + timedelta(seconds=seg.duration_sec)
+                end_pct = window.pct_for(end_ts)
+            else:
+                end_pct = 100.0
+            payload.append({"startPct": start_pct, "endPct": end_pct})
+        return payload
 
     def roleNames(self) -> dict[int, QByteArray]:
         return {role: QByteArray(name) for role, name in self._ROLES.items()}
@@ -514,38 +623,91 @@ class TrackListModel(QAbstractListModel):
 
     @Slot(str)
     def loadFromDir(self, session_dir_str: str) -> None:
-        """Replace rows with one per audio file discovered in ``session_dir``.
+        """Replace rows with one per speaker discovered in ``session_dir``.
 
-        Uses :func:`core.file_matchers.detect_audio_files` — Craig mix-
-        down files are skipped automatically. Peaks start empty; the
-        shell connects :pysig:`audioPathsChanged` to a peaks worker
-        which progressively calls :meth:`setPeaks` per track.
+        Uses :func:`core.file_matchers.detect_craig_segments` so multi-
+        Craig sessions (feature #4 iter 4a) are grouped: the two
+        ``1-sir_o_genri`` and ``2-sir_o_genri`` files from separate
+        Craig segments collapse into one row with two
+        :class:`TrackSegment`\\ s. Single-Craig (flat-layout) sessions
+        still produce exactly one row per audio file with a single
+        segment — the fallback path in ``detect_craig_segments``
+        preserves the pre-feature-#4 behaviour.
+
+        Craig mix-down files are skipped automatically. Peaks start
+        empty; the shell connects :pysig:`audioPathsChanged` to a
+        peaks worker which progressively calls :meth:`setPeaks` per
+        track. 4a emits peaks paths only for the *primary* (first)
+        segment of each row — running N-way peaks extraction per row
+        is 4b work (the waveform just gets an opacity-50% placeholder
+        rect for non-primary segments in QML).
 
         Connected in :mod:`ui.app_qml` to
         :pysig:`SessionMeta.sessionOpened`.
         """
 
         session_dir = Path(session_dir_str)
-        audio_files = detect_audio_files(session_dir)
+        segments = detect_craig_segments(session_dir)
+
+        # One start_ts per Craig segment — parse once and reuse below.
+        segment_starts: list[datetime | None] = [
+            parse_info_start(seg.info_path) if seg.info_path is not None else None
+            for seg in segments
+        ]
+
+        # Group audio files by normalised speaker key (see
+        # :func:`match_speaker`) preserving the first-seen ordering
+        # inside one segment and the segment order for cross-segment
+        # ties. A plain dict keeps insertion order in Python 3.7+.
+        grouped: dict[str, list[TrackSegment]] = {}
+        for seg_idx, segment in enumerate(segments):
+            start_ts = segment_starts[seg_idx]
+            for audio_path in segment.audio_files:
+                key = match_speaker(audio_path.stem)
+                grouped.setdefault(key, []).append(TrackSegment(
+                    audio_path=audio_path,
+                    start_ts=start_ts,
+                    # 4a leaves durations to the async ffprobe pass
+                    # (``PeaksWorker.durationReady``); callers needing
+                    # end-timestamps should trigger a probe themselves.
+                    duration_sec=None,
+                ))
 
         self.beginResetModel()
-        self._rows = [
-            TrackEntry(
-                name=path.stem,
+        new_rows: list[TrackEntry] = []
+        primary_paths: list[Path] = []
+        for speaker_key, track_segments in grouped.items():
+            # Sort by wall-clock start; ``None`` starts drift to the
+            # end so fully-unanchored segments don't pretend to be
+            # earliest. Stable sort preserves discovery order among
+            # equal keys.
+            ordered = sorted(
+                track_segments,
+                key=lambda s: (s.start_ts is None, s.start_ts or datetime.max),
+            )
+            primary = ordered[0]
+            new_rows.append(TrackEntry(
+                name=primary.audio_path.stem,
                 role="Игрок",
                 character="",
                 excluded=False,
                 model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
-                audio_path=path,
-            )
-            for path in audio_files
-        ]
+                audio_path=primary.audio_path,
+                segments=tuple(ordered),
+            ))
+            primary_paths.append(primary.audio_path)
+            # speaker_key unused after grouping; kept as dict key only.
+            _ = speaker_key
+        self._rows = new_rows
         self.endResetModel()
         self.overallProgressChanged.emit()
+        # 4a: only the primary (first) segment goes through the peaks
+        # worker. Secondary segments render as placeholder rects in
+        # ``TrackLaneRow``. 4b will expand this to N paths per row.
         self.audioPathsChanged.emit(
-            [(i, str(p)) for i, p in enumerate(audio_files)]
+            [(i, str(p)) for i, p in enumerate(primary_paths)]
         )
 
     @Slot(int, result=str)
@@ -583,6 +745,9 @@ class TrackListModel(QAbstractListModel):
 
         row = len(self._rows)
         self.beginInsertRows(QModelIndex(), row, row)
+        # Manually-added tracks live outside the Craig segment model
+        # — they get a single segment with unknown start/duration so
+        # the SegmentsRole payload still renders a full-width rect.
         self._rows.append(
             TrackEntry(
                 name=path.stem,
@@ -593,6 +758,11 @@ class TrackListModel(QAbstractListModel):
                 model_override=False,
                 peaks=[],
                 audio_path=path,
+                segments=(TrackSegment(
+                    audio_path=path,
+                    start_ts=None,
+                    duration_sec=None,
+                ),),
             )
         )
         self.endInsertRows()

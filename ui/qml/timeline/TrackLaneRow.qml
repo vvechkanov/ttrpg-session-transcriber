@@ -39,6 +39,15 @@ Item {
     property string trackState: "idle"
     property string errorMessage: ""
 
+    // Per-Craig-segment overlay rects. Each element is
+    // ``{ startPct, endPct }`` in 0..100 of the track width.
+    // Feature #4 iter 4a: TrackListModel.SegmentsRole hands us one
+    // entry per Craig segment that the speaker appears in. Primary
+    // (first) segment is drawn by the WaveformCanvas below; any
+    // additional segments render as 50%-opacity placeholder rects
+    // until per-segment peaks land in iter 4b.
+    property var segments: []
+
     // True while the pipeline is idle (so fields are safe to edit and
     // the badge can open the override popover).
     property bool editableLocked: false
@@ -267,6 +276,28 @@ Item {
             muted: root.excluded
             progress: root.excluded ? 0.0 : root.progress
             fillColor: root._fillColor
+        }
+
+        // Feature #4 iter 4a: placeholder rects for *secondary* Craig
+        // segments — index >= 1 in root.segments. The primary segment
+        // (index 0) is already covered by the WaveformCanvas above;
+        // drawing a second rect over it would just muddy the peaks.
+        // Per-segment peaks (one canvas per segment) are iter 4b.
+        Repeater {
+            model: root.segments
+            delegate: Rectangle {
+                visible: index > 0
+                x: track.width * ((modelData.startPct || 0) / 100.0)
+                y: 0
+                width: Math.max(
+                    0,
+                    track.width * (((modelData.endPct || 100) - (modelData.startPct || 0)) / 100.0)
+                )
+                height: track.height
+                color: root._fillColor
+                opacity: 0.5
+                radius: 2
+            }
         }
 
         // Status chip bottom-anchored. Only renders when the pipeline
