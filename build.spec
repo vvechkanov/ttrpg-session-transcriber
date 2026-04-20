@@ -200,14 +200,9 @@ a = Analysis(  # noqa: F821 — PyInstaller injects Analysis
     binaries=[],
     datas=datas,
     hiddenimports=[
-        # Template modules are imported lazily via core.ui_registry —
-        # PyInstaller can't see the importlib.import_module() call, so
-        # we list them explicitly.
-        "ui.templates.audio_source_template",
-        "ui.templates.chat_source_template",
-        "ui.templates.merger_template",
-        "ui.templates.renderer_template",
-        # Source backends are resolved through SPEECH_SOURCES.
+        # Source backends are resolved through SPEECH_SOURCES at
+        # runtime; PyInstaller can't see dict lookups so we list them
+        # explicitly.
         "sources.speech.gigaam",
         "sources.speech.faster_whisper",
         "sources.speech.whisperx",

@@ -21,7 +21,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from core.ui_contract import UIConfig
 from domain.annotations import ChatMessage
 from sources.base import Source
 
@@ -40,15 +39,6 @@ class FvttChatSource(Source):
     """Game log source — чат Foundry VTT."""
 
     name = "fvtt-chat"
-
-    #: Module UI Contract binding (ADR-016). Resolves to
-    #: ``ui/templates/chat_source_template.py`` (Phase 8 stub) — chat
-    #: module only displays the log file path and author list in the
-    #: home card; no user-editable settings in Phase 4.
-    ui_config = UIConfig(
-        template="chat_source",
-        params={"backend": "fvtt"},
-    )
 
     def __init__(
         self,

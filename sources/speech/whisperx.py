@@ -14,7 +14,6 @@ import json
 import subprocess
 from pathlib import Path
 
-from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import Source
@@ -30,19 +29,6 @@ class WhisperXSource(Source):
     """Speech source — обёртка subprocess вызова whisperx CLI."""
 
     name = "whisperx"
-
-    #: Module UI Contract binding (ADR-016). Shares the ``audio_source``
-    #: template with FasterWhisperSource — WhisperX is another
-    #: Whisper-family backend, so the same settings form applies.
-    ui_config = UIConfig(
-        template="audio_source",
-        params={
-            "backend": "whisper",
-            "device_options": ("cpu", "cuda"),
-            "compute_type_options": ("int8", "int8_float16", "float16", "float32"),
-            "show_hotwords": False,
-        },
-    )
 
     def __init__(
         self,

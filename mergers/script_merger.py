@@ -1,6 +1,5 @@
 """ScriptMerger: Timeline → sorted list[ScriptEvent] with same-speaker gluing."""
 
-from core.ui_contract import UIConfig
 from domain.annotations import SpeechSegment
 from domain.events import ChatEvent, ScriptEvent, SpeechEvent
 from domain.timeline import Timeline
@@ -17,14 +16,6 @@ def _event_sort_key(e: ScriptEvent) -> tuple[float, int]:
 
 
 class ScriptMerger(Merger):
-    #: Module UI Contract binding (ADR-016). Resolves to
-    #: ``ui/templates/merger_template.py`` (Phase 8 stub until
-    #: merger-specific form is designed).
-    ui_config = UIConfig(
-        template="merger",
-        params={"merger_id": "script", "gap_sec_default": 1.0},
-    )
-
     def __init__(self, gap_sec: float = 1.0):
         self.gap_sec = gap_sec
 

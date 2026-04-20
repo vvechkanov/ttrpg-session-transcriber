@@ -139,22 +139,32 @@ def test_not_onefile_for_lgpl_compliance():
     assert "COLLECT(" in src, "COLLECT stage missing — onefile is forbidden"
 
 
+def test_ui_templates_removed():
+    """Phase 10: the template-factory layer is gone — spec must not mention it."""
+
+    src = _spec_source()
+    assert "ui.templates" not in src, (
+        "ui.templates.* removed in Phase 10; hiddenimports must not cite them."
+    )
+
+
 @pytest.mark.parametrize(
     "hidden",
     [
-        "ui.templates.audio_source_template",
-        "ui.templates.chat_source_template",
-        "ui.templates.merger_template",
-        "ui.templates.renderer_template",
+        "sources.speech.gigaam",
+        "sources.speech.faster_whisper",
+        "sources.game_log.fvtt_chat",
+        "mergers.script_merger",
+        "renderers.plain_text",
     ],
 )
-def test_lazy_templates_in_hidden_imports(hidden: str):
-    """Phase 9 still ships the templates; Phase 10 removes them."""
+def test_backend_plugins_in_hidden_imports(hidden: str):
+    """Registry-resolved backends need explicit hiddenimports entries."""
 
     src = _spec_source()
     assert hidden in src, (
-        f"{hidden} must appear in hiddenimports — resolve_template is "
-        f"dynamic and PyInstaller can't discover it otherwise."
+        f"{hidden} must appear in hiddenimports — SPEECH_SOURCES / "
+        f"MERGERS / RENDERERS lookups are dynamic."
     )
 
 
