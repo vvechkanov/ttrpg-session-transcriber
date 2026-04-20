@@ -226,6 +226,17 @@ class PipelineController(QObject):
     def _onMergeDone(self, path: str) -> None:
         self._output_path = path
         self.outputPathChanged.emit()
+        # Mock summary for the done-phase cards — the same numbers the
+        # prototype shows. Replaced with real stats once core.pipeline
+        # is wired in.
+        self._app.setDoneSummary({
+            "durationLabel":  "Готово за 14 минут 23 секунды",
+            "statsLine":      "5 дорожек · 12 340 событий ASR · 1 423 чата · 13 763 события в таймлайне",
+            "fileSize":       "84 KB",
+            "wordCount":      "12 473 слова",
+            "cueCount":       "847 реплик",
+            "sessionLength":  "3 ч 47 м",
+        })
         self._app.phase = "done"
 
     @Slot(str)

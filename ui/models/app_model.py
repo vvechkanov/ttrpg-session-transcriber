@@ -30,6 +30,7 @@ class AppModel(QObject):
     phaseChanged = Signal()
     mergeProgressChanged = Signal()
     mergeStitchesChanged = Signal()
+    doneSummaryChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -43,6 +44,12 @@ class AppModel(QObject):
         # Stitch positions in timeline %. Live-populated while the
         # MergerWorker runs; QML renders one line per entry.
         self._merge_stitches: list[float] = []
+
+        # Done-phase summary numbers. Populated when the pipeline
+        # finishes; QML reads them for the DoneSummary banner and the
+        # TranscriptPreview stats row. Mock values for the layout
+        # slice — real numbers arrive with the core wiring step.
+        self._done_summary: dict[str, str | int] = {}
 
     # ── screen ────────────────────────────────────────────────────────
     @Property(str, notify=screenChanged)
@@ -120,4 +127,32 @@ class AppModel(QObject):
             self._merge_stitches = []
             self.mergeStitchesChanged.emit()
             changed = True
+        if self._done_summary:
+            self._done_summary = {}
+            self.doneSummaryChanged.emit()
+            changed = True
         return changed
+
+    # ── doneSummary ───────────────────────────────────────────────────
+    @Property("QVariantMap", notify=doneSummaryChanged)
+    def doneSummary(self) -> dict[str, str | int]:
+        """QVariantMap snapshot of final-pipeline stats.
+
+        Keys QML reads:
+          durationLabel   — "14 минут 23 секунды" (elapsed)
+          statsLine       — secondary mono line for DoneSummary
+          fileSize        — "84 KB"
+          wordCount       — "12 473 слова"
+          cueCount        — "847 реплик"
+          sessionLength   — "3 ч 47 м"
+        """
+
+        return dict(self._done_summary)
+
+    def setDoneSummary(self, data: dict[str, str | int]) -> None:
+        """Assign the summary map. Called from PipelineController on success."""
+
+        if data == self._done_summary:
+            return
+        self._done_summary = dict(data)
+        self.doneSummaryChanged.emit()

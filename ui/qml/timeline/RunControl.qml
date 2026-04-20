@@ -30,17 +30,44 @@ Item {
     signal runClicked()
     signal pauseClicked()
     signal cancelClicked()
+    signal openOutputClicked()
 
     implicitHeight: 52
 
+    // Idle / failed → single primary "Запустить" button.
     PrimaryButton {
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        visible: root.phase === "idle" || root.phase === "done" || root.phase === "failed"
+        visible: root.phase === "idle" || root.phase === "failed"
         sizeTag: "md"
         iconName: "play"
         text: "Запустить обработку"
         onClicked: root.runClicked()
+    }
+
+    // Done → Refresh (ghost) + "Открыть merged.txt" (primary).
+    // The refresh button re-runs the whole pipeline; the primary one
+    // opens the produced .txt via OS default handler (wired at
+    // TimelineScreen level through `openOutputClicked`).
+    RowLayout {
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.phase === "done"
+        spacing: 8
+
+        GhostButton {
+            sizeTag: "md"
+            iconName: "refresh"
+            text: "Перезапустить"
+            onClicked: root.runClicked()
+        }
+
+        PrimaryButton {
+            sizeTag: "md"
+            iconName: "externalLink"
+            text: "Открыть merged.txt"
+            onClicked: root.openOutputClicked()
+        }
     }
 
     Rectangle {

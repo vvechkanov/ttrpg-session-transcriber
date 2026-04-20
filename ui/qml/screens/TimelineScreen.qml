@@ -100,8 +100,24 @@ Rectangle {
                                 etaLabel: "~1 мин"
                                 onRunClicked: pipeline.runAsr()
                                 onCancelClicked: pipeline.cancel()
+                                onOpenOutputClicked: {
+                                    if (pipeline && pipeline.outputPath.length > 0) {
+                                        Qt.openUrlExternally("file://" + pipeline.outputPath)
+                                    }
+                                }
                             }
                         }
+                    }
+
+                    // ── Done summary banner ───────────────────────
+                    DoneSummary {
+                        visible: root.phase === "done"
+                        durationLabel: (appModel && appModel.doneSummary.durationLabel)
+                            ? appModel.doneSummary.durationLabel
+                            : ""
+                        statsLine: (appModel && appModel.doneSummary.statsLine)
+                            ? appModel.doneSummary.statsLine
+                            : ""
                     }
 
                     // ── Timeline card ─────────────────────────────
@@ -349,7 +365,36 @@ Rectangle {
                             color: Theme.borderSoft
                         }
 
-                        OutputChip {}
+                        OutputChip {
+                            done: root.phase === "done"
+                            sizeCaption: (appModel && appModel.doneSummary.fileSize)
+                                ? appModel.doneSummary.fileSize
+                                : "84 KB"
+                        }
+                    }
+
+                    // ── Transcript preview (done phase only) ──────
+                    TranscriptPreview {
+                        visible: root.phase === "done"
+                        filePath:      pipeline ? pipeline.outputPath : ""
+                        fileSize:      (appModel && appModel.doneSummary.fileSize)      ? appModel.doneSummary.fileSize      : ""
+                        wordCount:     (appModel && appModel.doneSummary.wordCount)     ? appModel.doneSummary.wordCount     : ""
+                        cueCount:      (appModel && appModel.doneSummary.cueCount)      ? appModel.doneSummary.cueCount      : ""
+                        sessionLength: (appModel && appModel.doneSummary.sessionLength) ? appModel.doneSummary.sessionLength : ""
+                        onOpenClicked: {
+                            if (pipeline && pipeline.outputPath.length > 0) {
+                                Qt.openUrlExternally("file://" + pipeline.outputPath)
+                            }
+                        }
+                        onRevealInFolderClicked: {
+                            if (pipeline && pipeline.outputPath.length > 0) {
+                                // Strip the filename so the handler opens the
+                                // containing folder (Finder / Explorer).
+                                const parts = pipeline.outputPath.split("/")
+                                parts.pop()
+                                Qt.openUrlExternally("file://" + parts.join("/"))
+                            }
+                        }
                     }
                 }
             }

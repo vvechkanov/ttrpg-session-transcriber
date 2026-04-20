@@ -104,6 +104,15 @@ var alert = "M10.29 3.86 L1.82 18 A2 2 0 0 0 3.53 21 H20.47 A2 2 0 0 0 22.18 18 
             "M12 9 V13 " +
             "M12 17 H12.01";
 
+// Counter-clockwise refresh arrow (Lucide `refresh-ccw` simplified).
+var refresh = "M3 12 A9 9 0 1 0 6 5.3 L3 8 " +
+              "M3 3 V8 H8";
+
+// Standard "open in new" icon — box with an arrow popping out.
+var externalLink = "M18 13 V19 A2 2 0 0 1 16 21 H5 A2 2 0 0 1 3 19 V8 A2 2 0 0 1 5 6 H11 " +
+                   "M15 3 H21 V9 " +
+                   "M10 14 L21 3";
+
 function byName(name) {
     switch (name) {
         case "list":       return list;
@@ -128,7 +137,9 @@ function byName(name) {
         case "file":       return file;
         case "sparkle":    return sparkle;
         case "play":       return play;
-        case "alert":      return alert;
-        default:           return "";
+        case "alert":        return alert;
+        case "refresh":      return refresh;
+        case "externalLink": return externalLink;
+        default:             return "";
     }
 }
