@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from core import onboarding_state, recent_sessions
 from core.backend_installers import BackendId
 from core.discovery import find_fvtt_chat_log
 from core.pipeline import PipelineParams
@@ -49,7 +50,12 @@ from ui.shell.add_source_dialog import (
 )
 from ui.shell.install_wizard import ensure_backend_installed
 from ui.shell.run_controller import RunController, RunRequest
-from ui.shell.screens import EmptyStateScreen, SessionScreen, SessionScreenData
+from ui.shell.screens import (
+    EmptyStateScreen,
+    OnboardingOverlay,
+    SessionScreen,
+    SessionScreenData,
+)
 from ui.shell.settings_drawer import SettingsDrawer
 from ui.widgets import SourceCardData
 
@@ -244,15 +250,35 @@ class MainWindow(QMainWindow):
         # P0a — start on the empty state screen. A full SessionScreen
         # is built lazily inside :meth:`_load_session`, so users only
         # see the 4-block layout once they actually have a session.
+        # P2a — seed the screen with the persisted recent-sessions list
+        # so returning users see their previous sessions on launch.
+        initial_recent = recent_sessions.load_recent()
         self._session_screen: SessionScreen | None = None
         self._empty_state_screen: EmptyStateScreen | None = EmptyStateScreen(
-            parent=self
+            parent=self, recent=initial_recent
         )
         self._empty_state_screen.pick_folder_requested.connect(
             self._on_open_session
         )
         self._empty_state_screen.folder_dropped.connect(self._load_session)
+        self._empty_state_screen.recent_session_selected.connect(
+            self._load_session
+        )
         self.setCentralWidget(self._empty_state_screen)
+
+        # P2b — first-run onboarding overlay. Only show it when the
+        # user has never dismissed it AND has no recents — if they do
+        # have recents, they've obviously opened a session before, so
+        # the welcome would be redundant (they may have manually wiped
+        # the flag file).
+        self._onboarding_overlay: OnboardingOverlay | None = None
+        if onboarding_state.is_first_run() and not initial_recent:
+            self._onboarding_overlay = OnboardingOverlay(parent=self)
+            self._onboarding_overlay.dismissed.connect(
+                self._on_onboarding_dismissed
+            )
+            self._onboarding_overlay.show()
+            self._onboarding_overlay.raise_()
 
         # SettingsDrawer — overlay, parent=self, НЕ в layout.
         self._settings_drawer = SettingsDrawer(self)
@@ -371,6 +397,14 @@ class MainWindow(QMainWindow):
         self._session_dir = session_dir
         self._source_modules = modules
         self._replace_session_screen(data)
+
+        # P2a — persist for the next launch. Failures here are logged
+        # but not surfaced: the session has already loaded successfully
+        # and a disk error on the config dir must not break the UX.
+        try:
+            recent_sessions.add_recent(session_dir)
+        except Exception:  # noqa: BLE001 — best-effort persistence
+            _log.exception("Failed to persist recent session %s", session_dir)
 
     def _replace_session_screen(self, data: SessionScreenData) -> None:
         """Swap the central widget for a fresh SessionScreen.
@@ -789,6 +823,19 @@ class MainWindow(QMainWindow):
         self._settings_drawer.open_with_panel(
             panel, title=title, subtitle=subtitle or "—"
         )
+
+    def _on_onboarding_dismissed(self) -> None:
+        """Drop the overlay reference after the user dismisses it.
+
+        The overlay has already hidden itself; we release our handle
+        so Qt can garbage-collect the widget. The persistent flag was
+        written inside :meth:`OnboardingOverlay._on_dismiss_clicked`,
+        so further launches will see ``is_first_run() is False``.
+        """
+        overlay = self._onboarding_overlay
+        self._onboarding_overlay = None
+        if overlay is not None:
+            overlay.deleteLater()
 
     # ── Defaults for merger / renderer ───────────────────────────────
 

@@ -1,4 +1,4 @@
-"""EmptyStateScreen — initial screen before a session is opened (P0a).
+"""EmptyStateScreen — initial screen before a session is opened (P0a, P2a).
 
 Shown by :class:`ui.shell.app.MainWindow` when ``_session_dir is None``.
 Replaces the previous behavior of rendering the full 4-block
@@ -13,10 +13,19 @@ The empty state offers two obvious paths to a session folder:
     * click the "Выбрать папку…" primary button, which mirrors the
       existing ``File → Open session…`` menu (``Ctrl+O``).
 
+P2a adds a compact "Недавние сессии" list below the drop zone so
+returning users can reopen a previous session with a single click. The
+list is purely presentational — the host (:class:`MainWindow`) owns
+the persistent storage (:mod:`core.recent_sessions`) and pushes the
+initial data in via the constructor's ``recent=`` kwarg or
+:meth:`refresh_recent`.
+
 Signals:
     pick_folder_requested: emitted when the primary button is clicked.
     folder_dropped(Path): emitted when a single directory is dropped
         onto the drop zone.
+    recent_session_selected(Path): emitted when the user clicks the
+        "открыть" button on a row in the "Недавние сессии" section.
 
 Drag-and-drop rules (P0a):
     * Only directories accepted. A single file or multiple items shows a
@@ -29,12 +38,14 @@ Drag-and-drop rules (P0a):
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -42,7 +53,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.recent_sessions import RecentSession
 from ui.shell import theme
+
+#: Russian month abbreviations for the relative-time formatter. Order
+#: matters — indexed by ``month - 1``.
+_RU_MONTH_ABBR: tuple[str, ...] = tuple(
+    "янв фев мар апр май июн июл авг сен окт ноя дек".split()
+)
 
 
 def _drop_zone_style(*, active: bool) -> str:
@@ -104,6 +122,64 @@ def _primary_button_style() -> str:
             background-color: {theme.COLOR_ACCENT_HOVER};
         }}
     """
+
+
+def _ghost_button_style() -> str:
+    """Muted link-style button for the per-row "открыть" action."""
+    return f"""
+        QPushButton {{
+            color: {theme.COLOR_ACCENT};
+            background-color: transparent;
+            border: none;
+            padding: 4px 8px;
+            font-size: {theme.FONT_SIZE_SMALL_PX}px;
+        }}
+        QPushButton:hover {{
+            color: {theme.COLOR_ACCENT_HOVER};
+            text-decoration: underline;
+        }}
+    """
+
+
+def _clear_link_style() -> str:
+    """Muted link-style button for the "очистить" header action."""
+    return f"""
+        QPushButton {{
+            color: {theme.COLOR_MUTED_FG};
+            background-color: transparent;
+            border: none;
+            padding: 2px 6px;
+            font-size: {theme.FONT_SIZE_SMALL_PX}px;
+        }}
+        QPushButton:hover {{
+            color: {theme.COLOR_FOREGROUND};
+            text-decoration: underline;
+        }}
+    """
+
+
+def _format_relative_time(ts: float, *, now: datetime | None = None) -> str:
+    """Format ``ts`` (unix seconds) as a short Russian relative-time label.
+
+    Rules:
+        * today (same calendar date) → ``"сегодня"``
+        * yesterday → ``"вчера"``
+        * within the last 7 days → ``"N дн. назад"``
+        * otherwise → ``"DD MMM"`` with Russian month abbreviations.
+    """
+    now = now or datetime.now()
+    when = datetime.fromtimestamp(ts)
+    today = now.date()
+    then = when.date()
+    delta_days = (today - then).days
+    if delta_days <= 0 and then == today:
+        return "сегодня"
+    if delta_days == 1:
+        return "вчера"
+    if 1 < delta_days <= 7:
+        return f"{delta_days} дн. назад"
+    month_abbr = _RU_MONTH_ABBR[then.month - 1]
+    return f"{then.day} {month_abbr}"
 
 
 class _DropZoneFrame(QFrame):
@@ -172,6 +248,81 @@ class _DropZoneFrame(QFrame):
         self.folder_dropped.emit(path)
 
 
+class _RecentSessionRow(QFrame):
+    """One row in the "Недавние сессии" list.
+
+    Layout:
+        📁  <basename>        <relative-time>        [открыть]
+
+    The whole row is a :class:`QFrame` so it can carry a bottom-border
+    separator and react to hover later without refactoring. Only the
+    "открыть" button is clickable — keeps the hit-target unambiguous
+    and avoids having to simulate row-wide hover states in QSS.
+    """
+
+    open_requested = Signal(Path)
+
+    def __init__(
+        self, session: RecentSession, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._session = session
+        self.setObjectName("recentSessionRow")
+        self.setStyleSheet(
+            f"QFrame#recentSessionRow {{"
+            f"  background-color: transparent;"
+            f"  border: none;"
+            f"  border-bottom: 1px solid {theme.COLOR_BORDER};"
+            f"}}"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 6, 4, 6)
+        layout.setSpacing(theme.GAP_MEDIUM_PX)
+
+        icon = QLabel("📁", self)
+        icon.setStyleSheet(
+            f"color: {theme.COLOR_ACCENT}; "
+            f"font-size: {theme.FONT_SIZE_H3_PX}px; "
+            "background: transparent;"
+        )
+        layout.addWidget(icon)
+
+        title = QLabel(session.path.name or str(session.path), self)
+        title.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_BODY_PX}px; "
+            "background: transparent;"
+        )
+        layout.addWidget(title, stretch=1)
+
+        when = QLabel(_format_relative_time(session.opened_at), self)
+        when.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        when.setStyleSheet(
+            f"color: {theme.COLOR_MUTED_FG}; "
+            f"font-size: {theme.FONT_SIZE_SMALL_PX}px; "
+            "background: transparent;"
+        )
+        layout.addWidget(when)
+
+        open_btn = QPushButton("открыть", self)
+        open_btn.setObjectName("recentOpenButton")
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.setStyleSheet(_ghost_button_style())
+        open_btn.clicked.connect(self._emit_open)
+        layout.addWidget(open_btn)
+        self._open_btn = open_btn
+
+    @property
+    def session_path(self) -> Path:
+        return self._session.path
+
+    def _emit_open(self) -> None:
+        self.open_requested.emit(self._session.path)
+
+
 class EmptyStateScreen(QWidget):
     """Landing screen shown before any session folder is opened.
 
@@ -183,17 +334,27 @@ class EmptyStateScreen(QWidget):
         * Accent pill button "Выбрать папку…".
         * Muted footer hint: "Craig-бот → распакуйте .zip → перетащите
           папку".
+        * (P2a) If ``recent`` is non-empty: a "Недавние сессии" card
+          with one row per recent session.
 
     Signals:
         pick_folder_requested: primary button clicked.
         folder_dropped(Path): a valid directory was dropped. The host
             routes this to ``MainWindow._load_session``.
+        recent_session_selected(Path): "открыть" clicked on a row in
+            the recent sessions list.
     """
 
     pick_folder_requested = Signal()
     folder_dropped = Signal(Path)
+    recent_session_selected = Signal(Path)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        recent: tuple[RecentSession, ...] = (),
+    ) -> None:
         super().__init__(parent)
         self.setStyleSheet(f"background-color: {theme.COLOR_BACKGROUND};")
 
@@ -260,7 +421,93 @@ class EmptyStateScreen(QWidget):
         )
         outer.addWidget(footer)
 
+        # ── Recent sessions card (P2a) ──────────────────────────────────
+        self._recent_section = self._build_recent_section()
+        outer.addWidget(self._recent_section)
+
         outer.addStretch(1)
+
+        # Apply initial data now that every widget is in place.
+        self.refresh_recent(recent)
+
+    # ── Recent sessions (P2a) ────────────────────────────────────────
+
+    def _build_recent_section(self) -> QWidget:
+        """Build the "Недавние сессии" container (header + rows area)."""
+        section = QWidget(self)
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(theme.GAP_SMALL_PX)
+
+        header_row = QWidget(section)
+        header_layout = QHBoxLayout(header_row)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(theme.GAP_SMALL_PX)
+
+        header_label = QLabel("Недавние сессии", header_row)
+        header_label.setStyleSheet(
+            f"color: {theme.COLOR_FOREGROUND}; "
+            f"font-size: {theme.FONT_SIZE_H3_PX}px; "
+            "font-weight: 500; "
+            "background: transparent;"
+        )
+        header_layout.addWidget(header_label, stretch=1)
+
+        self._clear_button = QPushButton("очистить", header_row)
+        self._clear_button.setObjectName("recentClearButton")
+        self._clear_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_button.setStyleSheet(_clear_link_style())
+        self._clear_button.clicked.connect(self._on_clear_clicked)
+        header_layout.addWidget(self._clear_button)
+
+        section_layout.addWidget(header_row)
+
+        # Container that will hold the row widgets. We rebuild its
+        # contents on every refresh_recent() call.
+        self._rows_container = QWidget(section)
+        self._rows_layout = QVBoxLayout(self._rows_container)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(0)
+        section_layout.addWidget(self._rows_container)
+
+        return section
+
+    def refresh_recent(self, sessions: tuple[RecentSession, ...]) -> None:
+        """Rebuild the recent-sessions rows from ``sessions``.
+
+        Hides the whole section (header + rows) when ``sessions`` is
+        empty — we don't want a lonely "Недавние сессии" header with
+        nothing under it on first run.
+        """
+        # Tear down any previous rows. ``takeAt(0)`` removes items in
+        # order; ``setParent(None)`` detaches the widget so Qt will
+        # garbage-collect it.
+        while self._rows_layout.count() > 0:
+            item = self._rows_layout.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+        if not sessions:
+            self._recent_section.setVisible(False)
+            return
+
+        self._recent_section.setVisible(True)
+        for s in sessions:
+            row = _RecentSessionRow(s, parent=self._rows_container)
+            row.open_requested.connect(self.recent_session_selected.emit)
+            self._rows_layout.addWidget(row)
+
+    def _on_clear_clicked(self) -> None:
+        """Clear the persisted list and hide the section."""
+        # Imported lazily so a test that monkeypatches
+        # ``ui.shell.screens.empty_state_screen.clear_recent`` still
+        # overrides the callable actually invoked here.
+        from core import recent_sessions
+
+        recent_sessions.clear_recent()
+        self.refresh_recent(())
 
     # ── Slots ────────────────────────────────────────────────────────
 

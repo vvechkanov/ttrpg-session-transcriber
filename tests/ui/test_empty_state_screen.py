@@ -1,4 +1,4 @@
-"""Tests for :class:`ui.shell.screens.EmptyStateScreen` (P0a).
+"""Tests for :class:`ui.shell.screens.EmptyStateScreen` (P0a + P2a).
 
 Covers:
     * The primary button ("Выбрать папку…") emits
@@ -7,10 +7,15 @@ Covers:
       ``folder_dropped(Path)`` with the right path.
     * Dropping a single file on the drop zone does not emit
       ``folder_dropped`` and surfaces a :class:`QMessageBox.warning`.
+    * P2a — "Недавние сессии" section is rendered only when the
+      ``recent`` list is non-empty, rows emit
+      ``recent_session_selected`` on click, and the "очистить" button
+      wipes persistence and the rendered rows.
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -21,7 +26,9 @@ pytest.importorskip("pytestqt")
 from PySide6.QtCore import QMimeData, QUrl
 from PySide6.QtWidgets import QMessageBox, QPushButton
 
+from core.recent_sessions import RecentSession
 from ui.shell.screens import EmptyStateScreen
+from ui.shell.screens import empty_state_screen as ess_module
 
 
 def _mime_with_urls(urls: list[str]) -> QMimeData:
@@ -124,3 +131,162 @@ class TestEmptyStateScreen:
         )
         assert received == []
         assert calls == ["warning"]
+
+
+# ── P2a — Recent sessions list ─────────────────────────────────────────
+
+
+@pytest.mark.gui
+class TestRecentSessions:
+    def test_constructor_accepts_recent_kwarg(self, qtbot):
+        # Keyword-only and optional with default.
+        screen = EmptyStateScreen(recent=())
+        qtbot.addWidget(screen)
+        assert screen.isVisible() is False  # not shown yet, but built
+
+    def test_no_recents_hides_section(self, qtbot):
+        screen = EmptyStateScreen(recent=())
+        qtbot.addWidget(screen)
+        # The section container must exist but be hidden so the empty
+        # state doesn't show a lonely "Недавние сессии" header.
+        assert screen._recent_section.isHidden() is True  # noqa: SLF001
+
+    def test_n_recents_render_n_rows(self, qtbot, tmp_path: Path):
+        sessions = tuple(
+            RecentSession(
+                path=(tmp_path / f"s{i}"), opened_at=float(time.time() - i)
+            )
+            for i in range(3)
+        )
+        # Ensure the dirs exist so the row titles aren't empty. The
+        # screen doesn't check for existence itself — that's the job
+        # of ``core.recent_sessions.load_recent``.
+        for s in sessions:
+            s.path.mkdir()
+
+        screen = EmptyStateScreen(recent=sessions)
+        qtbot.addWidget(screen)
+
+        rows = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert len(rows) == 3
+
+    def test_open_row_emits_recent_session_selected(
+        self, qtbot, tmp_path: Path
+    ):
+        wanted = tmp_path / "session-42"
+        wanted.mkdir()
+        sessions = (
+            RecentSession(path=wanted, opened_at=float(time.time())),
+        )
+
+        screen = EmptyStateScreen(recent=sessions)
+        qtbot.addWidget(screen)
+
+        received: list[Path] = []
+        screen.recent_session_selected.connect(received.append)
+
+        # Click the "открыть" button on the first (and only) row.
+        rows = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert len(rows) == 1
+        rows[0]._open_btn.click()  # noqa: SLF001
+
+        assert received == [wanted]
+
+    def test_clear_button_wipes_and_refreshes(
+        self, qtbot, tmp_path: Path, monkeypatch
+    ):
+        session = tmp_path / "session-1"
+        session.mkdir()
+        sessions = (
+            RecentSession(path=session, opened_at=float(time.time())),
+        )
+
+        screen = EmptyStateScreen(recent=sessions)
+        qtbot.addWidget(screen)
+
+        # Sanity: section not hidden, one row.
+        assert screen._recent_section.isHidden() is False  # noqa: SLF001
+        rows = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert len(rows) == 1
+
+        clear_calls: list[bool] = []
+
+        from core import recent_sessions as rs_module
+
+        monkeypatch.setattr(
+            rs_module, "clear_recent", lambda: clear_calls.append(True)
+        )
+
+        screen._clear_button.click()  # noqa: SLF001
+
+        assert clear_calls == [True]
+        # Section should be hidden now that the list is empty.
+        assert screen._recent_section.isHidden() is True  # noqa: SLF001
+        rows_after = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert rows_after == []
+
+    def test_refresh_recent_is_idempotent(self, qtbot, tmp_path: Path):
+        """Calling refresh_recent multiple times should not leak rows."""
+        session = tmp_path / "only"
+        session.mkdir()
+        sessions = (
+            RecentSession(path=session, opened_at=float(time.time())),
+        )
+
+        screen = EmptyStateScreen(recent=sessions)
+        qtbot.addWidget(screen)
+
+        # Call refresh again with the same data — row count stable at 1.
+        screen.refresh_recent(sessions)
+        rows = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert len(rows) == 1
+
+        # Shrink to empty — rows disappear.
+        screen.refresh_recent(())
+        rows_empty = screen._rows_container.findChildren(  # noqa: SLF001
+            ess_module._RecentSessionRow
+        )
+        assert rows_empty == []
+
+
+# ── Relative-time formatter ────────────────────────────────────────────
+
+
+class TestFormatRelativeTime:
+    def test_today(self):
+        from datetime import datetime
+
+        now = datetime(2026, 4, 19, 15, 0)
+        ts = datetime(2026, 4, 19, 9, 0).timestamp()
+        assert ess_module._format_relative_time(ts, now=now) == "сегодня"
+
+    def test_yesterday(self):
+        from datetime import datetime
+
+        now = datetime(2026, 4, 19, 15, 0)
+        ts = datetime(2026, 4, 18, 20, 0).timestamp()
+        assert ess_module._format_relative_time(ts, now=now) == "вчера"
+
+    def test_three_days_ago(self):
+        from datetime import datetime
+
+        now = datetime(2026, 4, 19, 15, 0)
+        ts = datetime(2026, 4, 16, 12, 0).timestamp()
+        assert ess_module._format_relative_time(ts, now=now) == "3 дн. назад"
+
+    def test_older_than_week_uses_russian_month(self):
+        from datetime import datetime
+
+        now = datetime(2026, 4, 19, 15, 0)
+        ts = datetime(2026, 4, 3, 12, 0).timestamp()
+        assert ess_module._format_relative_time(ts, now=now) == "3 апр"

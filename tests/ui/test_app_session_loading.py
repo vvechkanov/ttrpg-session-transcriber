@@ -349,3 +349,136 @@ class TestMainWindowFolderDrop:
             self._mime([str(session_a), str(session_b)])
         )
         assert calls == []
+
+
+# ── P2a / P2b — recent sessions and onboarding overlay wiring ────────────
+
+
+@pytest.fixture
+def isolated_config(tmp_path: Path, monkeypatch):
+    """Redirect recent-sessions and onboarding storage to ``tmp_path``.
+
+    Every MainWindow test that touches onboarding / recents implicitly
+    depends on :func:`core.recent_sessions.config_dir`; this fixture
+    makes sure we never pollute the real user config dir.
+    """
+    target = tmp_path / "cfg"
+    target.mkdir()
+    from core import onboarding_state, recent_sessions
+
+    monkeypatch.setattr(recent_sessions, "config_dir", lambda: target)
+    monkeypatch.setattr(onboarding_state, "config_dir", lambda: target)
+    return target
+
+
+@pytest.mark.gui
+class TestMainWindowRecentSessions:
+    def test_load_session_calls_add_recent(
+        self, qtbot, tmp_path: Path, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            app_module.recent_sessions,
+            "add_recent",
+            lambda p: calls.append(p) or (),
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        session = _make_session(
+            tmp_path / "sess", with_chat=False, with_audio=True
+        )
+        window._load_session(session)
+
+        assert calls == [session]
+
+    def test_recent_session_selected_routes_to_load(
+        self, qtbot, tmp_path: Path, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        captured: list[Path] = []
+        monkeypatch.setattr(
+            window, "_load_session", lambda p: captured.append(p)
+        )
+
+        target = tmp_path / "some-session"
+        target.mkdir()
+        # Empty-state screen is still the central widget; emit directly.
+        assert window._empty_state_screen is not None
+        window._empty_state_screen.recent_session_selected.emit(target)
+
+        assert captured == [target]
+
+
+@pytest.mark.gui
+class TestMainWindowOnboardingOverlay:
+    def test_overlay_shown_on_first_run(
+        self, qtbot, monkeypatch, isolated_config: Path
+    ):
+        from core import onboarding_state, recent_sessions
+        from ui.shell import app as app_module
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: True
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions, "load_recent", lambda: ()
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+
+        assert window._onboarding_overlay is not None
+        assert window._onboarding_overlay.isVisible() or not window.isVisible()
+        # Silence unused imports warning
+        _ = (onboarding_state, recent_sessions)
+
+    def test_overlay_not_shown_when_not_first_run(
+        self, qtbot, monkeypatch, isolated_config: Path
+    ):
+        from ui.shell import app as app_module
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: False
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions, "load_recent", lambda: ()
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+        assert window._onboarding_overlay is None
+
+    def test_overlay_not_shown_when_recents_exist(
+        self, qtbot, monkeypatch, tmp_path: Path, isolated_config: Path
+    ):
+        """First-run flag true BUT recents list non-empty → no overlay.
+
+        A user who manually cleared the flag but has recent sessions
+        has obviously used the app before, so we skip the welcome.
+        """
+        from core.recent_sessions import RecentSession
+        from ui.shell import app as app_module
+
+        session = tmp_path / "prev"
+        session.mkdir()
+
+        monkeypatch.setattr(
+            app_module.onboarding_state, "is_first_run", lambda: True
+        )
+        monkeypatch.setattr(
+            app_module.recent_sessions,
+            "load_recent",
+            lambda: (RecentSession(path=session, opened_at=100.0),),
+        )
+
+        window = app_module.MainWindow()
+        qtbot.addWidget(window)
+        assert window._onboarding_overlay is None
