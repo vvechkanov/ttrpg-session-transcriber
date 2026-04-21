@@ -19,12 +19,14 @@ dropped a folder) fail fast with a user-visible error.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
 from core.asr import AsrSource, make_source
+from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
     # so the runtime load order stays linear.
     from ui.models.app_preferences import AppPreferences
     from ui.models.model_registry import ModelRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 def _format_bytes(size: int) -> str:
@@ -68,10 +73,15 @@ class PipelineController(QObject):
     finished = Signal()
 
     outputPathChanged = Signal()
+    chunksDirChanged = Signal()
 
     @Property(str, notify=outputPathChanged)
     def outputPath(self) -> str:
         return self._output_path
+
+    @Property(str, notify=chunksDirChanged)
+    def chunksDir(self) -> str:
+        return self._chunks_dir
 
     def __init__(
         self,
@@ -123,6 +133,12 @@ class PipelineController(QObject):
         #: it through :pyattr:`outputPath` once the done phase is up.
         self._output_path: str = ""
 
+        #: Directory of post-merge chunks. Populated only when the user
+        #: has opted in via :attr:`AppPreferences.chunkingEnabled`;
+        #: otherwise stays empty and the Done-phase OutputChip for
+        #: chunks hides itself.
+        self._chunks_dir: str = ""
+
     # ── QML API ───────────────────────────────────────────────────────
     @Slot()
     def runAsr(self) -> None:
@@ -144,6 +160,9 @@ class PipelineController(QObject):
         if self._output_path:
             self._output_path = ""
             self.outputPathChanged.emit()
+        if self._chunks_dir:
+            self._chunks_dir = ""
+            self.chunksDirChanged.emit()
         self._cancelled = False
         self._collected_segments = {}
 
@@ -360,7 +379,34 @@ class PipelineController(QObject):
         self._output_path = path
         self.outputPathChanged.emit()
         self._app.setDoneSummary(self._compute_done_summary(path))
+        self._maybe_chunk_output(path)
         self._app.phase = "done"
+
+    def _maybe_chunk_output(self, merged_path: str) -> None:
+        """Run the optional chunker post-step per global preferences.
+
+        Synchronous on the main thread — ``chunk_text_file`` finishes
+        in tens of milliseconds on a typical merged.txt and does not
+        need a QThread. A failure logs and leaves ``chunksDir`` empty
+        so the OutputChip stays hidden; merged.txt is already on disk.
+        """
+
+        if self._preferences is None:
+            return
+        opts = self._preferences.build_chunking_options()
+        if not opts.enabled:
+            return
+        try:
+            dest = chunk_text_file(
+                Path(merged_path),
+                chunk_chars=opts.chunk_chars,
+                overlap_ratio=opts.overlap_ratio,
+            )
+        except (FileNotFoundError, ValueError, OSError):
+            logger.exception("Chunker post-step failed for %s", merged_path)
+            return
+        self._chunks_dir = str(dest)
+        self.chunksDirChanged.emit()
 
     def _compute_done_summary(self, output_path: str) -> dict[str, str | int]:
         """Build the done-phase summary dict from real artefacts.

@@ -232,6 +232,62 @@ Rectangle {
                     }
                 }
 
+                // ── Chunker for LLM ────────────────────────────────
+                SettingsGroup {
+                    title: "Чанки для LLM"
+                    description: "Резать merged.txt на перекрывающиеся куски для последующей обработки в LLM (summary, редактура). Границы — по параграфам."
+
+                    CheckRow {
+                        text: "Резать merged.txt на чанки после рендера"
+                        checked: preferences.chunkingEnabled
+                        onCheckedChanged: preferences.chunkingEnabled = checked
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        spacing: 14
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            enabled: preferences.chunkingEnabled
+                            label: "РАЗМЕР ЧАНКА (символов)"
+                            hint: "рекомендуется 30 000–60 000"
+
+                            TextInputField {
+                                Layout.fillWidth: true
+                                mono: true
+                                text: preferences.chunkingChunkChars
+                                onEditingFinished: preferences.chunkingChunkChars = text
+                            }
+                        }
+
+                        SettingField {
+                            Layout.fillWidth: true
+                            enabled: preferences.chunkingEnabled
+                            label: "OVERLAP"
+
+                            SelectField {
+                                Layout.fillWidth: true
+                                readonly property var values: ["0.00", "0.10", "0.20", "0.30", "0.40", "0.50"]
+                                model: [
+                                    { v: "0.00", l: "Без перекрытия" },
+                                    { v: "0.10", l: "10%" },
+                                    { v: "0.20", l: "20% (рекомендуется)" },
+                                    { v: "0.30", l: "30%" },
+                                    { v: "0.40", l: "40%" },
+                                    { v: "0.50", l: "50% (максимум)" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.chunkingOverlapRatio))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.chunkingOverlapRatio = values[currentIndex]
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Merger defaults ───────────────────────────────
                 SettingsGroup {
                     title: "Мержер по умолчанию"

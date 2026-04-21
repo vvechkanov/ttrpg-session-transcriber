@@ -445,6 +445,16 @@ Rectangle {
                         }
                     }
 
+                    // ── Chunks output chip (only when user enabled it) ──
+                    OutputChip {
+                        Layout.alignment: Qt.AlignRight
+                        visible: pipeline ? pipeline.chunksDir.length > 0 : false
+                        done: root.phase === "done"
+                        fileName: "chunks/"
+                        outputPath: pipeline ? pipeline.chunksDir : ""
+                        sizeCaption: "готово"
+                    }
+
                     // ── Transcript preview (done phase only) ──────
                     TranscriptPreview {
                         visible: root.phase === "done"
