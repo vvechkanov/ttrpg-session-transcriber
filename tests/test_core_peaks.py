@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import struct
 import subprocess
 from pathlib import Path
@@ -16,21 +17,43 @@ from core.peaks import (
     probe_duration,
 )
 
-# The bundled ffmpeg under tools/ffmpeg/bin. Tests that need a
-# real audio file synthesize one with this binary — no checked-in
-# binary fixtures.
-_FFMPEG = (
-    Path(__file__).resolve().parent.parent / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
-)
+
+def _find_ffmpeg() -> str | None:
+    """Locate an ffmpeg binary: bundled tools/ffmpeg first, then PATH.
+
+    Local Windows dev has the bundled copy; CI runners apt-install
+    ffmpeg (Ubuntu) or fall back to the setup-ffmpeg action (Windows)
+    — both wind up on PATH, so ``shutil.which`` resolves them.
+    """
+
+    bundled = (
+        Path(__file__).resolve().parent.parent
+        / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    )
+    if bundled.is_file():
+        return str(bundled)
+    on_path = shutil.which("ffmpeg")
+    return on_path
 
 
-def _synthesize_sine(path: Path, seconds: float = 2.0, freq: int = 440) -> None:
+@pytest.fixture(scope="module")
+def ffmpeg_bin() -> str:
+    """Cached ffmpeg path; skips the test module if no binary is available."""
+
+    path = _find_ffmpeg()
+    if path is None:
+        pytest.skip("ffmpeg not available (neither bundled nor on PATH)")
+    return path
+
+
+def _synthesize_sine(
+    path: Path, ffmpeg_bin: str, seconds: float = 2.0, freq: int = 440
+) -> None:
     """Write a FLAC sine-wave of ``seconds`` length at ``freq`` Hz."""
 
-    assert _FFMPEG.is_file(), f"bundled ffmpeg not found at {_FFMPEG}"
     subprocess.check_call(
         [
-            str(_FFMPEG),
+            ffmpeg_bin,
             "-f", "lavfi",
             "-i", f"sine=frequency={freq}:duration={seconds}",
             "-ac", "1",
@@ -44,9 +67,9 @@ def _synthesize_sine(path: Path, seconds: float = 2.0, freq: int = 440) -> None:
 
 
 @pytest.fixture
-def sine_file(tmp_path: Path) -> Path:
+def sine_file(tmp_path: Path, ffmpeg_bin: str) -> Path:
     audio = tmp_path / "sine.flac"
-    _synthesize_sine(audio, seconds=2.0, freq=880)
+    _synthesize_sine(audio, ffmpeg_bin, seconds=2.0, freq=880)
     return audio
 
 
@@ -110,12 +133,14 @@ def test_get_or_compute_reuses_fresh_cache(sine_file: Path) -> None:
     assert peaks_second == peaks_first, "stale cache was not reused"
 
 
-def test_get_or_compute_regenerates_when_audio_newer(sine_file: Path) -> None:
+def test_get_or_compute_regenerates_when_audio_newer(
+    sine_file: Path, ffmpeg_bin: str
+) -> None:
     get_or_compute_peaks(sine_file, bins=100)
     cache = cache_path_for(sine_file)
 
     # Re-synthesize with different frequency — cache should be invalidated.
-    _synthesize_sine(sine_file, seconds=2.0, freq=220)
+    _synthesize_sine(sine_file, ffmpeg_bin, seconds=2.0, freq=220)
 
     peaks = get_or_compute_peaks(sine_file, bins=100)
     # The cache was rewritten with the 220 Hz extract; the returned
