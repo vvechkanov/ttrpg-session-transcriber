@@ -23,6 +23,9 @@ Keys grouped by section:
 * ``asr/gigaam_variant``     — "rnnt" | "e2e_rnnt"
 * ``asr/gigaam_precision``   — "fp32" | "int8"
 * ``asr/num_threads``        — CPU threads (string)
+* ``chunking/enabled``       — split merged.txt into LLM chunks (bool)
+* ``chunking/chunk_chars``   — chunk size in characters (string)
+* ``chunking/overlap_ratio`` — paragraph overlap fraction (string)
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from pathlib import Path
 from PySide6.QtCore import Property, QObject, QSettings, Signal
 
 from core.asr import AsrOptions
+from core.chunking import ChunkingOptions
 
 
 def _default_working_folder() -> str:
@@ -60,6 +64,9 @@ class AppPreferences(QObject):
     gigaamVariantChanged = Signal()
     gigaamPrecisionChanged = Signal()
     asrNumThreadsChanged = Signal()
+    chunkingEnabledChanged = Signal()
+    chunkingChunkCharsChanged = Signal()
+    chunkingOverlapRatioChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -116,6 +123,15 @@ class AppPreferences(QObject):
         )
         self._asr_num_threads: str = str(
             self._settings.value("asr/num_threads", "4")
+        )
+        self._chunking_enabled: bool = _to_bool(
+            self._settings.value("chunking/enabled", False)
+        )
+        self._chunking_chunk_chars: str = str(
+            self._settings.value("chunking/chunk_chars", "40000")
+        )
+        self._chunking_overlap_ratio: str = str(
+            self._settings.value("chunking/overlap_ratio", "0.20")
         )
 
     # ── workingFolder ────────────────────────────────────────────────
@@ -300,6 +316,48 @@ class AppPreferences(QObject):
         self._settings.sync()
         self.asrNumThreadsChanged.emit()
 
+    # ── chunkingEnabled ──────────────────────────────────────────────
+    @Property(bool, notify=chunkingEnabledChanged)
+    def chunkingEnabled(self) -> bool:
+        return self._chunking_enabled
+
+    @chunkingEnabled.setter  # type: ignore[no-redef]
+    def chunkingEnabled(self, value: bool) -> None:
+        if value == self._chunking_enabled:
+            return
+        self._chunking_enabled = value
+        self._settings.setValue("chunking/enabled", value)
+        self._settings.sync()
+        self.chunkingEnabledChanged.emit()
+
+    # ── chunkingChunkChars ───────────────────────────────────────────
+    @Property(str, notify=chunkingChunkCharsChanged)
+    def chunkingChunkChars(self) -> str:
+        return self._chunking_chunk_chars
+
+    @chunkingChunkChars.setter  # type: ignore[no-redef]
+    def chunkingChunkChars(self, value: str) -> None:
+        if value == self._chunking_chunk_chars:
+            return
+        self._chunking_chunk_chars = value
+        self._settings.setValue("chunking/chunk_chars", value)
+        self._settings.sync()
+        self.chunkingChunkCharsChanged.emit()
+
+    # ── chunkingOverlapRatio ─────────────────────────────────────────
+    @Property(str, notify=chunkingOverlapRatioChanged)
+    def chunkingOverlapRatio(self) -> str:
+        return self._chunking_overlap_ratio
+
+    @chunkingOverlapRatio.setter  # type: ignore[no-redef]
+    def chunkingOverlapRatio(self, value: str) -> None:
+        if value == self._chunking_overlap_ratio:
+            return
+        self._chunking_overlap_ratio = value
+        self._settings.setValue("chunking/overlap_ratio", value)
+        self._settings.sync()
+        self.chunkingOverlapRatioChanged.emit()
+
     # ── options builder ──────────────────────────────────────────────
     def build_asr_options(self) -> AsrOptions:
         """Snapshot current preferences into an :class:`AsrOptions`."""
@@ -318,6 +376,27 @@ class AppPreferences(QObject):
             gigaam_variant=self._gigaam_variant,
             gigaam_precision=self._gigaam_precision,
             num_threads=_to_int(self._asr_num_threads, 4),
+        )
+
+    def build_chunking_options(self) -> ChunkingOptions:
+        """Snapshot current preferences into a :class:`ChunkingOptions`."""
+
+        def _to_int(raw: str, fallback: int) -> int:
+            try:
+                return int(raw)
+            except ValueError:
+                return fallback
+
+        def _to_float(raw: str, fallback: float) -> float:
+            try:
+                return float(raw)
+            except ValueError:
+                return fallback
+
+        return ChunkingOptions(
+            enabled=self._chunking_enabled,
+            chunk_chars=_to_int(self._chunking_chunk_chars, 40_000),
+            overlap_ratio=_to_float(self._chunking_overlap_ratio, 0.20),
         )
 
 

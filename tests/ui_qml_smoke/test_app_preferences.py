@@ -71,6 +71,9 @@ def main() -> int:
     _assert(prefs.gigaamVariant == "rnnt", f"default variant: {prefs.gigaamVariant!r}")
     _assert(prefs.gigaamPrecision == "fp32", f"default precision: {prefs.gigaamPrecision!r}")
     _assert(prefs.asrNumThreads == "4", f"default threads: {prefs.asrNumThreads!r}")
+    _assert(prefs.chunkingEnabled is False, "default chunking enabled")
+    _assert(prefs.chunkingChunkChars == "40000", f"default chunk_chars: {prefs.chunkingChunkChars!r}")
+    _assert(prefs.chunkingOverlapRatio == "0.20", f"default overlap: {prefs.chunkingOverlapRatio!r}")
 
     # Mutate every field.
     prefs.workingFolder = "D:/TTRPG/Sessions"
@@ -86,6 +89,9 @@ def main() -> int:
     prefs.gigaamVariant = "e2e_rnnt"
     prefs.gigaamPrecision = "int8"
     prefs.asrNumThreads = "2"
+    prefs.chunkingEnabled = True
+    prefs.chunkingChunkChars = "60000"
+    prefs.chunkingOverlapRatio = "0.35"
 
     # A second instance should pick up the persisted values.
     prefs2 = AppPreferences()
@@ -102,6 +108,9 @@ def main() -> int:
     _assert(prefs2.gigaamVariant == "e2e_rnnt", f"round-trip variant: {prefs2.gigaamVariant!r}")
     _assert(prefs2.gigaamPrecision == "int8", f"round-trip precision: {prefs2.gigaamPrecision!r}")
     _assert(prefs2.asrNumThreads == "2", f"round-trip threads: {prefs2.asrNumThreads!r}")
+    _assert(prefs2.chunkingEnabled is True, "round-trip chunking enabled")
+    _assert(prefs2.chunkingChunkChars == "60000", f"round-trip chunk_chars: {prefs2.chunkingChunkChars!r}")
+    _assert(prefs2.chunkingOverlapRatio == "0.35", f"round-trip overlap: {prefs2.chunkingOverlapRatio!r}")
 
     # build_asr_options snapshot — strings coerced to ints, others pass through.
     opts = prefs2.build_asr_options()
@@ -112,6 +121,12 @@ def main() -> int:
     _assert(opts.gigaam_variant == "e2e_rnnt", f"opts.gigaam_variant: {opts.gigaam_variant!r}")
     _assert(opts.gigaam_precision == "int8", f"opts.gigaam_precision: {opts.gigaam_precision!r}")
     _assert(opts.num_threads == 2, f"opts.num_threads: {opts.num_threads!r}")
+
+    # build_chunking_options — string-to-int/float coercion plus enabled bool.
+    copts = prefs2.build_chunking_options()
+    _assert(copts.enabled is True, f"copts.enabled: {copts.enabled!r}")
+    _assert(copts.chunk_chars == 60_000, f"copts.chunk_chars: {copts.chunk_chars!r}")
+    _assert(abs(copts.overlap_ratio - 0.35) < 1e-9, f"copts.overlap_ratio: {copts.overlap_ratio!r}")
 
     print("OK: AppPreferences round-trips through QSettings(IniFormat)")
     return 0
