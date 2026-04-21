@@ -125,3 +125,90 @@ class TestStageCallback:
         with pytest.raises(FileNotFoundError):
             run(bogus, _make_params(), on_stage=lambda s, m: seen.append(s))
         assert seen == []
+
+
+class TestChunkStage:
+    """#7 7A — ``"chunk"`` stage is emitted only when chunking enabled."""
+
+    def test_chunk_stage_skipped_when_disabled(
+        self, tmp_path: Path, patched_pipeline
+    ):
+        stages: list[str] = []
+        run(
+            tmp_path,
+            _make_params(),
+            on_stage=lambda s, m: stages.append(s),
+        )
+        assert "chunk" not in stages
+
+    def test_chunk_stage_emitted_when_enabled(
+        self,
+        tmp_path: Path,
+        patched_pipeline,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from core.chunking import ChunkingOptions
+        from core.pipeline import PipelineParams
+
+        calls: list[dict] = []
+
+        def _fake_chunk(merged_path, **kwargs):
+            calls.append({"merged": merged_path, **kwargs})
+            return tmp_path / "chunks"
+
+        monkeypatch.setattr("core.pipeline.chunk_text_file", _fake_chunk)
+
+        stages: list[tuple[str, str]] = []
+        params = PipelineParams(
+            speech_backend="fake",
+            merger="script",
+            renderer="plain-text",
+            output_filename="merged.txt",
+            device="cpu",
+            chunking=ChunkingOptions(
+                enabled=True, chunk_chars=30_000, overlap_ratio=0.15
+            ),
+        )
+        run(tmp_path, params, on_stage=lambda s, m: stages.append((s, m)))
+
+        stage_names = [s for s, _ in stages]
+        assert stage_names == [
+            "start",
+            "speech",
+            "chat",
+            "merge",
+            "render",
+            "chunk",
+            "done",
+        ]
+        assert len(calls) == 1
+        assert calls[0]["chunk_chars"] == 30_000
+        assert calls[0]["overlap_ratio"] == pytest.approx(0.15)
+
+    def test_chunk_failure_does_not_break_pipeline(
+        self,
+        tmp_path: Path,
+        patched_pipeline,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from core.chunking import ChunkingOptions
+        from core.pipeline import PipelineParams
+
+        def _boom(merged_path, **kwargs):
+            raise ValueError("merged file is empty")
+
+        monkeypatch.setattr("core.pipeline.chunk_text_file", _boom)
+
+        stages: list[str] = []
+        params = PipelineParams(
+            speech_backend="fake",
+            merger="script",
+            renderer="plain-text",
+            output_filename="merged.txt",
+            device="cpu",
+            chunking=ChunkingOptions(enabled=True),
+        )
+        run(tmp_path, params, on_stage=lambda s, m: stages.append(s))
+
+        assert "done" in stages
+        assert stages.index("chunk") < stages.index("done")

@@ -135,3 +135,8 @@ class TestPipelineParamsDefaults:
         p = PipelineParams()
         with pytest.raises((AttributeError, TypeError)):
             p.device = "cpu"  # type: ignore[misc]
+
+    def test_default_chunking_is_none(self):
+        from core.pipeline import PipelineParams
+        p = PipelineParams()
+        assert p.chunking is None

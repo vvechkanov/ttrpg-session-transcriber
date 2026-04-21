@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+from core.chunking import ChunkingOptions, chunk_text_file
 from core.discovery import find_fvtt_chat_log, find_info_file
 from core.gpu_check import check_gpu_or_warn
 from domain.annotations import ChatMessage
@@ -29,11 +30,15 @@ logger = logging.getLogger(__name__)
 #: Progress stages emitted by :func:`run` through the ``on_stage`` callback.
 #:
 #: The pipeline is synchronous and stage-granular — there's no per-track
-#: progress, intentionally. UI hosts map these five stages onto a 0..1
+#: progress, intentionally. UI hosts map these stages onto a 0..1
 #: progress bar. The callback is invoked inside the pipeline thread;
 #: hosts are responsible for marshalling the signal to the GUI thread
 #: (``QThread.QueuedConnection`` does this for us).
-PipelineStage = Literal["start", "speech", "chat", "merge", "render", "done"]
+#:
+#: The ``"chunk"`` stage is emitted only when ``params.chunking`` is
+#: configured with ``enabled=True``; otherwise the sequence is the
+#: same as before.
+PipelineStage = Literal["start", "speech", "chat", "merge", "render", "chunk", "done"]
 
 #: Callable type for progress callbacks. Receives stage name and optional
 #: free-form message (file names, track counts, etc).
@@ -63,6 +68,7 @@ class PipelineParams:
     gigaam_variant: str = "rnnt"  # "rnnt" | "e2e_rnnt"
     gigaam_precision: str = "fp32"  # "fp32" | "int8"
     num_threads: int = 4  # CPU threads for sherpa-onnx inference
+    chunking: ChunkingOptions | None = None
 
 
 def run(
@@ -133,6 +139,23 @@ def run(
     output_path = session_dir / params.output_filename
     output_path.write_bytes(payload)
     logger.info("Wrote %d bytes to %s", len(payload), output_path)
+
+    if params.chunking is not None and params.chunking.enabled:
+        stage_cb(
+            "chunk",
+            f"{params.chunking.chunk_chars}ch/{params.chunking.overlap_ratio:.2f}",
+        )
+        try:
+            chunks_dir = chunk_text_file(
+                output_path,
+                chunk_chars=params.chunking.chunk_chars,
+                overlap_ratio=params.chunking.overlap_ratio,
+            )
+            logger.info("Wrote chunks to %s", chunks_dir)
+        except (FileNotFoundError, ValueError):
+            # merged.txt уже записан; не валим весь pipeline из-за пост-шага.
+            logger.exception("Chunking post-step failed for %s", output_path)
+
     stage_cb("done", str(output_path))
 
 

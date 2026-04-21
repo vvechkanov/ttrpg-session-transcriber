@@ -112,6 +112,20 @@ def split_paragraphs(text: str) -> list[str]:
 
 
 @dataclass(frozen=True)
+class ChunkingOptions:
+    """Post-render chunking knobs, forwarded from UI preferences.
+
+    ``enabled`` controls whether :func:`core.pipeline.run` invokes
+    :func:`chunk_text_file` after the render stage. The other two
+    fields map 1:1 onto the kwargs of :func:`chunk_text_file`.
+    """
+
+    enabled: bool = False
+    chunk_chars: int = 40_000
+    overlap_ratio: float = 0.20
+
+
+@dataclass(frozen=True)
 class Chunk:
     start_paragraph: int
     end_paragraph: int
