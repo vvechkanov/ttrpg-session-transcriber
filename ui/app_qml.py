@@ -94,7 +94,7 @@ def main() -> int:
     # down mid-extract.
     _peaks_state: dict[str, object] = {"thread": None, "worker": None}
 
-    def _on_audio_paths_changed(paths: list[tuple[int, str]]) -> None:
+    def _on_audio_paths_changed(paths: list[tuple[int, int, str]]) -> None:
         # Tear down any prior worker — dropping a new folder supersedes
         # the previous peaks job.
         prev_thread = _peaks_state.get("thread")

@@ -361,3 +361,93 @@ def test_malformed_combat_still_gets_a_row_fullwidth(tmp_path: Path) -> None:
     # full-width fallback for that single row.
     assert start_pct == 0.0
     assert end_pct == 100.0
+
+
+# ─── feature #4 iteration 4b — per-segment peaks ────────────────────────
+
+
+def test_set_peaks_per_segment_populates_segments_role(tmp_path: Path) -> None:
+    """setPeaks(row, seg_idx, peaks) fills peaks_by_segment and the
+    SegmentsRole payload exposes the matching list in order."""
+
+    _ensure_app()
+
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+
+    craig1 = session / "craig-1"
+    craig1.mkdir()
+    _write_flac_stub(craig1 / "1-alice.flac")
+    _write_info(craig1, "2026-04-09T17:00:00Z")
+
+    craig2 = session / "craig-2"
+    craig2.mkdir()
+    _write_flac_stub(craig2 / "1-alice.flac")
+    _write_info(craig2, "2026-04-09T18:00:00Z")
+
+    tracks = TrackListModel()
+    tracks.loadFromDir(str(session))
+
+    # One row (Alice), two segments.
+    assert tracks.rowCount() == 1
+    tracks.setPeaks(0, 0, [0.1, 0.2, 0.3])
+    tracks.setPeaks(0, 1, [0.5, 0.6])
+
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert len(payload) == 2
+    assert payload[0]["peaks"] == [0.1, 0.2, 0.3]
+    assert payload[1]["peaks"] == [0.5, 0.6]
+
+
+def test_set_peaks_primary_mirrors_to_row_peaks(tmp_path: Path) -> None:
+    """Writing seg_idx=0 also updates the row-level ``peaks`` list so
+    legacy PeaksRole readers still see the primary waveform."""
+
+    _ensure_app()
+
+    from ui.models import TrackListModel
+
+    session = tmp_path / "flat"
+    session.mkdir()
+    _write_flac_stub(session / "1-andrey.flac")
+
+    tracks = TrackListModel()
+    tracks.loadFromDir(str(session))
+
+    tracks.setPeaks(0, 0, [0.9, 0.8])
+    # PeaksRole exposes the row-level list — same content.
+    assert tracks.data(tracks.index(0), TrackListModel.PeaksRole) == [0.9, 0.8]
+
+
+def test_set_peaks_secondary_does_not_touch_primary(tmp_path: Path) -> None:
+    """Non-primary peaks land on the segment, leave the row mirror alone."""
+
+    _ensure_app()
+
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+
+    craig1 = session / "craig-1"
+    craig1.mkdir()
+    _write_flac_stub(craig1 / "1-alice.flac")
+    _write_info(craig1, "2026-04-09T17:00:00Z")
+
+    craig2 = session / "craig-2"
+    craig2.mkdir()
+    _write_flac_stub(craig2 / "1-alice.flac")
+    _write_info(craig2, "2026-04-09T18:00:00Z")
+
+    tracks = TrackListModel()
+    tracks.loadFromDir(str(session))
+
+    # Start with empty peaks everywhere, then drop secondary-only.
+    tracks.setPeaks(0, 1, [0.42])
+    # Row-level primary mirror is still empty.
+    assert tracks.data(tracks.index(0), TrackListModel.PeaksRole) == []
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert payload[0]["peaks"] == []
+    assert payload[1]["peaks"] == [0.42]

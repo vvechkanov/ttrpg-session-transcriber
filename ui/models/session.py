@@ -271,6 +271,11 @@ class TrackEntry:
     model_id: str
     model_override: bool
     peaks: list[float] = field(default_factory=list)
+    #: Per-segment waveform peaks, parallel to :attr:`segments`. Primary
+    #: segment's peaks are mirrored into :attr:`peaks` so legacy code
+    #: paths reading the row-level peaks list stay functional. Feature
+    #: #4 iter 4b extraction runs once per segment via PeaksWorker.
+    peaks_by_segment: list[list[float]] = field(default_factory=list)
     # 0.0 → 1.0 share of this track that has been transcribed. Mutable
     # — AsrWorker emits progress into this via ``TrackListModel
     # .setProgress``. ``0`` means "nothing yet" (idle state).
@@ -379,16 +384,17 @@ class TrackListModel(QAbstractListModel):
             case TrackListModel.SegmentsRole:  return self._segments_payload(t)
         return None
 
-    def _segments_payload(self, entry: TrackEntry) -> list[dict[str, float]]:
-        """Return ``[{"startPct": x, "endPct": y}, ...]`` — one per segment.
+    def _segments_payload(self, entry: TrackEntry) -> list[dict[str, Any]]:
+        """Return ``[{"startPct", "endPct", "peaks"}, ...]`` — one per segment.
 
         Maps each :class:`TrackSegment` to its position on the shared
         absolute-time ruler via the :class:`TimelineWindow` published
-        by :class:`SourceListModel`. The returned list length always
-        matches ``len(entry.segments)`` (or is a single-element
-        fallback when the entry carries no segments at all — e.g. a
-        unit-test stub or an explicitly-typed ``TrackEntry`` without
-        calling :meth:`loadFromDir`).
+        by :class:`SourceListModel` and attaches the per-segment
+        waveform peaks from :attr:`TrackEntry.peaks_by_segment`. The
+        returned list length always matches ``len(entry.segments)`` (or
+        is a single-element fallback when the entry carries no segments
+        at all — e.g. a unit-test stub or an explicitly-typed
+        ``TrackEntry`` without calling :meth:`loadFromDir`).
 
         Per-segment fallback to ``{0.0, 100.0}`` triggers when:
 
@@ -402,29 +408,45 @@ class TrackListModel(QAbstractListModel):
         ``duration_sec`` is unknown — 4a doesn't probe durations here
         (that stays on the async ffprobe path) so segments without an
         explicit end extend to the right edge of the ruler.
+
+        The ``peaks`` field carries the segment's waveform; QML renders
+        it with a :class:`WaveformCanvas` inside the segment rect.
+        Empty list while the peaks worker has not yet landed results
+        for that segment — the waveform draws as a flat line.
         """
 
         if not entry.segments:
-            return [{"startPct": 0.0, "endPct": 100.0}]
+            return [{"startPct": 0.0, "endPct": 100.0, "peaks": list(entry.peaks)}]
 
         window: TimelineWindow | None = None
         if self._session_meta is not None:
             window = self._session_meta.timelineWindow()
 
-        payload: list[dict[str, float]] = []
-        for seg in entry.segments:
+        payload: list[dict[str, Any]] = []
+        for i, seg in enumerate(entry.segments):
+            seg_peaks: list[float] = (
+                entry.peaks_by_segment[i]
+                if i < len(entry.peaks_by_segment)
+                else []
+            )
             if window is None or seg.start_ts is None:
-                payload.append({"startPct": 0.0, "endPct": 100.0})
+                payload.append(
+                    {"startPct": 0.0, "endPct": 100.0, "peaks": list(seg_peaks)}
+                )
                 continue
             start_pct = window.pct_for(seg.start_ts)
             if seg.duration_sec is not None and seg.duration_sec > 0:
-                # Best-effort end: start_ts + duration, mapped through
-                # the same window.
                 end_ts = seg.start_ts + timedelta(seconds=seg.duration_sec)
                 end_pct = window.pct_for(end_ts)
             else:
                 end_pct = 100.0
-            payload.append({"startPct": start_pct, "endPct": end_pct})
+            payload.append(
+                {
+                    "startPct": start_pct,
+                    "endPct": end_pct,
+                    "peaks": list(seg_peaks),
+                }
+            )
         return payload
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -617,8 +639,11 @@ class TrackListModel(QAbstractListModel):
             )
 
     #: Emitted after :meth:`loadFromDir` has populated rows. Carries
-    #: ``[(row, audio_path_str), ...]`` so :mod:`ui.app_qml` can hand
-    #: the list to a :class:`PeaksWorker` on a background QThread.
+    #: ``[(row, seg_idx, audio_path_str), ...]`` so :mod:`ui.app_qml`
+    #: can hand the list to a :class:`PeaksWorker` on a background
+    #: QThread. Feature #4 iter 4b: one entry per TrackSegment, not
+    #: per row — multi-Craig rows fan out into N jobs so every
+    #: segment gets its own waveform.
     audioPathsChanged = Signal(list)
 
     @Slot(str)
@@ -675,7 +700,7 @@ class TrackListModel(QAbstractListModel):
 
         self.beginResetModel()
         new_rows: list[TrackEntry] = []
-        primary_paths: list[Path] = []
+        seg_jobs: list[tuple[int, int, str]] = []
         for speaker_key, track_segments in grouped.items():
             # Sort by wall-clock start; ``None`` starts drift to the
             # end so fully-unanchored segments don't pretend to be
@@ -686,6 +711,7 @@ class TrackListModel(QAbstractListModel):
                 key=lambda s: (s.start_ts is None, s.start_ts or datetime.max),
             )
             primary = ordered[0]
+            row_idx = len(new_rows)
             new_rows.append(TrackEntry(
                 name=primary.audio_path.stem,
                 role="Игрок",
@@ -694,21 +720,21 @@ class TrackListModel(QAbstractListModel):
                 model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
+                peaks_by_segment=[[] for _ in ordered],
                 audio_path=primary.audio_path,
                 segments=tuple(ordered),
             ))
-            primary_paths.append(primary.audio_path)
+            for seg_idx, seg in enumerate(ordered):
+                seg_jobs.append((row_idx, seg_idx, str(seg.audio_path)))
             # speaker_key unused after grouping; kept as dict key only.
             _ = speaker_key
         self._rows = new_rows
         self.endResetModel()
         self.overallProgressChanged.emit()
-        # 4a: only the primary (first) segment goes through the peaks
-        # worker. Secondary segments render as placeholder rects in
-        # ``TrackLaneRow``. 4b will expand this to N paths per row.
-        self.audioPathsChanged.emit(
-            [(i, str(p)) for i, p in enumerate(primary_paths)]
-        )
+        # 4b: one peaks job per TrackSegment. PeaksWorker stores peaks
+        # in ``peaks_by_segment`` and mirrors the primary into
+        # ``peaks`` so legacy readers continue to work.
+        self.audioPathsChanged.emit(seg_jobs)
 
     @Slot(int, result=str)
     def audioPathFor(self, row: int) -> str:
@@ -812,6 +838,7 @@ class TrackListModel(QAbstractListModel):
                 model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
+                peaks_by_segment=[[]],
                 audio_path=path,
                 segments=(TrackSegment(
                     audio_path=path,
@@ -823,23 +850,41 @@ class TrackListModel(QAbstractListModel):
         self.endInsertRows()
         self.overallProgressChanged.emit()
         # Trigger peaks extraction for just the new row via the same
-        # audioPathsChanged signal shape the shell listens on.
-        self.audioPathsChanged.emit([(row, str(path))])
+        # audioPathsChanged signal shape the shell listens on. Single-
+        # segment drop, so seg_idx is always 0.
+        self.audioPathsChanged.emit([(row, 0, str(path))])
 
-    @Slot(int, list)
-    def setPeaks(self, row: int, peaks: list[float]) -> None:
-        """Install waveform peaks for one row.
+    @Slot(int, int, list)
+    def setPeaks(self, row: int, seg_idx: int, peaks: list[float]) -> None:
+        """Install waveform peaks for one segment of a row.
 
-        Called via a queued connection from :class:`PeaksWorker`. A
-        ``dataChanged`` emission with the single ``PeaksRole`` tells
-        QML to repaint only the affected delegate.
+        Called via a queued connection from :class:`PeaksWorker`. Stores
+        peaks in :attr:`TrackEntry.peaks_by_segment` at ``seg_idx`` and,
+        when the primary segment lands, also mirrors them into the
+        row-level :attr:`TrackEntry.peaks` so legacy readers that only
+        look at the primary waveform keep working.
+
+        A ``dataChanged`` emission with ``PeaksRole`` + ``SegmentsRole``
+        tells QML to repaint only the affected delegate.
         """
 
         if not (0 <= row < len(self._rows)):
             return
-        self._rows[row].peaks = list(peaks)
+        entry = self._rows[row]
+        # Grow the segment peaks list defensively — tests constructing
+        # TrackEntry directly may leave it empty.
+        while len(entry.peaks_by_segment) <= seg_idx:
+            entry.peaks_by_segment.append([])
+        peaks_copy = list(peaks)
+        entry.peaks_by_segment[seg_idx] = peaks_copy
+        if seg_idx == 0:
+            entry.peaks = peaks_copy
         idx = self.index(row, 0)
-        self.dataChanged.emit(idx, idx, [TrackListModel.PeaksRole])
+        self.dataChanged.emit(
+            idx,
+            idx,
+            [TrackListModel.PeaksRole, TrackListModel.SegmentsRole],
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
