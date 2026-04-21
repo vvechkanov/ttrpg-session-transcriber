@@ -130,7 +130,21 @@ layout-only. См. future #9.
 
 ---
 
-### #4 ✅ Несколько Craig-архивов — итерация 4a готова
+### #4 ✅ Несколько Craig-архивов — итерация 4b готова
+
+> **Итерация 4b ✅** (2026-04-21) — per-segment ASR fanout + per-segment
+> peaks + per-segment waveform. `transcribe_one_track(time_offset_sec)`
+> сдвигает timestamps в session-global ось; `AsrWorker` принимает
+> `tuple[SegmentJob, ...]` и крутит все сегменты строки серийно с
+> duration-weighted прогрессом; `PeaksWorker` работает по плоскому
+> списку `[(row, seg_idx, path)]` и отдаёт `peaksReady(row, seg_idx,
+> peaks)`; `TrackListModel.setPeaks(row, seg_idx, peaks)` кладёт их в
+> `peaks_by_segment` (primary зеркалится в row-level `peaks`); QML
+> `TrackLaneRow` рисует `WaveformCanvas` на каждый сегмент через
+> Repeater; row-progress остаётся единым оверлеем. План
+> [docs/plans/feature-4b-multicraig-asr.md](docs/plans/feature-4b-multicraig-asr.md).
+> Тесты: 375 passed, 3 skipped. 15 environmental errors (qtbot / bundled
+> ffmpeg — не регрессии).
 
 > **Итерация 4a ✅** (2026-04-21) — discovery multi-Craig + UI
 > корректный. В `core/file_matchers.py` добавлены `CraigSegment`
@@ -263,10 +277,24 @@ revised.txt). Qwen2.5 7B, окно 20 мин, только задача (A).
 
 ---
 
-### #7 📋 Настройки чанкера (резать/overlap/параметры)
+### #7 ✅ Настройки чанкера (резать/overlap/параметры)
 
-> **Статус:** план архитектора готов (задачи 7A→7B→7C). Ждёт
-> очереди после #4. Решения:
+> **Реализовано ✅** (2026-04-21) — три коммита 7A → 7B → 7C.
+> `ChunkingOptions` frozen dataclass в `core/chunking.py`; `PipelineParams`
+> получает `chunking: ChunkingOptions | None`; новая стадия `"chunk"`
+> в `PipelineStage` между `render` и `done`, post-step вызывает
+> `chunk_text_file` и логирует при ошибке (не валит pipeline).
+> `AppPreferences` +3 Q_PROPERTY (`chunkingEnabled` /
+> `chunkingChunkChars` / `chunkingOverlapRatio`) с персистом под
+> `chunking/*`, новый `build_chunking_options()` как зеркало
+> `build_asr_options`. `SettingsScreen` получил группу «Чанки для
+> LLM» (toggle + chunk_chars + overlap 0..50%). `PipelineController`
+> синхронно вызывает чанкер после `_onMergeDone`, публикует
+> `chunksDir` в Q_PROPERTY; `TimelineScreen` рисует второй `OutputChip`
+> по `visible: chunksDir.length > 0`. План
+> [docs/plans/feature-7-chunker.md](docs/plans/feature-7-chunker.md).
+
+**Решения архитектора (2026-04-21):**
 > - **Встраивание:** post-step в `pipeline.run()` перед финальным
 >   `stage_cb("done")`. Новая стадия `"chunk"` (7 стадий вместо 6).
 > - **Параметры (MVP, YAGNI):** `enabled` (default false),
