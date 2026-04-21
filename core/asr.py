@@ -153,6 +153,7 @@ def transcribe_one_track(
     speaker: str | None = None,
     on_progress: TrackProgress | None = None,
     should_cancel: CancelProbe | None = None,
+    time_offset_sec: float = 0.0,
 ) -> list[SpeechSegment]:
     """Run ASR on ``audio_path`` via the given source.
 
@@ -160,11 +161,30 @@ def transcribe_one_track(
     dispatch (``make_source``) from per-track invocation lets a batch
     worker hold one source across many tracks without callers
     reaching into backend-specific classes.
+
+    ``time_offset_sec`` shifts ``SpeechSegment.start`` / ``.end`` on
+    the returned list so that multi-Craig sessions (feature #4b) can
+    line each segment's audio to the session-global timeline. An
+    offset of ``0.0`` is a pure pass-through — the original segments
+    are returned without reconstruction, preserving identity for
+    legacy tests and single-segment paths.
     """
 
-    return source.transcribe_track(  # type: ignore[attr-defined]
+    segments = source.transcribe_track(  # type: ignore[attr-defined]
         audio_path,
         speaker=speaker,
         on_progress=on_progress,
         should_cancel=should_cancel,
     )
+    if time_offset_sec == 0.0:
+        return segments
+    return [
+        SpeechSegment(
+            start=s.start + time_offset_sec,
+            end=s.end + time_offset_sec,
+            speaker=s.speaker,
+            text=s.text,
+            confidence=s.confidence,
+        )
+        for s in segments
+    ]

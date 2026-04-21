@@ -732,6 +732,61 @@ class TrackListModel(QAbstractListModel):
             return ""
         return self._rows[row].model_id
 
+    def segment_offset_seconds(self, segment: TrackSegment) -> float:
+        """Seconds between session ``t0`` and this segment's wall-clock start.
+
+        Feeds :class:`ui.engines.asr_worker.SegmentJob.offset_sec` so the
+        transcriber can shift each segment's timestamps into the single
+        session-wide timeline. Returns ``0.0`` when the session has no
+        :class:`TimelineWindow` (no ``info.txt`` + no chat + no combat)
+        or the segment itself is unanchored (``start_ts is None``).
+        """
+
+        if segment.start_ts is None:
+            return 0.0
+        if self._session_meta is None:
+            return 0.0
+        window = self._session_meta.timelineWindow()
+        if window is None:
+            return 0.0
+        return (segment.start_ts - window.t0).total_seconds()
+
+    def segmentsFor(self, row: int) -> list[dict[str, Any]]:
+        """Return an ordered list of ``{audioPath, offsetSec, durationSec}``.
+
+        Consumed by :class:`ui.engines.pipeline_controller.PipelineController`
+        to build the :class:`SegmentJob` tuple each ASR worker runs on.
+        Not a ``Slot`` — the QML layer never reads this directly; the
+        only caller is Python-side glue. Empty list for out-of-range
+        rows so the controller can surface "no audio" as a per-row error.
+        """
+
+        if not (0 <= row < len(self._rows)):
+            return []
+        entry = self._rows[row]
+        segments = entry.segments
+        if not segments and entry.audio_path is not None:
+            # TrackEntry constructed without segments (test stubs,
+            # legacy code paths): synthesize a single entry so callers
+            # do not need a special case.
+            return [
+                {
+                    "audioPath": str(entry.audio_path),
+                    "offsetSec": 0.0,
+                    "durationSec": 0.0,
+                }
+            ]
+        result: list[dict[str, Any]] = []
+        for seg in segments:
+            result.append(
+                {
+                    "audioPath": str(seg.audio_path),
+                    "offsetSec": self.segment_offset_seconds(seg),
+                    "durationSec": float(seg.duration_sec) if seg.duration_sec else 0.0,
+                }
+            )
+        return result
+
     @Slot(str)
     def appendTrack(self, audio_path_url: str) -> None:
         """Append one audio file to the list (used by the "+ добавить

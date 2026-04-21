@@ -29,7 +29,7 @@ from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
 from domain.annotations import SpeechSegment
-from ui.engines.asr_worker import AsrWorker
+from ui.engines.asr_worker import AsrWorker, SegmentJob
 from ui.engines.merger_worker import MergerWorker
 from ui.models.app_model import AppModel
 from ui.models.session import SessionMeta, TrackListModel
@@ -220,17 +220,26 @@ class PipelineController(QObject):
 
         row = self._queue.pop(0)
 
-        # Resolve the backend + audio path for this row BEFORE flipping
+        # Resolve the backend + segment jobs for this row BEFORE flipping
         # its state to "running". Missing audio or an unknown model_id
         # are user-visible errors, not crashes.
-        audio_path_str = self._tracks.audioPathFor(row)
-        if not audio_path_str:
+        seg_dicts = self._tracks.segmentsFor(row)
+        if not seg_dicts:
             self._tracks.setError(
                 row,
                 "Нет аудиофайла — перетащите папку сессии перед запуском",
             )
             self._advance()
             return
+
+        seg_jobs = tuple(
+            SegmentJob(
+                audio_path=Path(d["audioPath"]),
+                offset_sec=float(d.get("offsetSec", 0.0) or 0.0),
+                duration_sec=float(d.get("durationSec", 0.0) or 0.0),
+            )
+            for d in seg_dicts
+        )
 
         model_id = self._tracks.modelIdFor(row) or self._active_model_id()
         try:
@@ -241,7 +250,7 @@ class PipelineController(QObject):
             return
 
         self._tracks.setState(row, "running")
-        self._spawn(row, source, Path(audio_path_str))
+        self._spawn(row, source, seg_jobs)
 
     def _active_model_id(self) -> str:
         """Resolve the fallback ASR model id for rows without an override.
@@ -274,9 +283,14 @@ class PipelineController(QObject):
             self._sources[model_id] = make_source(model_id, options=options)
         return self._sources[model_id]
 
-    def _spawn(self, row: int, source: AsrSource, audio_path: Path) -> None:
+    def _spawn(
+        self,
+        row: int,
+        source: AsrSource,
+        segments: tuple[SegmentJob, ...],
+    ) -> None:
         thread = QThread(self)
-        worker = AsrWorker(row, source, audio_path)
+        worker = AsrWorker(row, source, segments)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)

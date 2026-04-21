@@ -76,7 +76,7 @@ def _run_on_thread(qtbot, worker: AsrWorker) -> None:
 
 def test_asr_worker_emits_progress_then_done(qtbot, tmp_path: Path) -> None:
     source = _FakeSource(progress_ticks=(0.1, 0.5, 1.0))
-    worker = AsrWorker(row=3, source=source, audio_path=tmp_path / "x.flac")
+    worker = AsrWorker(row=3, source=source, segments=tmp_path / "x.flac")
 
     progress_seen: list[tuple[int, float]] = []
     done_seen: list[tuple[int, list]] = []
@@ -103,7 +103,7 @@ def test_asr_worker_emits_progress_then_done(qtbot, tmp_path: Path) -> None:
 
 def test_asr_worker_emits_error_on_exception(qtbot, tmp_path: Path) -> None:
     source = _FakeSource(raises=RuntimeError("model not installed"))
-    worker = AsrWorker(row=7, source=source, audio_path=tmp_path / "x.flac")
+    worker = AsrWorker(row=7, source=source, segments=tmp_path / "x.flac")
 
     done_seen: list[tuple[int, list]] = []
     error_seen: list[tuple[int, str]] = []
@@ -119,7 +119,7 @@ def test_asr_worker_emits_error_on_exception(qtbot, tmp_path: Path) -> None:
 
 def test_asr_worker_respects_cancel_flag(qtbot, tmp_path: Path) -> None:
     source = _FakeSource(progress_ticks=(0.1, 0.2, 0.3, 0.4))
-    worker = AsrWorker(row=2, source=source, audio_path=tmp_path / "x.flac")
+    worker = AsrWorker(row=2, source=source, segments=tmp_path / "x.flac")
 
     progress_seen: list[float] = []
     done_seen: list[tuple[int, list]] = []

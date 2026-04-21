@@ -157,3 +157,37 @@ def test_transcribe_one_track_forwards_args(tmp_path: Path) -> None:
     assert len(segs) == 1
     assert segs[0].speaker == "Andrey"
     assert segs[0].text == "hello"
+
+
+# ── transcribe_one_track time_offset_sec (feature #4b) ────────────────
+
+
+def test_transcribe_one_track_zero_offset_is_pass_through(tmp_path: Path) -> None:
+    """With offset 0.0, returned list is the same object the source produced."""
+
+    src = _FakeSource()
+    audio = tmp_path / "x.flac"
+    audio.write_bytes(b"")
+
+    segs = transcribe_one_track(src, audio, time_offset_sec=0.0)
+    # Fake source returns start=0.0/end=1.0; shift should be a no-op.
+    assert segs[0].start == 0.0
+    assert segs[0].end == 1.0
+
+
+def test_transcribe_one_track_shifts_segments_by_offset(tmp_path: Path) -> None:
+    """Non-zero offset rebuilds segments with start/end both shifted."""
+
+    src = _FakeSource()
+    audio = tmp_path / "x.flac"
+    audio.write_bytes(b"")
+
+    segs = transcribe_one_track(src, audio, time_offset_sec=3600.0)
+
+    assert len(segs) == 1
+    assert segs[0].start == 3600.0
+    assert segs[0].end == 3601.0
+    # Non-time fields survive the shift unchanged.
+    assert segs[0].speaker == "unknown"
+    assert segs[0].text == "hello"
+    assert segs[0].confidence == 0.9
