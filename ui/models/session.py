@@ -35,6 +35,7 @@ from core.file_matchers import (
     match_speaker,
 )
 from core.peaks import probe_duration
+from core.speaker_map import load_speaker_map_raw, migrate_legacy_speaker_map
 from core.timeline_window import (
     TimelineWindow,
     build_window,
@@ -262,14 +263,20 @@ class TrackSegment:
 class TrackEntry:
     name: str
     role: str              # "GM" | "Игрок" | "Слушатель"
-    character: str         # "" for listeners
-    excluded: bool         # True when the player has no audio
+    #: Character names this player voices on the row. Multi-character
+    #: tracks (one player playing two PCs in the same session) carry a
+    #: list with two or more entries; the listener / GM case carries an
+    #: empty list. Stored as a list so feature #5's editor popover can
+    #: edit each character independently. The ``CharacterDisplayRole``
+    #: joins them with `` / `` for read-only rendering.
+    characters: list[str] = field(default_factory=list)
+    excluded: bool = False  # True when the player has no audio
     #: Per-track ASR model id. Empty string means "use the active
     #: model from :class:`ui.models.model_registry.ModelRegistry`";
     #: non-empty values pin the row to a specific model regardless
     #: of what the user later sets as active.
-    model_id: str
-    model_override: bool
+    model_id: str = ""
+    model_override: bool = False
     peaks: list[float] = field(default_factory=list)
     #: Per-segment waveform peaks, parallel to :attr:`segments`. Primary
     #: segment's peaks are mirrored into :attr:`peaks` so legacy code
@@ -306,6 +313,13 @@ class TrackEntry:
     #: for any row built from :meth:`TrackListModel.loadFromDir`. Tests
     #: constructing ``TrackEntry`` directly may leave the list empty.
     segments: tuple[TrackSegment, ...] = ()
+    #: True when this row was hydrated from an actual ``speaker_map.json``
+    #: entry (vs synthesized from the audio stem on a fresh session).
+    #: Drives :attr:`TrackListModel.HasSpeakerMapRole` so the popover
+    #: can pre-fill the player field with the saved value rather than
+    #: the audio stem placeholder. Flips to ``True`` after a
+    #: :meth:`TrackListModel.saveSpeakerMapEntry` round-trip.
+    has_speaker_map: bool = False
 
 
 #: TrackListModel starts empty. Populated only after the user opens
@@ -313,31 +327,80 @@ class TrackEntry:
 _TRACK_ROWS: list[TrackEntry] = []
 
 
+_KNOWN_ROLES: frozenset[str] = frozenset({"GM", "Игрок", "Слушатель"})
+
+
+def _resolve_speaker_map_entry(
+    stem: str,
+    raw_map: dict,
+) -> tuple[str, str, list[str], bool]:
+    """Look up ``stem`` in ``raw_map`` and normalise the entry.
+
+    Returns ``(player_name, role, characters, present)`` where:
+
+      * ``role`` passes through verbatim when it matches one of
+        :data:`_KNOWN_ROLES` (``"GM"``, ``"Игрок"``, ``"Слушатель"``).
+        Anything else falls back to ``"Игрок"``. The ``"Слушатель"``
+        round-trip is what lets a saved listener entry restore the
+        ``excluded`` flag on next load.
+      * ``present`` is ``True`` only when ``raw_map`` actually contained
+        a dict for ``stem``; this drives the ``HasSpeakerMapRole`` model
+        flag so the popover can distinguish "fresh row, prefill blank"
+        from "previously-saved row, prefill stored player".
+
+    Empty / missing entries return ``("", "Игрок", [], False)`` — the
+    model substitutes the audio stem for ``name`` upstream when
+    ``player`` is blank. Earlier iterations also tried a ``speaker_key``
+    fallback (audio stem with the leading numeric prefix stripped), but
+    no real on-disk file used that key shape so the branch was YAGNI
+    and got dropped — readers always key by the full audio stem.
+    """
+    entry = raw_map.get(stem)
+    if not isinstance(entry, dict):
+        return ("", "Игрок", [], False)
+    raw_role = entry.get("role", "")
+    role_str = raw_role.strip() if isinstance(raw_role, str) else ""
+    role = role_str if role_str in _KNOWN_ROLES else "Игрок"
+    raw_player = entry.get("player", "")
+    player = raw_player.strip() if isinstance(raw_player, str) else ""
+    raw_chars = entry.get("characters")
+    characters: list[str]
+    if isinstance(raw_chars, list):
+        characters = [c for c in raw_chars if isinstance(c, str) and c.strip()]
+    else:
+        characters = []
+    return (player, role, characters, True)
+
+
 class TrackListModel(QAbstractListModel):
-    NameRole      = Qt.ItemDataRole.UserRole + 1
-    RoleRole      = Qt.ItemDataRole.UserRole + 2
-    CharacterRole = Qt.ItemDataRole.UserRole + 3
-    ExcludedRole  = Qt.ItemDataRole.UserRole + 4
-    ModelIdRole   = Qt.ItemDataRole.UserRole + 5
-    OverrideRole  = Qt.ItemDataRole.UserRole + 6
-    PeaksRole     = Qt.ItemDataRole.UserRole + 7
-    ProgressRole  = Qt.ItemDataRole.UserRole + 8
-    StateRole     = Qt.ItemDataRole.UserRole + 9
-    ErrorRole     = Qt.ItemDataRole.UserRole + 10
-    SegmentsRole  = Qt.ItemDataRole.UserRole + 11
+    NameRole              = Qt.ItemDataRole.UserRole + 1
+    RoleRole              = Qt.ItemDataRole.UserRole + 2
+    CharactersRole        = Qt.ItemDataRole.UserRole + 3
+    ExcludedRole          = Qt.ItemDataRole.UserRole + 4
+    ModelIdRole           = Qt.ItemDataRole.UserRole + 5
+    OverrideRole          = Qt.ItemDataRole.UserRole + 6
+    PeaksRole             = Qt.ItemDataRole.UserRole + 7
+    ProgressRole          = Qt.ItemDataRole.UserRole + 8
+    StateRole             = Qt.ItemDataRole.UserRole + 9
+    ErrorRole             = Qt.ItemDataRole.UserRole + 10
+    SegmentsRole          = Qt.ItemDataRole.UserRole + 11
+    CharacterDisplayRole  = Qt.ItemDataRole.UserRole + 12
+    HasSpeakerMapRole     = Qt.ItemDataRole.UserRole + 13
 
     _ROLES = {
-        NameRole:      b"name",
-        RoleRole:      b"playerRole",
-        CharacterRole: b"character",
-        ExcludedRole:  b"excluded",
-        ModelIdRole:   b"modelId",
-        OverrideRole:  b"override",
-        PeaksRole:     b"peaks",
-        ProgressRole:  b"progress",
-        StateRole:     b"trackState",
-        ErrorRole:     b"errorMessage",
-        SegmentsRole:  b"segments",
+        NameRole:             b"name",
+        RoleRole:             b"playerRole",
+        CharactersRole:       b"characters",
+        ExcludedRole:         b"excluded",
+        ModelIdRole:          b"modelId",
+        OverrideRole:         b"override",
+        PeaksRole:            b"peaks",
+        ProgressRole:         b"progress",
+        StateRole:            b"trackState",
+        ErrorRole:            b"errorMessage",
+        SegmentsRole:         b"segments",
+        CharacterDisplayRole: b"characterDisplay",
+        HasSpeakerMapRole:    b"hasSpeakerMap",
     }
 
     def __init__(self, parent: Any = None) -> None:
@@ -371,17 +434,19 @@ class TrackListModel(QAbstractListModel):
             return None
         t = self._rows[index.row()]
         match role:
-            case TrackListModel.NameRole:      return t.name
-            case TrackListModel.RoleRole:      return t.role
-            case TrackListModel.CharacterRole: return t.character
-            case TrackListModel.ExcludedRole:  return t.excluded
-            case TrackListModel.ModelIdRole:   return t.model_id
-            case TrackListModel.OverrideRole:  return t.model_override
-            case TrackListModel.PeaksRole:     return t.peaks
-            case TrackListModel.ProgressRole:  return t.progress
-            case TrackListModel.StateRole:     return t.state
-            case TrackListModel.ErrorRole:     return t.error_message
-            case TrackListModel.SegmentsRole:  return self._segments_payload(t)
+            case TrackListModel.NameRole:             return t.name
+            case TrackListModel.RoleRole:             return t.role
+            case TrackListModel.CharactersRole:       return list(t.characters)
+            case TrackListModel.CharacterDisplayRole: return " / ".join(t.characters)
+            case TrackListModel.ExcludedRole:         return t.excluded
+            case TrackListModel.ModelIdRole:          return t.model_id
+            case TrackListModel.OverrideRole:         return t.model_override
+            case TrackListModel.PeaksRole:            return t.peaks
+            case TrackListModel.ProgressRole:         return t.progress
+            case TrackListModel.StateRole:            return t.state
+            case TrackListModel.ErrorRole:            return t.error_message
+            case TrackListModel.SegmentsRole:         return self._segments_payload(t)
+            case TrackListModel.HasSpeakerMapRole:    return t.has_speaker_map
         return None
 
     def _segments_payload(self, entry: TrackEntry) -> list[dict[str, Any]]:
@@ -459,6 +524,32 @@ class TrackListModel(QAbstractListModel):
 
     # ── Aggregate progress (for the RunControl dial) ──────────────────
     overallProgressChanged = Signal()
+    #: Re-emitted whenever any row's :attr:`TrackEntry.characters` list
+    #: changes (load, edit-popover save, manual append). Drives the
+    #: ``CastStrip`` QML widget so it can redraw the de-duped union of
+    #: every row's character list. Cheap to recompute (≤ a dozen rows
+    #: × tiny lists), so we eagerly re-derive on each change rather
+    #: than maintain a separate cache.
+    aggregatedCharactersChanged = Signal()
+
+    @Property("QStringList", notify=aggregatedCharactersChanged)
+    def aggregatedCharacters(self) -> list[str]:
+        """De-duped, sorted union of every row's ``characters`` list.
+
+        Empty when no rows or every row carries an empty list (typical
+        for fresh sessions before the user pre-populates speaker_map).
+        Sorted lexicographically so the strip ordering stays stable
+        across edits — alphabetic ordering is the simplest convention
+        that doesn't expose iteration order from Python sets.
+        """
+
+        seen: set[str] = set()
+        for row in self._rows:
+            for character in row.characters:
+                trimmed = character.strip()
+                if trimmed:
+                    seen.add(trimmed)
+        return sorted(seen)
 
     @Property(float, notify=overallProgressChanged)
     def overallProgress(self) -> float:
@@ -549,35 +640,65 @@ class TrackListModel(QAbstractListModel):
         )
 
     # ── Inline edits & per-track model override ──────────────────────
-    @Slot(int, str)
-    def setPlayerName(self, row: int, name: str) -> None:
-        """Rename a player. Empty / whitespace-only names are rejected —
-        use a blank placeholder in the UI rather than clearing the row.
+    def updateSpeakerMapRow(
+        self,
+        row: int,
+        player: str,
+        role: str,
+        characters: list[str],
+    ) -> None:
+        """Update name / role / characters of a single row in-place.
+
+        Not a ``Slot`` — only Python glue (PipelineController) calls
+        this after writing the speaker_map.json file. ``role`` here is
+        the speaker_map "GM" / "PC" string; it gets mapped to the
+        existing TrackEntry role enum on write.
+
+        Emits ``dataChanged`` for every affected role and
+        ``aggregatedCharactersChanged`` so the cast strip re-derives.
+        Out-of-range rows are silently ignored to match the existing
+        slot conventions on this class.
         """
 
         if not (0 <= row < len(self._rows)):
             return
-        name = name.strip()
-        if not name or self._rows[row].name == name:
-            return
-        self._rows[row].name = name
-        idx = self.index(row, 0)
-        self.dataChanged.emit(idx, idx, [TrackListModel.NameRole])
+        entry = self._rows[row]
+        cleaned_player = player.strip()
+        # Map speaker_map's wire shape ("GM" / "PC" / "Слушатель") to
+        # the TrackEntry role enum ("GM" / "Игрок" / "Слушатель").
+        if role == "GM":
+            mapped_role = "GM"
+        elif role == "Слушатель":
+            mapped_role = "Слушатель"
+        else:
+            mapped_role = "Игрок"
+        cleaned_chars = [c.strip() for c in characters if isinstance(c, str) and c.strip()]
 
-    @Slot(int, str)
-    def setCharacter(self, row: int, character: str) -> None:
-        """Update the character string. Empty strings are allowed and
-        render as "Без персонажа" in the row below the name.
-        """
+        roles_changed: list[int] = []
+        if cleaned_player and entry.name != cleaned_player:
+            entry.name = cleaned_player
+            roles_changed.append(TrackListModel.NameRole)
+        if entry.role != mapped_role:
+            entry.role = mapped_role
+            roles_changed.append(TrackListModel.RoleRole)
+        if entry.characters != cleaned_chars:
+            entry.characters = cleaned_chars
+            roles_changed.extend(
+                [TrackListModel.CharactersRole, TrackListModel.CharacterDisplayRole]
+            )
+        # Saving through the popover always means the row is now backed
+        # by a real speaker_map entry — flip the flag so subsequent
+        # popover opens prefill the saved player instead of the audio
+        # stem placeholder.
+        if not entry.has_speaker_map:
+            entry.has_speaker_map = True
+            roles_changed.append(TrackListModel.HasSpeakerMapRole)
 
-        if not (0 <= row < len(self._rows)):
-            return
-        character = character.strip()
-        if self._rows[row].character == character:
-            return
-        self._rows[row].character = character
-        idx = self.index(row, 0)
-        self.dataChanged.emit(idx, idx, [TrackListModel.CharacterRole])
+        if roles_changed:
+            idx = self.index(row, 0)
+            self.dataChanged.emit(idx, idx, roles_changed)
+            if TrackListModel.CharactersRole in roles_changed:
+                self.aggregatedCharactersChanged.emit()
 
     @Slot(int, str)
     def setModelOverride(self, row: int, option_id: str) -> None:
@@ -698,10 +819,23 @@ class TrackListModel(QAbstractListModel):
                     duration_sec=None,
                 ))
 
+        # Feature #5 iter 5b/2: migrate any project-root legacy
+        # speaker_map.json into the session folder on first load so
+        # the read-side fallback in :func:`load_speaker_map_raw` stops
+        # silently masking the missing on-disk copy. ``migrate_legacy_speaker_map``
+        # is a no-op when the session file already exists, so re-loads
+        # never overwrite user edits.
+        migrate_legacy_speaker_map(session_dir)
+        # Read speaker_map.json once so each row can be pre-populated
+        # with player name / character list / role. Falls back to an
+        # empty dict when the file is missing or malformed
+        # (``load_speaker_map_raw`` handles both quietly).
+        raw_speaker_map = load_speaker_map_raw(session_dir)
+
         self.beginResetModel()
         new_rows: list[TrackEntry] = []
         seg_jobs: list[tuple[int, int, str]] = []
-        for speaker_key, track_segments in grouped.items():
+        for track_segments in grouped.values():
             # Sort by wall-clock start; ``None`` starts drift to the
             # end so fully-unanchored segments don't pretend to be
             # earliest. Stable sort preserves discovery order among
@@ -712,25 +846,32 @@ class TrackListModel(QAbstractListModel):
             )
             primary = ordered[0]
             row_idx = len(new_rows)
+            stem = primary.audio_path.stem
+            entry_name, entry_role, entry_chars, has_map = _resolve_speaker_map_entry(
+                stem, raw_speaker_map
+            )
             new_rows.append(TrackEntry(
-                name=primary.audio_path.stem,
-                role="Игрок",
-                character="",
-                excluded=False,
+                name=entry_name or stem,
+                role=entry_role,
+                characters=list(entry_chars),
+                # Preserve the listener flag from speaker_map: a
+                # round-tripped ``"Слушатель"`` role marks the row as
+                # excluded so the pipeline skips it on next run.
+                excluded=(entry_role == "Слушатель"),
                 model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
                 peaks=[],
                 peaks_by_segment=[[] for _ in ordered],
                 audio_path=primary.audio_path,
                 segments=tuple(ordered),
+                has_speaker_map=has_map,
             ))
             for seg_idx, seg in enumerate(ordered):
                 seg_jobs.append((row_idx, seg_idx, str(seg.audio_path)))
-            # speaker_key unused after grouping; kept as dict key only.
-            _ = speaker_key
         self._rows = new_rows
         self.endResetModel()
         self.overallProgressChanged.emit()
+        self.aggregatedCharactersChanged.emit()
         # 4b: one peaks job per TrackSegment. PeaksWorker stores peaks
         # in ``peaks_by_segment`` and mirrors the primary into
         # ``peaks`` so legacy readers continue to work.
@@ -833,7 +974,7 @@ class TrackListModel(QAbstractListModel):
             TrackEntry(
                 name=path.stem,
                 role="Игрок",
-                character="",
+                characters=[],
                 excluded=False,
                 model_id="",        # defer to ModelRegistry.activeModelId
                 model_override=False,
@@ -849,6 +990,11 @@ class TrackListModel(QAbstractListModel):
         )
         self.endInsertRows()
         self.overallProgressChanged.emit()
+        # Manually-appended rows start with no characters but the strip
+        # still needs to know the union may have grown (the new row's
+        # absence-of-characters can replace a previous row's that got
+        # removed in some other flow). Cheap to re-emit.
+        self.aggregatedCharactersChanged.emit()
         # Trigger peaks extraction for just the new row via the same
         # audioPathsChanged signal shape the shell listens on. Single-
         # segment drop, so seg_idx is always 0.

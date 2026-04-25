@@ -28,6 +28,7 @@ from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
+from core.speaker_map import load_speaker_map_raw, save_speaker_map_raw
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
 from ui.engines.merger_worker import MergerWorker
@@ -205,6 +206,150 @@ class PipelineController(QObject):
             self._worker.cancel()
         if self._merge_worker is not None:
             self._merge_worker.cancel()
+
+    @Slot(int, str, str, list)
+    def saveSpeakerMapEntry(
+        self,
+        row: int,
+        player: str,
+        role: str,
+        characters: list,
+    ) -> None:
+        """Persist a single speaker_map.json entry and update the row.
+
+        Called from the SpeakerMapPopover's save action. Behavior:
+
+          1. Resolve the row's track stem from :attr:`_tracks`. The
+             stem doubles as the JSON key.
+          2. Read the existing speaker_map.json (if any) so we can
+             preserve unknown extra fields (notes / tags / colour) that
+             a future iteration might add.
+          3. Merge the new player / role / characters values on top of
+             the existing extras and rewrite the file.
+          4. Update the in-memory :class:`TrackListModel` row so the
+             timeline repaints immediately, without waiting for a
+             reload.
+
+        Pipeline does **not** rerun on a metadata edit — speaker_map
+        only gates the merger's speaker-name substitution, which runs
+        again on the next ``runAsr`` call regardless.
+        """
+
+        if self._session is None:
+            logger.warning(
+                "saveSpeakerMapEntry called with no SessionMeta attached; "
+                "skipping write (row=%d)", row,
+            )
+            return
+        session_dir_str = self._session.sessionDir()
+        if not session_dir_str:
+            logger.warning(
+                "saveSpeakerMapEntry called with no session open; "
+                "skipping write (row=%d)", row,
+            )
+            return
+
+        if not (0 <= row < self._tracks.rowCount()):
+            logger.warning(
+                "saveSpeakerMapEntry row=%d out of range (rowCount=%d)",
+                row, self._tracks.rowCount(),
+            )
+            return
+
+        # Stem comes from the row's primary audio path — not the
+        # NameRole, which now holds the player display name (populated
+        # from speaker_map.player on load). The audio path stem is the
+        # canonical JSON key (matches what
+        # :func:`core.speaker_map.load_speaker_map_raw` returned).
+        audio_path_str = self._tracks.audioPathFor(row)
+        if not audio_path_str:
+            logger.warning(
+                "saveSpeakerMapEntry could not resolve audio path for row=%d", row,
+            )
+            return
+        stem = Path(audio_path_str).stem
+        if not stem:
+            logger.warning(
+                "saveSpeakerMapEntry empty stem for row=%d", row,
+            )
+            return
+
+        session_dir = Path(session_dir_str)
+        raw_map = load_speaker_map_raw(session_dir)
+        existing = raw_map.get(stem)
+        extras: dict = {}
+        if isinstance(existing, dict):
+            extras = {
+                k: v
+                for k, v in existing.items()
+                if k not in ("player", "characters", "role", "character")
+            }
+
+        cleaned_chars = [
+            c.strip()
+            for c in (characters or [])
+            if isinstance(c, str) and c.strip()
+        ]
+        # Three accepted role strings round-trip from disk to the popover
+        # and back: "GM" / "PC" come from the popover, "Слушатель" only
+        # ever round-trips through inline rename of a listener row (the
+        # popover has no listener toggle yet). Anything else collapses
+        # to "PC" so a stray value can't desync the UI.
+        normalized_role = role if role in ("GM", "PC", "Слушатель") else "PC"
+
+        raw_map[stem] = {
+            **extras,
+            "player": player.strip() if isinstance(player, str) else "",
+            "characters": cleaned_chars,
+            "role": normalized_role,
+        }
+        save_speaker_map_raw(session_dir, raw_map)
+
+        logger.info(
+            "speaker_map saved",
+            extra={
+                "row": row,
+                "stem": stem,
+                "player": player,
+                "characters": cleaned_chars,
+                "role": normalized_role,
+            },
+        )
+
+        self._tracks.updateSpeakerMapRow(
+            row, player, normalized_role, cleaned_chars
+        )
+
+    @Slot(int, str)
+    def renamePlayer(self, row: int, player: str) -> None:
+        """Persist an inline-edited player name to ``speaker_map.json``.
+
+        Bridges the player-name :class:`InlineEdit` widget to the same
+        write path the popover uses, so a rename survives session
+        reloads. Reads the row's current role / characters from the
+        model, packages them with the new player string, and delegates
+        to :meth:`saveSpeakerMapEntry`. The TrackEntry role enum
+        ("GM" / "Игрок" / "Слушатель") is mapped to the speaker_map
+        wire shape ("GM" / "PC" / "Слушатель") so a listener rename
+        keeps its excluded flag on next load.
+
+        No-op when the row is out of range; ``saveSpeakerMapEntry``
+        already handles the no-session-attached case with a logged
+        warning.
+        """
+
+        if not (0 <= row < self._tracks.rowCount()):
+            return
+        idx = self._tracks.index(row, 0)
+        current_role = self._tracks.data(idx, TrackListModel.RoleRole) or "Игрок"
+        current_chars = self._tracks.data(idx, TrackListModel.CharactersRole) or []
+        if current_role == "GM":
+            wire_role = "GM"
+        elif current_role == "Слушатель":
+            wire_role = "Слушатель"
+        else:
+            wire_role = "PC"
+        self.saveSpeakerMapEntry(row, player, wire_role, list(current_chars))
 
     # ── Internals ─────────────────────────────────────────────────────
     def _is_excluded(self, row: int) -> bool:

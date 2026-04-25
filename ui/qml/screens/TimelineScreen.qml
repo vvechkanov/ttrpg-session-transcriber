@@ -48,6 +48,17 @@ Rectangle {
         }
     }
 
+    SpeakerMapPopover {
+        id: speakerMapPopover
+        parent: root
+        x: 22
+        onSaved: (row, player, role, characters) => {
+            if (pipeline) {
+                pipeline.saveSpeakerMapEntry(row, player, role, characters)
+            }
+        }
+    }
+
     // "+ добавить аудиодорожку" → native file picker → append to
     // TrackListModel. Accepts Craig's FLAC plus common lossy formats;
     // filter is for convenience, nothing rejects other extensions at
@@ -343,6 +354,17 @@ Rectangle {
                                 }
                             }
 
+                            // ── Cast strip (collapsible character list) ──
+                            // Sits between the tracks header and the
+                            // first track row. Drives off the model's
+                            // aggregatedCharacters property which is
+                            // re-emitted on speaker_map saves.
+                            CastStrip {
+                                Layout.fillWidth: true
+                                gutterWidth: root._gutterWidth
+                                characters: tracksModel ? tracksModel.aggregatedCharacters : []
+                            }
+
                             // ── Track rows (with stitch overlay) ──
                             // Wrapped in an Item so StitchOverlay can
                             // sit absolutely on top of just the track
@@ -369,7 +391,8 @@ Rectangle {
                                             segmentSplitPct: sessionMeta.segmentSplitPct
                                             playerName:    model.name
                                             playerRole:    model.playerRole
-                                            character:     model.character
+                                            characters:    model.characters
+                                            characterDisplay: model.characterDisplay
                                             excluded:      model.excluded
                                             modelId:       model.modelId
                                             modelOverride: model.override
@@ -380,10 +403,28 @@ Rectangle {
                                             errorMessage:  model.errorMessage
                                             editableLocked: root.phase !== "idle"
                                             onNameEdited: (value) => {
-                                                if (tracksModel) tracksModel.setPlayerName(index, value)
+                                                if (pipeline) pipeline.renamePlayer(index, value)
                                             }
-                                            onCharacterEdited: (value) => {
-                                                if (tracksModel) tracksModel.setCharacter(index, value)
+                                            onSpeakerMapClicked: {
+                                                if (root.phase !== "idle") return
+                                                const rowY = trackDelegate.mapToItem(root, 0, trackDelegate.height).y
+                                                speakerMapPopover.y = Math.max(64, rowY)
+                                                // Map TrackEntry's role enum
+                                                // ("GM" | "Игрок" | "Слушатель")
+                                                // to the speaker_map "GM" | "PC"
+                                                // shape the popover expects.
+                                                const speakerRole = model.playerRole === "GM" ? "GM" : "PC"
+                                                // Pre-fill the player field only when the
+                                                // row was actually hydrated from a saved
+                                                // speaker_map entry — fresh rows leave it
+                                                // blank so the popover's placeholderText
+                                                // (the audio stem) reads as a hint
+                                                // instead of forcing the user to clear
+                                                // a stem-shaped pre-filled value.
+                                                const playerInitial = model.hasSpeakerMap ? model.name : ""
+                                                speakerMapPopover.openFor(
+                                                    index, model.name, playerInitial, speakerRole, model.characters
+                                                )
                                             }
                                             onModelBadgeClicked: {
                                                 if (root.phase !== "idle") return

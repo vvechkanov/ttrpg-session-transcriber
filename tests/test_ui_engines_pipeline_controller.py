@@ -8,6 +8,7 @@ MergerWorker tests together with manual smoke via the boot harness.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 # Warm sources/__init__ before any deep imports (see test_core_asr).
@@ -20,6 +21,18 @@ import sys
 from domain.annotations import SpeechSegment
 from ui.engines.pipeline_controller import PipelineController, _format_bytes
 from ui.models import AppModel, SessionMeta, TrackListModel
+from ui.models.session import TrackListModel as _TLM  # role aliases for clarity
+
+
+def _write_flac_stub(path: Path) -> None:
+    path.write_bytes(b"fLaC-stub")
+
+
+def _write_speaker_map(session: Path, raw: dict) -> None:
+    (session / "speaker_map.json").write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _ensure_app():
@@ -182,3 +195,244 @@ def test_maybe_chunk_output_swallows_chunker_failures(
     # Must not raise — chunker failure is non-fatal (merged.txt is done).
     controller._maybe_chunk_output(str(tmp_path / "merged.txt"))
     assert controller.chunksDir == ""
+
+
+# ─── feature #5 iteration 5b/2 — saveSpeakerMapEntry ────────────────────
+
+
+def test_save_speaker_map_entry_writes_canonical_shape(tmp_path: Path) -> None:
+    """Writing through the controller produces the new ``characters`` shape."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    controller.saveSpeakerMapEntry(0, "Alice", "PC", ["Aragorn", "Legolas"])
+
+    data = json.loads((session / "speaker_map.json").read_text(encoding="utf-8"))
+    assert "1-alice" in data
+    entry = data["1-alice"]
+    assert entry["player"] == "Alice"
+    assert entry["characters"] == ["Aragorn", "Legolas"]
+    assert entry["role"] == "PC"
+
+
+def test_save_speaker_map_entry_preserves_extras(tmp_path: Path) -> None:
+    """Unknown extra fields (notes / tags) survive a save."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+    _write_speaker_map(session, {
+        "1-alice": {
+            "player": "Alice",
+            "characters": ["Aragorn"],
+            "role": "PC",
+            "notes": "tends to mumble",
+            "color": "#ff8800",
+        },
+    })
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    controller.saveSpeakerMapEntry(0, "Alice", "PC", ["Aragorn", "Legolas"])
+
+    data = json.loads((session / "speaker_map.json").read_text(encoding="utf-8"))
+    entry = data["1-alice"]
+    assert entry["notes"] == "tends to mumble"
+    assert entry["color"] == "#ff8800"
+    assert entry["characters"] == ["Aragorn", "Legolas"]
+
+
+def test_save_speaker_map_entry_updates_model_in_place(tmp_path: Path) -> None:
+    """The model row reflects the new values without a reload."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    controller.saveSpeakerMapEntry(0, "Alice", "PC", ["Aragorn"])
+
+    name = tracks.data(tracks.index(0), _TLM.NameRole)
+    role = tracks.data(tracks.index(0), _TLM.RoleRole)
+    chars = tracks.data(tracks.index(0), _TLM.CharactersRole)
+    assert name == "Alice"
+    assert role == "Игрок"
+    assert chars == ["Aragorn"]
+
+
+def test_save_speaker_map_entry_filters_empty_characters(tmp_path: Path) -> None:
+    """Empty / whitespace-only character names are dropped before write."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    controller.saveSpeakerMapEntry(
+        0, "Alice", "PC", ["Aragorn", "", "  ", "Legolas"]
+    )
+
+    data = json.loads((session / "speaker_map.json").read_text(encoding="utf-8"))
+    assert data["1-alice"]["characters"] == ["Aragorn", "Legolas"]
+
+
+def test_save_speaker_map_entry_no_session_logs_and_skips(
+    tmp_path: Path, caplog
+) -> None:
+    """Saving with no session attached is a no-op + warning, never a crash."""
+
+    _ensure_app()
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    controller = PipelineController(app_model, tracks, session_meta=None)
+
+    controller.saveSpeakerMapEntry(0, "Alice", "PC", ["Aragorn"])
+    assert not (tmp_path / "speaker_map.json").exists()
+
+
+# ─── reviewer follow-up: renamePlayer routes through speaker_map.json ───
+
+
+def test_rename_player_persists_to_speaker_map(tmp_path: Path) -> None:
+    """Inline player rename writes to speaker_map.json so it survives reload."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+    _write_speaker_map(session, {
+        "1-alice": {
+            "player": "Alice",
+            "characters": ["Aragorn", "Legolas"],
+            "role": "PC",
+            "notes": "keep me",
+        },
+    })
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    controller.renamePlayer(0, "Alice The Bold")
+
+    data = json.loads((session / "speaker_map.json").read_text(encoding="utf-8"))
+    entry = data["1-alice"]
+    assert entry["player"] == "Alice The Bold"
+    # Characters / role / extras are preserved verbatim.
+    assert entry["characters"] == ["Aragorn", "Legolas"]
+    assert entry["role"] == "PC"
+    assert entry["notes"] == "keep me"
+
+    # Model row reflects the new name in-place.
+    name = tracks.data(tracks.index(0), _TLM.NameRole)
+    assert name == "Alice The Bold"
+
+
+def test_rename_player_preserves_listener_role(tmp_path: Path) -> None:
+    """Renaming a Слушатель row keeps the listener role on disk."""
+
+    _ensure_app()
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-listener.flac")
+    _write_speaker_map(session, {
+        "1-listener": {"player": "Lurker", "characters": [], "role": "Слушатель"},
+    })
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    # Sanity: load-side mapped to listener + excluded.
+    assert tracks.data(tracks.index(0), _TLM.RoleRole) == "Слушатель"
+    assert tracks.data(tracks.index(0), _TLM.ExcludedRole) is True
+
+    controller.renamePlayer(0, "Quiet One")
+
+    data = json.loads((session / "speaker_map.json").read_text(encoding="utf-8"))
+    entry = data["1-listener"]
+    assert entry["player"] == "Quiet One"
+    assert entry["role"] == "Слушатель"
+
+
+def test_rename_player_out_of_range_no_op(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An out-of-range row index neither crashes nor writes anything."""
+
+    _ensure_app()
+
+    # Sandbox the legacy-migration project root so loadFromDir can't
+    # silently copy the repo's real speaker_map.json into our scratch
+    # session and break the "no file" assertion below.
+    from core import speaker_map as core_speaker_map
+    fake_root = tmp_path / "fake_root"
+    fake_root.mkdir()
+    monkeypatch.setattr(core_speaker_map, "_project_root", lambda: fake_root)
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+
+    app_model = AppModel()
+    tracks = TrackListModel()
+    meta = SessionMeta()
+    meta.openSession(str(session))
+    tracks.loadFromDir(str(session))
+    controller = PipelineController(app_model, tracks, meta)
+
+    # Capture the speaker_map state (if any) before the rename — the
+    # test asserts that an out-of-range rename does not mutate it.
+    before = (
+        (session / "speaker_map.json").read_text(encoding="utf-8")
+        if (session / "speaker_map.json").exists() else None
+    )
+    controller.renamePlayer(99, "Nobody")
+    after = (
+        (session / "speaker_map.json").read_text(encoding="utf-8")
+        if (session / "speaker_map.json").exists() else None
+    )
+    assert before == after

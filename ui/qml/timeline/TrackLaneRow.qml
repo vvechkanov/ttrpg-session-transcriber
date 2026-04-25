@@ -25,7 +25,16 @@ Item {
 
     property string playerName: ""
     property string playerRole: ""
-    property string character: ""
+    //: Per-row characters list (raw model data). Used to decide whether
+    //: the speaker_map label reads "PC · персонаж…" (placeholder) or
+    //: "PC · Aragorn, Legolas". Read-only — edits flow through the
+    //: SpeakerMapPopover and the controller, not this row.
+    property var characters: []
+    //: Pre-joined character display string (`" / "`-separated) used as
+    //: a convenience binding when the row only needs to render text.
+    //: Falls back to deriving from ``characters`` if the binder didn't
+    //: pass the model role through.
+    property string characterDisplay: ""
     property bool excluded: false
     property string modelId: ""
     property bool modelOverride: false
@@ -51,7 +60,10 @@ Item {
     property bool editableLocked: false
 
     signal nameEdited(string newName)
-    signal characterEdited(string newCharacter)
+    //: Emitted when the user clicks the read-only speaker_map label
+    //: (the line below the player name). The host opens
+    //: SpeakerMapPopover.openFor(...) on this signal.
+    signal speakerMapClicked()
 
     // When no per-track override is set, the badge falls back to the
     // globally-active model from ``ModelRegistry``. ``modelRegistry``
@@ -179,34 +191,47 @@ Item {
                     elide: Text.ElideRight
                 }
 
-                // Role + inline-editable character. Keeping them in a
-                // RowLayout so only the character toggles to an edit
-                // field on click — the role stays static.
-                RowLayout {
+                // Read-only clickable label. Click opens the
+                // SpeakerMapPopover; characters edit there (per
+                // feature #5 iter 5b/2). The label collapses
+                // multiple character names to a comma-joined string
+                // and falls back to a dim "персонаж…" placeholder
+                // when the player has no character assigned.
+                Item {
                     visible: !root.excluded
                     Layout.fillWidth: true
-                    spacing: 4
+                    Layout.preferredHeight: speakerLabel.implicitHeight
+
+                    readonly property bool _isGm: root.playerRole === "GM"
+                    readonly property string _joined: root.characterDisplay.length > 0
+                        ? root.characterDisplay
+                        : (root.characters && root.characters.length > 0
+                            ? root.characters.join(", ")
+                            : "")
+                    readonly property bool _hasCharacter: _joined.length > 0
 
                     Text {
-                        text: root.playerRole
-                        color: Theme.ink3
+                        id: speakerLabel
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: parent._isGm
+                            ? "GM"
+                            : (parent._hasCharacter
+                                ? "PC · " + parent._joined
+                                : "PC · персонаж…")
+                        color: parent._isGm || parent._hasCharacter
+                            ? Theme.ink3
+                            : Theme.inkFaint
                         font.family: Theme.fontSans
                         font.pixelSize: 10
+                        font.italic: !parent._isGm && !parent._hasCharacter
+                        elide: Text.ElideRight
                     }
-                    Text {
-                        text: "·"
-                        color: Theme.inkFaint
-                        font.family: Theme.fontSans
-                        font.pixelSize: 10
-                    }
-                    InlineEdit {
-                        Layout.fillWidth: true
-                        text: root.character
-                        locked: root.editableLocked
-                        color: Theme.ink3
-                        font.family: Theme.fontSans
-                        font.pixelSize: 10
-                        onCommitted: (value) => root.characterEdited(value)
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.speakerMapClicked()
                     }
                 }
             }

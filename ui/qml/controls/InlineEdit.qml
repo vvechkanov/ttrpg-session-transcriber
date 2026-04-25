@@ -12,7 +12,7 @@ import App.Theme
 //     InlineEdit {
 //         text: modelData.name
 //         locked: appModel.phase !== "idle"
-//         onCommitted: (value) => tracksModel.setPlayerName(row, value)
+//         onCommitted: (value) => pipeline.renamePlayer(row, value)
 //     }
 //
 // The control stays fixed-width on its container — no jumping between
