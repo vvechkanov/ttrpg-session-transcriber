@@ -80,9 +80,24 @@ def format_context(session_dir: Path, merged_path: Path, text: str) -> str:
             if not isinstance(v, dict):
                 continue
             player = (v.get("player") or "").strip()
-            character = (v.get("character") or "").strip()
+            # Accept both new shape (`characters: [...]`) and legacy
+            # (`character: "..."`). `load_speaker_map` here reads the
+            # raw file without normalization, so chunking may still see
+            # the legacy shape on pre-migration files.
+            raw_characters = v.get("characters")
+            if isinstance(raw_characters, list):
+                characters = [
+                    str(c).strip()
+                    for c in raw_characters
+                    if isinstance(c, str) and str(c).strip()
+                ]
+            elif isinstance(v.get("character"), str) and v["character"].strip():
+                characters = [v["character"].strip()]
+            else:
+                characters = []
             role = (v.get("role") or "").strip()
-            label = " / ".join([x for x in [player, character] if x])
+            rendered_characters = " / ".join(characters)
+            label = " / ".join([x for x in [player, rendered_characters] if x])
             if not label:
                 label = key
             if role:

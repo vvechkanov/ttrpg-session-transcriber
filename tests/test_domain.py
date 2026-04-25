@@ -122,8 +122,12 @@ class TestSpeakerMap:
     def test_load_speaker_map_session_dir(self, tmp_path):
         from domain.speaker_map import load_speaker_map
         data = {
-            "1-gm": {"player": "TestGM", "character": "", "role": "GM"},
-            "2-player": {"player": "Alice", "character": "Aragorn", "role": "PC"},
+            "1-gm": {"player": "TestGM", "characters": [], "role": "GM"},
+            "2-player": {
+                "player": "Alice",
+                "characters": ["Aragorn"],
+                "role": "PC",
+            },
         }
         (tmp_path / "speaker_map.json").write_text(
             json.dumps(data), encoding="utf-8"
@@ -134,7 +138,7 @@ class TestSpeakerMap:
 
     def test_load_speaker_map_player_only(self, tmp_path):
         from domain.speaker_map import load_speaker_map
-        data = {"1-gm": {"player": "Bob", "character": ""}}
+        data = {"1-gm": {"player": "Bob", "characters": []}}
         (tmp_path / "speaker_map.json").write_text(
             json.dumps(data), encoding="utf-8"
         )
@@ -143,12 +147,46 @@ class TestSpeakerMap:
 
     def test_load_speaker_map_character_only(self, tmp_path):
         from domain.speaker_map import load_speaker_map
-        data = {"1-pc": {"player": "", "character": "Legolas"}}
+        data = {"1-pc": {"player": "", "characters": ["Legolas"]}}
         (tmp_path / "speaker_map.json").write_text(
             json.dumps(data), encoding="utf-8"
         )
         result = load_speaker_map(tmp_path)
         assert result["1-pc"] == "Legolas"
+
+    def test_load_speaker_map_multi_character(self, tmp_path):
+        """Multi-character entry renders as `Player (C1 / C2)`."""
+        from domain.speaker_map import load_speaker_map
+        data = {
+            "1-pc": {
+                "player": "Alice",
+                "characters": ["Одетт", "Lyra"],
+                "role": "PC",
+            },
+        }
+        (tmp_path / "speaker_map.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        result = load_speaker_map(tmp_path)
+        assert result["1-pc"] == "Alice (Одетт / Lyra)"
+
+    def test_load_speaker_map_legacy_character_string_still_renders(self, tmp_path):
+        """Legacy ``character: "X"`` shape must render the same label."""
+        from domain.speaker_map import load_speaker_map
+        data = {
+            "1-gm": {"player": "TestGM", "character": "", "role": "GM"},
+            "2-player": {
+                "player": "Alice",
+                "character": "Aragorn",
+                "role": "PC",
+            },
+        }
+        (tmp_path / "speaker_map.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        result = load_speaker_map(tmp_path)
+        assert result["1-gm"] == "TestGM"
+        assert result["2-player"] == "Alice (Aragorn)"
 
     def test_load_speaker_map_returns_empty_on_missing_file(self, tmp_path):
         from domain.speaker_map import load_speaker_map
