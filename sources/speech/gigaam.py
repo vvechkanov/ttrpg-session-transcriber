@@ -88,7 +88,10 @@ class _VadTuning:
     min_silence_duration: float = 0.8
     min_speech_duration: float = 0.25
     max_speech_duration: float = 60.0
-    window_size: int = 1024
+    # Silero VAD V4 (the model bundled in version.json) expects exactly
+    # 512 samples per chunk at 16 kHz. Setting 1024 here triggers an
+    # ONNX shape mismatch — "Got: 1024 Expected: 512" — at runtime.
+    window_size: int = 512
     sample_rate: int = 16000
     num_threads: int = 2
 
@@ -234,6 +237,7 @@ class GigaAMSource(Source):
         :meth:`extract`'s behaviour when called from the CLI.
         """
 
+        self._ensure_loaded()
         if speaker is None:
             speaker = resolve_speaker(audio_path.stem, self.speaker_map)
         return self._transcribe_track(
@@ -253,6 +257,12 @@ class GigaAMSource(Source):
         """
         if self._recognizer is not None and self._vad is not None:
             return
+        if self.device == "cuda":
+            # Preload torch first so its bundled cuDNN/CUDA DLLs land on
+            # the Windows DLL search path before sherpa-onnx tries to
+            # load onnxruntime_providers_cuda.dll. Without this the
+            # CUDA EP fails with "cudnn64_9.dll missing" (Error 126).
+            import torch  # noqa: F401
         params = GigaAMInstallParams(
             variant=self.variant,
             precision=self.precision,
@@ -361,12 +371,22 @@ class GigaAMSource(Source):
         ``samples`` float32 и ``start`` sample-offset), ``vad.pop()`` —
         убрать front.
 
-        Если в future-версии API изменится — изолировано здесь.
+        ВАЖНО: ``vad.front`` возвращает live-reference на внутренний
+        буфер VAD; после ``vad.pop()`` этот буфер обнуляется и
+        ``speech.samples`` становится пустым. Поэтому копируем samples
+        и start ДО pop, иначе encoder получает shape (0,) и падает с
+        ``Invalid input shape: {0}``. Этот баг маскировался ранее
+        неверным ``window_size: 1024`` в ``_VadTuning`` — VAD просто
+        не выдавал segments вообще.
         """
+        import numpy as np
+
         while not vad.empty():
             speech = vad.front
+            samples = np.asarray(speech.samples, dtype=np.float32)
+            start_sample = int(speech.start)
             vad.pop()
-            seg = self._recognize_segment(speech, speaker)
+            seg = self._recognize_segment_from(samples, start_sample, speaker)
             if seg is not None:
                 segments_out.append(seg)
 
@@ -375,24 +395,58 @@ class GigaAMSource(Source):
         speech: Any,
         speaker: str | None,
     ) -> SpeechSegment | None:
-        """Распознать один VAD-сегмент, применить фильтры мусора.
+        """Распознать один VAD-сегмент (deprecated — берёт live-ref).
+
+        Сохранён для backward-compat unit-тестов из
+        ``tests/sources/test_gigaam_runtime.py::TestJunkFilter``,
+        которые конструируют ``MagicMock`` сегменты без участия live
+        VAD-буфера. Production-путь идёт через ``_recognize_segment_from``
+        (см. ``_drain_vad``), который копирует samples из VAD ДО pop.
+        """
+        import numpy as np
+
+        samples = np.asarray(speech.samples, dtype=np.float32)
+        start_sample = int(speech.start)
+        return self._recognize_segment_from(samples, start_sample, speaker)
+
+    def _recognize_segment_from(
+        self,
+        samples: Any,
+        start_sample: int,
+        speaker: str | None,
+    ) -> SpeechSegment | None:
+        """Распознать VAD-сегмент по уже-скопированным samples.
 
         Фильтры (spec §6.5.9):
-            1. Пустой/слишком короткий текст (< 2 символов) → None.
+            1. Слишком короткий аудио (< ~50 ms) → None. Encoder
+               GigaAM с stride 4 даёт 0 фреймов, ONNX Conv падает.
+            2. Пустой/слишком короткий текст (< 2 символов) → None.
                Артефакт VAD-cut на переходных шумах.
-            2. Density < 0.5 симв/сек на сегментах > 2 сек → None.
+            3. Density < 0.5 симв/сек на сегментах > 2 сек → None.
                Ловит пение/музыку которую VAD пропустил как речь.
         """
+        n = len(samples)
+        if n < 800:
+            return None
         stream = self._recognizer.create_stream()
-        stream.accept_waveform(16000, speech.samples)
-        self._recognizer.decode_stream(stream)
+        stream.accept_waveform(16000, samples)
+        try:
+            self._recognizer.decode_stream(stream)
+        except RuntimeError as exc:
+            # Defensive: ONNX shape edge cases on otherwise-passing
+            # length thresholds. Drop the segment, keep the run alive.
+            logger.warning(
+                "GigaAM decode failed on %.2fs segment, skipping: %s",
+                n / 16000.0, exc,
+            )
+            return None
         text = (stream.result.text or "").strip()
 
         if len(text) < 2:
             return None
 
-        start_sec = speech.start / 16000.0
-        duration_sec = len(speech.samples) / 16000.0
+        start_sec = start_sample / 16000.0
+        duration_sec = n / 16000.0
         end_sec = start_sec + duration_sec
 
         if duration_sec > 2.0 and (len(text) / duration_sec) < 0.5:
@@ -446,25 +500,28 @@ def _pick_decoding_method(hotwords_file: Path | None) -> str:
 
 
 def _detect_provider(device: str) -> str:
-    """Выбрать ONNX Runtime provider с fallback CPU.
+    """Выбрать sherpa-onnx provider с fallback CPU.
 
-    Для ``device="cuda"`` валидируем наличие ``CUDAExecutionProvider``
-    в onnxruntime. CUDA-сборка sherpa-onnx — это отдельный wheel,
-    стандартный pip install sherpa-onnx даёт CPU-only. Передача
-    ``provider="cuda"`` в CPU-only сборке → runtime error, поэтому detect
-    обязателен.
+    Для ``device="cuda"`` проверяем что установлен CUDA-вариант sherpa-onnx
+    (ставится с k2-fsa CUDA wheel — версия содержит ``+cuda``). Стандартный
+    PyPI-вариант (CPU-only) даст runtime error при ``provider="cuda"``.
+
+    Намеренно НЕ опираемся на ``onnxruntime`` пакет: sherpa-onnx CUDA wheel
+    содержит свой собственный bundled ``onnxruntime_providers_cuda.dll`` и
+    параллельно установленный ``onnxruntime-gpu`` приводит к heap
+    corruption при создании recognizer (двойная регистрация CUDA EP).
     """
     if device != "cuda":
         return "cpu"
     try:
-        import onnxruntime as ort
+        import sherpa_onnx
 
-        if "CUDAExecutionProvider" in ort.get_available_providers():
+        if "+cuda" in getattr(sherpa_onnx, "__version__", ""):
             return "cuda"
     except ImportError:
         pass
     logger.warning(
-        "CUDA requested but CUDAExecutionProvider unavailable; falling back to CPU"
+        "CUDA requested but sherpa-onnx CUDA build not detected; falling back to CPU"
     )
     return "cpu"
 
@@ -594,13 +651,24 @@ def _load_audio_int16_mono(audio_path: Path) -> tuple[Any, int]:
 
     Возвращает ``(samples: np.ndarray[int16], sample_rate: int)``.
 
-    Использует ``soundfile`` (уже в dependencies проекта), принудительно
-    приводя к int16 mono. Если канал > 1 — усредняем в моно.
+    Сначала пробует ``soundfile`` (быстро, in-process). Если libsndfile
+    падает — типично ``Internal psf_fseek() failed`` на flac/ogg от Craig
+    с оборванным stream'ом без seektable — делаем fallback через ffmpeg
+    pipe (чисто sequential decode, не нуждается в seek). Если канал > 1 —
+    усредняем в моно.
     """
     import numpy as np
     import soundfile as sf
 
-    data, sr = sf.read(str(audio_path), dtype="int16", always_2d=True)
+    try:
+        data, sr = sf.read(str(audio_path), dtype="int16", always_2d=True)
+    except (RuntimeError, sf.LibsndfileError) as e:
+        logger.info(
+            "soundfile failed for %s (%s); falling back to ffmpeg",
+            audio_path.name, e,
+        )
+        return _load_audio_int16_mono_ffmpeg(audio_path)
+
     # data shape: (frames, channels)
     if data.shape[1] > 1:
         # Среднее по каналам. Каст обратно к int16 с насыщением.
@@ -608,6 +676,76 @@ def _load_audio_int16_mono(audio_path: Path) -> tuple[Any, int]:
     else:
         mono = data[:, 0]
     return mono, int(sr)
+
+
+def _bundled_ffmpeg_tool(name: str) -> str:
+    """Path to bundled ffmpeg/ffprobe (mirrors ``core.peaks._bundled_tool``).
+
+    Duplicated locally to avoid a ``sources → core`` import (forbidden
+    by ``ARCHITECTURE.md §3``). Falls back to bare ``name`` so a system
+    ffmpeg on PATH still works in dev setups without ``tools/ffmpeg``.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    bundled = repo_root / "tools" / "ffmpeg" / "bin" / f"{name}.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return name
+
+
+def _load_audio_int16_mono_ffmpeg(audio_path: Path) -> tuple[Any, int]:
+    """ffmpeg-based fallback for files libsndfile cannot seek into.
+
+    Pipes raw s16le mono PCM at the file's native sample rate through
+    stdout. Native SR is queried via ffprobe; if probe fails we default
+    to 48 kHz (Craig's standard output) — downstream resampler handles
+    arbitrary rates.
+    """
+    import subprocess
+
+    import numpy as np
+
+    # Probe native sample rate.
+    sr = 48000
+    try:
+        out = subprocess.check_output(
+            [
+                _bundled_ffmpeg_tool("ffprobe"),
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        probed = int(out.strip())
+        if probed > 0:
+            sr = probed
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # Probe optional — keep default; ffmpeg will still decode.
+        pass
+
+    proc = subprocess.run(
+        [
+            _bundled_ffmpeg_tool("ffmpeg"),
+            "-v", "error",
+            "-i", str(audio_path),
+            "-f", "s16le",
+            "-acodec", "pcm_s16le",
+            "-ac", "1",
+            "-ar", str(sr),
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    samples = np.frombuffer(proc.stdout, dtype=np.int16)
+    if samples.size == 0:
+        raise RuntimeError(
+            f"ffmpeg fallback produced no samples for {audio_path}"
+        )
+    return samples, sr
 
 
 def _resample_to_16k_float32(samples_int16: Any, sr_native: int) -> Any:
