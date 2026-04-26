@@ -48,7 +48,9 @@ Rectangle {
             Item { Layout.fillWidth: true }
 
             Text {
-                text: "CPU"
+                text: (typeof preferences !== "undefined" && preferences && preferences.asrDevice === "cuda")
+                    ? "GPU"
+                    : "CPU"
                 color: Theme.ink3
                 font.family: Theme.fontMono
                 font.pixelSize: 11

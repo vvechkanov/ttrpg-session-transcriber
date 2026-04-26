@@ -37,9 +37,12 @@ Rectangle {
     readonly property string _effectiveName: modelName.length > 0
         ? modelName
         : (_activeEntry ? _activeEntry.name : "—")
+    readonly property string _deviceLabel: (typeof preferences !== "undefined" && preferences && preferences.asrDevice === "cuda")
+        ? "GPU"
+        : "CPU"
     readonly property string _effectiveQualifier: qualifier.length > 0
         ? qualifier
-        : (_activeEntry ? (_activeEntry.size + " · CPU") : "CPU")
+        : (_activeEntry ? (_activeEntry.size + " · " + _deviceLabel) : _deviceLabel)
 
     signal clicked()
 
