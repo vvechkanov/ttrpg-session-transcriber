@@ -15,13 +15,15 @@ from typing import Callable, Literal
 
 from core.chunking import ChunkingOptions, chunk_text_file
 from core.discovery import find_fvtt_chat_log, find_info_file
+from core.file_matchers import detect_combat_logs
 from core.gpu_check import check_gpu_or_warn
-from domain.annotations import ChatMessage
+from domain.annotations import ChatMessage, GameLogEntry
 from domain.timeline import Timeline
 from mergers import MERGERS
 from renderers import RENDERERS
 from sources import SPEECH_SOURCES
 from sources.base import Source
+from sources.game_log.combat_dump import CombatDumpSource
 from sources.game_log.fvtt_chat import FvttChatSource
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,9 @@ logger = logging.getLogger(__name__)
 #: The ``"chunk"`` stage is emitted only when ``params.chunking`` is
 #: configured with ``enabled=True``; otherwise the sequence is the
 #: same as before.
-PipelineStage = Literal["start", "speech", "chat", "merge", "render", "chunk", "done"]
+PipelineStage = Literal[
+    "start", "speech", "chat", "combat", "merge", "render", "chunk", "done"
+]
 
 #: Callable type for progress callbacks. Receives stage name and optional
 #: free-form message (file names, track counts, etc).
@@ -121,11 +125,30 @@ def run(
         stage_cb("chat", "no chat log")
         logger.info("No FVTT chat log found in %s", session_dir)
 
+    combat_logs = detect_combat_logs(session_dir)
+    game_log_entries: list[GameLogEntry] = []
+    if combat_logs:
+        info_file = find_info_file(session_dir)
+        for combat_path in combat_logs:
+            stage_cb("combat", combat_path.name)
+            logger.info("Extracting combat dump from %s", combat_path.name)
+            try:
+                src = CombatDumpSource(
+                    combat_log_path=combat_path,
+                    info_file_path=info_file,
+                )
+                game_log_entries.extend(src.extract(session_dir))
+            except (FileNotFoundError, ValueError, KeyError):
+                # Combat dump может быть мусорным/пустым — не валим pipeline.
+                logger.exception("Combat dump %s failed to parse", combat_path.name)
+    else:
+        stage_cb("combat", "no combat dump")
+
     timeline = Timeline(
         speech=speech_segments,
         emotions=[],
         chat=chat_messages,
-        game_log=[],
+        game_log=game_log_entries,
     )
 
     stage_cb("merge", params.merger)

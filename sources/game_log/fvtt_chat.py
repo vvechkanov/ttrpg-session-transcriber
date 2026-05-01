@@ -11,8 +11,12 @@ Port логики из ``scripts/parse_fvtt_chat.py`` (``parse_fvtt_log``,
     ---------------------------
 
 ``info.txt`` от Craig содержит ``Start time: <ISO8601>`` в UTC.
-Временные метки чата — в local time браузера, поэтому offset
-автодетектится либо передаётся вручную.
+Временные метки чата — в local time браузера, поэтому offset либо
+передаётся вручную, либо определяется по слоёному fallback'у:
+
+    1) ``craig-start`` маркер в чате (точный якорь);
+    2) системная таймзона машины, где идёт мердж;
+    3) эвристика min|delta| по первому сообщению.
 """
 
 from __future__ import annotations
@@ -28,6 +32,17 @@ _TS_RE = re.compile(
     r"^\[(\d{1,2}/\d{1,2}/\d{4},\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)\]\s*(.+)$"
 )
 _SEPARATOR = "---------------------------"
+
+# Маркер «здесь Craig стартанул»: пользователь оставляет в FVTT chat
+# сообщение, начинающееся с ``craig-start`` (или ``craig start`` /
+# ``craig_start``), регистр игнорируется. Опционально — в скобках или со
+# слэшем перед: ``[craig-start]`` / ``/craig-start``.
+_ANCHOR_MARKER_RE = re.compile(r"^\s*[/\[]?\s*craig[-_ ]?start\b", re.IGNORECASE)
+
+# Реальные UTC-офсеты в природе живут в [-12, +14]. Если маркер даёт
+# что-то за пределами — это либо опечатка времени, либо маркер от
+# другой записи, либо мусор. Игнорируем, не доверяем.
+_MAX_REASONABLE_OFFSET_H = 14.0
 
 # FVTT chat log не размечает ic/ooc: мы ставим "ic" по умолчанию, так как
 # типичный use case — логирование ролевых сообщений. Если позже появится
@@ -74,6 +89,15 @@ class FvttChatSource(Source):
 
         tz_offset = self.tz_offset
         if tz_offset is None:
+            # Step 1: явный якорь в чате — самое надёжное.
+            tz_offset = find_anchor_offset(entries, rec_start)
+        if tz_offset is None:
+            # Step 2: системная таймзона. Работает, пока чат экспортит и
+            # мердж запускает один и тот же человек на одной машине.
+            tz_offset = _system_utc_offset_hours()
+        if tz_offset is None:
+            # Step 3: fallback-эвристика. Промахнётся, если Craig запустили
+            # сильно позже начала FVTT-болтовни — но лучше, чем ничего.
             tz_offset = guess_tz_offset(entries, rec_start)
 
         messages: list[ChatMessage] = []
@@ -150,8 +174,12 @@ def parse_info_start_time(path: Path) -> datetime:
 def guess_tz_offset(entries: list[dict], recording_start_utc: datetime) -> float:
     """Port ``guess_tz_offset``: перебирает UTC offset -12..+14 и выбирает лучший.
 
-    "Лучший" — такой, при котором первый chat entry оказывается сразу
-    после (``delta >= 0``) recording_start и максимально близко к нему.
+    "Лучший" — тот, при котором первый chat entry оказывается ближе всего
+    (по абсолютной величине) к recording_start. Знак delta не важен:
+    первое сообщение в FVTT chat часто отправлено ДО нажатия Record в Craig
+    (расстановка фишек, броски инициативы, общий чат до игры) — отбрасывание
+    отрицательных delta приводит к выбору неверного offset, сдвинутого на час
+    относительно реального.
     """
     if not entries:
         return 0.0
@@ -163,9 +191,57 @@ def guess_tz_offset(entries: list[dict], recording_start_utc: datetime) -> float
     for offset_h in range(-12, 15):
         entry_utc = first_local - timedelta(hours=offset_h)
         entry_utc = entry_utc.replace(tzinfo=timezone.utc)
-        delta = (entry_utc - recording_start_utc).total_seconds()
-        if 0 <= delta < best_delta:
+        delta = abs((entry_utc - recording_start_utc).total_seconds())
+        if delta < best_delta:
             best_delta = delta
             best_offset = float(offset_h)
 
     return best_offset
+
+
+def find_anchor_offset(
+    entries: list[dict], recording_start_utc: datetime
+) -> float | None:
+    """Найти ``craig-start`` маркер и вычислить точный UTC offset.
+
+    Маркер — любое сообщение, чей текст начинается с ``craig-start`` (или
+    ``craig start`` / ``craig_start``), регистр не важен; опциональны
+    скобки/слэш перед — ``[craig-start]``, ``/craig-start``.
+
+    Идея: пользователь оставляет такое сообщение в FVTT chat в момент
+    нажатия Record в Craig. Local timestamp этого сообщения соответствует
+    UTC ``Start time`` из ``info.txt`` — точное соответствие, никаких
+    эвристик.
+
+    Возвращает offset в часах (округлённый до ближайшего целого, чтобы
+    погасить секундный jitter между «нажал Record» и «отправил маркер»).
+    Возвращает ``None`` если маркер не найден или вычисленный offset
+    выходит за разумные пределы (±14 часов).
+    """
+    rec_naive = recording_start_utc.replace(tzinfo=None)
+    for entry in entries:
+        if not _ANCHOR_MARKER_RE.match(entry["text"]):
+            continue
+        delta_seconds = (entry["datetime"] - rec_naive).total_seconds()
+        offset_h = float(round(delta_seconds / 3600))
+        if abs(offset_h) > _MAX_REASONABLE_OFFSET_H:
+            # Маркер сломан / не от этой записи / опечатка — игнорируем.
+            return None
+        return offset_h
+    return None
+
+
+def _system_utc_offset_hours() -> float | None:
+    """UTC offset машины, где идёт мердж, в часах.
+
+    Использует ``datetime.now().astimezone().utcoffset()`` — корректно
+    учитывает DST на текущую дату. Возвращает ``None`` только если
+    таймзона недоступна (на нормальных Linux/Win/macOS такого не бывает).
+    """
+    try:
+        offset = datetime.now().astimezone().utcoffset()
+    except Exception:
+        return None
+    if offset is None:
+        return None
+    return offset.total_seconds() / 3600

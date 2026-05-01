@@ -11,6 +11,7 @@ plugin discovery (ADR-11). Тяжёлые зависимости (faster-whisper
 """
 
 from sources.base import Source
+from sources.game_log.combat_dump import CombatDumpSource
 from sources.game_log.fvtt_chat import FvttChatSource
 from sources.speech.faster_whisper import FasterWhisperSource
 from sources.speech.gigaam import GigaAMSource
@@ -24,6 +25,7 @@ SPEECH_SOURCES: dict[str, type[Source]] = {
 
 GAME_LOG_SOURCES: dict[str, type[Source]] = {
     "fvtt-chat": FvttChatSource,
+    "combat-dump": CombatDumpSource,
 }
 
 

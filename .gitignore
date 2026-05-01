@@ -8,8 +8,11 @@ __pycache__/
 _run_whisperx_gui.log
 app_run.log
 
-# User data
-speaker_map.json
+# User data — only the project-root speaker_map (legacy location).
+# Bare ``speaker_map.json`` would also match in-repo fixtures
+# (tests/fixtures/e2e_p2/session/speaker_map.json), which broke CI
+# after a fresh checkout.
+/speaker_map.json
 .claude/
 
 # Test output

@@ -28,6 +28,7 @@ from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
+from core.file_matchers import detect_combat_logs
 from core.speaker_map import load_speaker_map_raw, save_speaker_map_raw
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
@@ -500,6 +501,7 @@ class PipelineController(QObject):
 
         session_dir = Path(session_dir_str)
         chat_log = find_fvtt_chat_log(session_dir)
+        combat_logs = list(detect_combat_logs(session_dir))
         total_seconds = float(self._session.totalSeconds) if self._session is not None else 0.0
 
         thread = QThread(self)
@@ -508,6 +510,7 @@ class PipelineController(QObject):
             speech_segments=all_segments,
             chat_log_path=chat_log,
             total_duration=total_seconds,
+            combat_log_paths=combat_logs,
         )
         worker.moveToThread(thread)
 
