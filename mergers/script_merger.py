@@ -1,7 +1,7 @@
 """ScriptMerger: Timeline → sorted list[ScriptEvent] with same-speaker gluing."""
 
 from domain.annotations import SpeechSegment
-from domain.events import ChatEvent, ScriptEvent, SpeechEvent
+from domain.events import ChatEvent, GameEvent, ScriptEvent, SpeechEvent
 from domain.timeline import Timeline
 
 from mergers.base import Merger
@@ -12,7 +12,7 @@ def _event_sort_key(e: ScriptEvent) -> tuple[float, int]:
         return (e.start, 0)
     if isinstance(e, ChatEvent):
         return (e.at, 1)
-    return (e.at, 2)  # GameEvent — reserved
+    return (e.at, 2)  # GameEvent
 
 
 class ScriptMerger(Merger):
@@ -71,11 +71,19 @@ class ScriptMerger(Merger):
         # Step 4: emotions
         # P2: emotion projection not yet implemented
 
-        # Step 5: game log
-        # P2: game_log → GameEvent not yet implemented
+        # Step 5: game log → GameEvent
+        game_events: list[ScriptEvent] = [
+            GameEvent(
+                at=entry.at,
+                actor=entry.actor,
+                action=entry.action,
+                detail=entry.detail,
+            )
+            for entry in timeline.game_log
+        ]
 
         # Step 6: interleave and sort
-        events: list[ScriptEvent] = [*speech_events, *chat_events]
+        events: list[ScriptEvent] = [*speech_events, *chat_events, *game_events]
         events.sort(key=_event_sort_key)
 
         # Step 7

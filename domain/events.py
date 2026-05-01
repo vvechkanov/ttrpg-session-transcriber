@@ -28,11 +28,22 @@ class ChatEvent:
 
 @dataclass
 class GameEvent:
-    """Игровое событие с закрытым набором действий."""
+    """Игровое событие.
+
+    ``action`` — открытое множество (mirror ``GameLogEntry.action``):
+    конкретные источники определяют свой вокабуляр. Сейчас в ходу:
+
+    * ``"encounter_start"`` / ``"encounter_end"`` — начало/конец боя
+      (от ``CombatDumpSource``).
+    * ``"round_start"`` — начало раунда инициативы.
+    * ``"turn_start"`` — ход персонажа.
+    * ``"roll"`` / ``"damage"`` / ``"spell"`` — индивидуальные действия
+      (зарезервированы под будущие парсеры).
+    """
 
     at: float
     actor: str
-    action: Literal["roll", "damage", "spell"]
+    action: str
     detail: str
 
 
