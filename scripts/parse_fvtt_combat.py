@@ -122,6 +122,131 @@ def _format_effect_event(ev: dict) -> str | None:
     return None
 
 
+def _format_action(action: dict) -> str:
+    """Compact one-line summary of a single in-turn action.
+
+    Format: ``{action_name} | {action_type} | cost=N | roll=R (formula) |
+    {degree} | damage=N type | DC=N | -> targets``. None / empty fields
+    are omitted so noise stays low.
+    """
+    parts: list[str] = []
+    name = (action.get("action_name") or action.get("title") or "").strip()
+    if name:
+        parts.append(name)
+    action_type = action.get("action_type")
+    if action_type:
+        parts.append(str(action_type))
+    cost = action.get("action_cost")
+    if cost is not None:
+        parts.append(f"cost={cost}")
+    roll_result = action.get("roll_result")
+    if roll_result is not None:
+        formula = action.get("roll_formula")
+        roll_str = f"roll={roll_result}"
+        if formula:
+            roll_str += f" ({formula})"
+        parts.append(roll_str)
+    degree = action.get("degree_of_success")
+    if degree:
+        parts.append(str(degree))
+    damage = action.get("damage_dealt")
+    if damage is not None:
+        damage_type = (action.get("damage_type") or "").strip()
+        parts.append(
+            f"damage={damage}" + (f" {damage_type}" if damage_type else "")
+        )
+    healing = action.get("healing_done")
+    if healing is not None:
+        parts.append(f"healing={healing}")
+    dc = action.get("dc") or {}
+    dc_value = dc.get("value") if isinstance(dc, dict) else None
+    if dc_value is not None:
+        parts.append(f"DC={dc_value}")
+    save_type = action.get("save_type")
+    if save_type:
+        parts.append(f"save={save_type}")
+    targets = action.get("targets") or []
+    target_names = [
+        str(t.get("name") or "").strip()
+        for t in targets
+        if t.get("name")
+    ]
+    if target_names:
+        parts.append(f"-> {', '.join(target_names)}")
+    return " | ".join(parts)
+
+
+def _format_movement(mv: dict) -> str:
+    distance = mv.get("distance_ft")
+    if distance is None:
+        return ""
+    return f"переместился на {distance} ft"
+
+
+def _format_global_summary(stats: dict) -> str:
+    """Encounter-wide totals: rounds, duration, XP, party level, difficulty."""
+    parts: list[str] = []
+    if (rounds := stats.get("total_rounds")) is not None:
+        parts.append(f"rounds={rounds}")
+    if (duration := stats.get("combat_duration_seconds")) is not None:
+        parts.append(f"duration={int(duration)}s")
+    if (xp := stats.get("total_xp")) is not None:
+        parts.append(f"xp={xp}")
+    if (party_level := stats.get("party_level")) is not None:
+        parts.append(f"party_lvl={party_level}")
+    if difficulty := stats.get("difficulty"):
+        parts.append(f"difficulty={difficulty}")
+    if (avg_gm := stats.get("avg_turn_duration_gm_seconds")) is not None:
+        parts.append(f"avg_gm_turn={avg_gm:.0f}s")
+    return " | ".join(parts)
+
+
+def _format_actor_summary(stats: dict) -> str:
+    """Per-actor stats: damage, healing, hit rate, downed, max single hit.
+
+    Drops zero / None fields so the line stays compact.
+    """
+    parts: list[str] = []
+    actor_type = stats.get("actor_type")
+    level = stats.get("level")
+    if actor_type or level is not None:
+        type_part = str(actor_type) if actor_type else ""
+        if level is not None:
+            type_part = f"{type_part} lvl={level}".strip()
+        parts.append(type_part)
+    if (dmg := stats.get("damage_dealt")) is not None and dmg > 0:
+        share = stats.get("damage_share_percent")
+        share_str = f" ({share}%)" if share is not None else ""
+        parts.append(f"DMG_dealt={dmg}{share_str}")
+    if (taken := stats.get("damage_taken")) is not None and taken > 0:
+        parts.append(f"DMG_taken={taken}")
+    if (heal_done := stats.get("healing_done")) is not None and heal_done > 0:
+        parts.append(f"healing_done={heal_done}")
+    if (heal_recv := stats.get("healing_received")) is not None and heal_recv > 0:
+        parts.append(f"healing_received={heal_recv}")
+    if (hit_rate := stats.get("hit_rate_percent")) is not None:
+        parts.append(f"hit_rate={hit_rate}%")
+    if (downed := stats.get("times_downed")) is not None and downed > 0:
+        parts.append(f"downed={downed}")
+    if (revived := stats.get("revive_count")) is not None and revived > 0:
+        parts.append(f"revived={revived}")
+    max_hit = stats.get("max_single_hit") or {}
+    max_hit_value = max_hit.get("value")
+    if max_hit_value is not None and max_hit_value > 0:
+        item = (max_hit.get("item_name") or "").strip()
+        item_str = f" ({item})" if item else ""
+        parts.append(f"max_hit={max_hit_value}{item_str}")
+    one_shots = stats.get("one_shots") or []
+    one_shot_names = [
+        str(o.get("name") or "").strip()
+        for o in one_shots
+        if o.get("name")
+    ]
+    if one_shot_names:
+        parts.append(f"one_shots=[{', '.join(one_shot_names)}]")
+    return " | ".join(parts)
+
+
 # ── Main entry ────────────────────────────────────────────────────────
 
 def parse_combat_file(path: Path) -> dict:
@@ -184,6 +309,17 @@ def combat_to_segments(
                 f"Ход: {name}{hp_info}",
             )
 
+            # Actions don't carry their own timestamp — peg them to the
+            # turn's started_at so they sort right after the turn header.
+            turn_started_seconds = _seconds_from_start(
+                turn.get("started_at"), recording_start_utc
+            )
+            for action in turn.get("actions", []) or []:
+                detail = _format_action(action)
+                if not detail:
+                    continue
+                add(turn_started_seconds, f"{name}: {detail}")
+
             for ch in turn.get("hp_changes", []):
                 target = (ch.get("actor_name") or "?").strip()
                 add(
@@ -201,6 +337,16 @@ def combat_to_segments(
                     f"{target} {body}",
                 )
 
+            for mv in turn.get("movements", []) or []:
+                detail = _format_movement(mv)
+                if not detail:
+                    continue
+                token_name = (mv.get("token_name") or "?").strip()
+                add(
+                    _seconds_from_start(mv.get("timestamp"), recording_start_utc),
+                    f"{token_name} {detail}",
+                )
+
     # ── Combat end marker ────────────────────────────────────────────
     encounter_end = _parse_iso(combat.get("ended_at"))
     if encounter_end is not None:
@@ -208,10 +354,27 @@ def combat_to_segments(
             (r.get("round_number", 0) for r in combat.get("rounds", [])),
             default=0,
         )
-        add(
-            (encounter_end - recording_start_utc).total_seconds(),
-            f"=== Бой окончен ({round_count} раундов) ===",
-        )
+        encounter_end_seconds = (
+            encounter_end - recording_start_utc
+        ).total_seconds()
+        add(encounter_end_seconds, f"=== Бой окончен ({round_count} раундов) ===")
+
+        # ── Summary (encounter-wide + per-actor) ─────────────────────
+        # Both blocks sit on the same timestamp as encounter_end with
+        # stable insertion order — sorted() is stable, so they end up
+        # right after the "=== Бой окончен ===" marker in merged.txt.
+        summary = combat.get("summary") or {}
+        global_stats = summary.get("global") or {}
+        if global_stats:
+            detail = _format_global_summary(global_stats)
+            if detail:
+                add(encounter_end_seconds, f"=== Итого боя: {detail} ===")
+        per_actor = summary.get("per_actor") or {}
+        for actor_id, stats in per_actor.items():
+            actor_name = (stats.get("name") or actor_id).strip()
+            detail = _format_actor_summary(stats)
+            if detail:
+                add(encounter_end_seconds, f"Итог {actor_name}: {detail}")
 
     return segs
 

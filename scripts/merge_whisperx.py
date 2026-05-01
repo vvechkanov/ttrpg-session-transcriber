@@ -123,7 +123,7 @@ def main(paths, *, chat_log=None, info_file=None, tz_offset=None, combat_logs=No
     if chat_log:
         from parse_fvtt_chat import (
             parse_fvtt_log, parse_info_start_time,
-            chat_to_segments, guess_tz_offset,
+            chat_to_segments, resolve_tz_offset,
         )
         chat_log = Path(chat_log)
         entries = parse_fvtt_log(chat_log)
@@ -131,9 +131,13 @@ def main(paths, *, chat_log=None, info_file=None, tz_offset=None, combat_logs=No
 
         rec_start = parse_info_start_time(_resolve_info_file(info_file, session_dir))
 
-        if tz_offset is None:
-            tz_offset = guess_tz_offset(entries, rec_start)
-            print(f"  Auto-detected timezone: UTC{tz_offset:+.0f}")
+        # Layered fallback: explicit override → craig-start marker →
+        # system tz → heuristic. Source is logged so the user sees which
+        # rung fired (e.g. "marker" means a chat anchor was found).
+        tz_offset, tz_source = resolve_tz_offset(
+            entries, rec_start, override=tz_offset
+        )
+        print(f"  Timezone: UTC{tz_offset:+.0f} (source: {tz_source})")
 
         chat_segs = chat_to_segments(entries, rec_start, tz_offset)
         print(f"  {len(chat_segs)} chat segments within recording range")

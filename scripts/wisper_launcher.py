@@ -475,11 +475,13 @@ def gui_main() -> int:
             if info_path.exists():
                 try:
                     from parse_fvtt_chat import (
-                        parse_fvtt_log, parse_info_start_time, guess_tz_offset,
+                        parse_fvtt_log, parse_info_start_time, resolve_tz_offset,
                     )
                     entries = parse_fvtt_log(fvtt_logs[0])
                     rec_start = parse_info_start_time(info_path)
-                    tz = guess_tz_offset(entries, rec_start)
+                    # Layered fallback (marker → system tz → heuristic);
+                    # same logic merge_whisperx.py uses at run time.
+                    tz, _source = resolve_tz_offset(entries, rec_start)
                     chat_tz_var.set(str(int(tz)))
                 except Exception:
                     chat_tz_var.set("auto")
