@@ -1,0 +1,14 @@
+{
+  "1-test_gm": {
+    "player": "TestGM",
+    "role": "GM"
+  },
+  "2-test_player": {
+    "player": "TestPlayer",
+    "character": "Aragorn"
+  },
+  "3-test_player2": {
+    "player": "TestPlayer2",
+    "character": "Legolas"
+  }
+}

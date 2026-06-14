@@ -10,6 +10,9 @@ app_run.log
 
 # User data
 speaker_map.json
+# …but keep checked-in test fixtures: the global pattern above is for
+# user session data, not the e2e fixtures committed under tests/.
+!tests/fixtures/**/speaker_map.json
 .claude/
 
 # Test output
