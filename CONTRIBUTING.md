@@ -24,10 +24,10 @@ source venv/bin/activate
 pip install -e .[dev]
 ```
 
-### Run the GUI launcher
+### Run the GUI
 
 ```bash
-python scripts/wisper_launcher.py
+python -m ui
 ```
 
 ### Run tests

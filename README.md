@@ -66,9 +66,12 @@ cd ttrpg-session-transcriber
 python -m venv venv
 venv\Scripts\activate                  # Windows
 # source venv/bin/activate              # Linux/macOS
-pip install -e .
-python scripts/wisper_launcher.py
+pip install -e .                        # add [dev] for the test suite
+python -m ui
 ```
+
+> **Requires ffmpeg on your `PATH`** (or drop the binaries into `tools/ffmpeg/bin`).
+> The waveform/peaks tooling shells out to ffmpeg to decode audio.
 
 In the GUI:
 
@@ -163,12 +166,16 @@ ttrpg-session-transcriber/
 │   ├── bootstrap.py
 │   ├── installer_ui.py
 │   └── install_logic.py
-├── scripts/
-│   ├── asr_backends/        ← pluggable ASR backends (in development)
-│   ├── wisper_launcher.py   ← GUI launcher for the transcription pipeline
-│   ├── merge_whisperx.py    ← per-track JSON → unified merged.txt
-│   ├── parse_fvtt_chat.py   ← Foundry VTT chat log → segments
-│   └── chunk_text.py        ← merged.txt → LLM-ready chunks
+├── ui/                     ← PySide6/QML GUI; entry point is `python -m ui`
+│   ├── __main__.py         ← launches the QML application
+│   ├── qml/                ← QML/JS UI assets
+│   ├── engines/            ← background pipeline/ASR/merge workers
+│   └── models/             ← Qt data models bound to the UI
+├── core/                   ← pipeline orchestration, discovery, peaks
+├── domain/                 ← pure dataclasses (segments, speaker maps)
+├── sources/                ← ASR + FVTT input adapters
+├── mergers/                ← per-track JSON → unified timeline
+├── renderers/              ← timeline → merged.txt / chunks
 ├── prompts/                 ← LLM prompts for post-processing
 ├── config/                  ← hotwords, defaults
 ├── tests/                   ← pytest suite (in development)

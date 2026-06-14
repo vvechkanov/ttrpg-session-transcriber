@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ttrpg-session-transcriber"
+# NOTE: keep in sync with launcher/version.py (VERSION = "1.0.4").
+# Single-sourcing the version (e.g. dynamic = ["version"] reading
+# launcher/version.py) is a deliberate follow-up — do NOT touch or break
+# launcher/version.py, which stays the runtime source of truth for now.
+version = "1.0.4"
+description = "ASR transcriber for tabletop RPG sessions (PySide6/QML)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Dmitrii Vechkanov", email = "vechkanov90@gmail.com" }]
+
+# Runtime minimum: only what the application imports unconditionally.
+#   - PySide6: required for the QML UI (import ui).
+#   - numpy:   used by the test fixtures (tests/conftest.py) and the
+#              waveform/peaks tooling around core.
+# The heavy ML stack (torch, faster-whisper, gigaam, sherpa-onnx) is NOT a
+# dependency here — it is installed at runtime by the application itself into
+# an isolated directory (see core/backend_installers.py). Do not add it.
+dependencies = [
+    "PySide6>=6.6,<7",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-qt>=4.4,<5",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "domain*",
+    "sources*",
+    "mergers*",
+    "renderers*",
+    "ui*",
+    "launcher*",
+]
+exclude = ["tests*", "scripts*"]
+
+# QML/JS UI assets must ship inside the ui package.
+[tool.setuptools.package-data]
+ui = ["qml/**/*.qml", "qml/**/*.js", "qml/**/*"]

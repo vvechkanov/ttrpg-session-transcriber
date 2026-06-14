@@ -66,9 +66,12 @@ cd ttrpg-session-transcriber
 python -m venv venv
 venv\Scripts\activate                  # Windows
 # source venv/bin/activate              # Linux/macOS
-pip install -e .
-python scripts/wisper_launcher.py
+pip install -e .                        # добавьте [dev] для прогона тестов
+python -m ui
 ```
+
+> **Требуется ffmpeg в `PATH`** (или положите бинарники в `tools/ffmpeg/bin`).
+> Инструменты построения волны/пиков вызывают ffmpeg для декодирования аудио.
 
 В GUI:
 
@@ -163,12 +166,16 @@ ttrpg-session-transcriber/
 │   ├── bootstrap.py
 │   ├── installer_ui.py
 │   └── install_logic.py
-├── scripts/
-│   ├── asr_backends/        ← подключаемые ASR-бэкенды (в разработке)
-│   ├── wisper_launcher.py   ← GUI-лаунчер пайплайна
-│   ├── merge_whisperx.py    ← per-track JSON → единый merged.txt
-│   ├── parse_fvtt_chat.py   ← чат-лог Foundry VTT → сегменты
-│   └── chunk_text.py        ← merged.txt → чанки для LLM
+├── ui/                     ← PySide6/QML GUI; точка входа — `python -m ui`
+│   ├── __main__.py         ← запускает QML-приложение
+│   ├── qml/                ← QML/JS-ассеты интерфейса
+│   ├── engines/            ← фоновые воркеры пайплайна/ASR/merge
+│   └── models/             ← Qt-модели данных, привязанные к UI
+├── core/                   ← оркестрация пайплайна, discovery, пики
+├── domain/                 ← чистые dataclass-ы (сегменты, speaker map)
+├── sources/                ← адаптеры входа ASR + FVTT
+├── mergers/                ← per-track JSON → единый таймлайн
+├── renderers/              ← таймлайн → merged.txt / чанки
 ├── prompts/                 ← LLM-промпты для постобработки
 ├── config/                  ← hotwords, дефолты
 ├── tests/                   ← pytest suite (в разработке)

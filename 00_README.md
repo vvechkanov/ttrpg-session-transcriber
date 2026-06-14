@@ -14,12 +14,9 @@ discord-session-transcriber/
 ├── 00_README.md                         ← этот файл
 ├── 01_Как_пользоваться.md               ← пошаговая инструкция
 ├── 02_Статус_и_заметки.md               ← текущий статус
-├── scripts/
-│   ├── install_whisperx_windows.ps1     ← инсталлятор (один раз)
-│   ├── run_whisperx_gui.bat             ← запуск GUI (вызывается из run.bat)
-│   ├── wisper_launcher.py               ← основной лаунчер (CLI + GUI)
-│   ├── merge_whisperx.py                ← склейка JSON → merged.txt
-│   └── chunk_text.py                    ← нарезка merged.txt → chunks
+├── ui/                                 ← PySide6/QML GUI (точка входа `python -m ui`)
+├── core/                               ← оркестрация пайплайна, discovery, пики
+├── sources/ mergers/ renderers/        ← адаптеры входа, склейка, рендер merged.txt/chunks
 ├── prompts/
 │   ├── 01_raw_to_transcript.md          ← промпт: сырьё → литературная стенограмма
 │   └── 02_transcript_to_journal.md      ← промпт: стенограмма → журнал (глава книги)
@@ -32,23 +29,21 @@ discord-session-transcriber/
 
 ### 1. Установка (один раз на новом компьютере)
 
-Двойной клик по **`install.bat`** в корне проекта. Всё.
-
-Инсталлятор сам:
-- создаёт `venv/` с PyTorch (GPU если есть NVIDIA, иначе CPU) и WhisperX;
-- скачивает ffmpeg в `tools/ffmpeg/` (если его нет в системе).
-
-Альтернативный запуск из PowerShell (с доп. флагами):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install_whisperx_windows.ps1
+```bash
+python -m venv venv
+venv\Scripts\activate          # Windows
+# source venv/bin/activate      # Linux/macOS
+pip install -e .
 ```
 
-Опциональные флаги: `-Torch cu121|cu124|cpu`, `-SkipFFmpeg`.
+ASR-бэкенд (faster-whisper / GigaAM и т.п.) приложение скачивает само в изолированный
+каталог при первом запуске. Нужен **ffmpeg в `PATH`** (или положите его в `tools/ffmpeg/bin`).
 
 ### 2. Запуск
 
-Двойной клик по `run.bat` (или `scripts\run_whisperx_gui.bat`).
+```bash
+python -m ui
+```
 
 В GUI:
 - выбрать папку сессии (где лежат `*.flac` и опционально `speaker_map.json`);
