@@ -334,7 +334,10 @@ Rectangle {
                                             }
 
                                             Text {
-                                                text: "· " + (tracksModel ? tracksModel.activeCount() : 0) + " из " + (tracksModel ? tracksModel.rowCount() : 0)
+                                                // Bind to the notifying properties, not rowCount()/
+                                                // activeCount() calls — a binding over a plain method
+                                                // never re-evaluates and the header froze at "0 из 0".
+                                                text: "· " + (tracksModel ? tracksModel.activeCount : 0) + " из " + (tracksModel ? tracksModel.count : 0)
                                                 color: Theme.ink4
                                                 font.family: Theme.fontMono
                                                 font.pixelSize: 10
