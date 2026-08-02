@@ -29,7 +29,11 @@ from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
 from core.file_matchers import detect_combat_logs
-from core.speaker_map import load_speaker_map_raw, save_speaker_map_raw
+from core.speaker_map import (
+    load_speaker_map,
+    load_speaker_map_raw,
+    save_speaker_map_raw,
+)
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
 from ui.engines.merger_worker import MergerWorker
@@ -418,6 +422,13 @@ class PipelineController(QObject):
         ``make_source`` raises ``ValueError`` on unknown IDs and
         ``RuntimeError`` if the backend isn't installed — both are
         converted to per-track errors upstream.
+
+        The speaker map goes in here, not at merge time: every backend
+        resolves ``SpeechSegment.speaker`` from the audio stem inside
+        ``transcribe_track``, so a source built without one labels
+        every line with the raw file stem ("1-v_vladimir") and nothing
+        downstream can recover the player. The CLI path has always
+        passed it (``core.pipeline``); this path did not.
         """
 
         if model_id not in self._sources:
@@ -426,8 +437,25 @@ class PipelineController(QObject):
                 if self._preferences is not None
                 else None
             )
-            self._sources[model_id] = make_source(model_id, options=options)
+            self._sources[model_id] = make_source(
+                model_id,
+                options=options,
+                speaker_map=self._speaker_map(),
+            )
         return self._sources[model_id]
+
+    def _speaker_map(self) -> dict[str, str]:
+        """Flat ``{track_stem: label}`` for the open session.
+
+        Empty when no session is open — ``make_source`` treats that as
+        "no mapping" and falls back to the stem, which is the old
+        behaviour.
+        """
+
+        session_dir_str = self._session.sessionDir() if self._session is not None else ""
+        if not session_dir_str:
+            return {}
+        return load_speaker_map(Path(session_dir_str))
 
     def _spawn(
         self,

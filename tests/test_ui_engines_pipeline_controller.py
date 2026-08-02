@@ -436,3 +436,73 @@ def test_rename_player_out_of_range_no_op(
         if (session / "speaker_map.json").exists() else None
     )
     assert before == after
+
+
+def test_speaker_map_reaches_make_source(tmp_path: Path, monkeypatch) -> None:
+    """The GUI path must hand the speaker map to the ASR backend.
+
+    Every backend resolves ``SpeechSegment.speaker`` from the audio
+    stem inside ``transcribe_track``. Built without a map, a source
+    labels every line "1-v_vladimir" and nothing downstream can
+    recover the player — which is what merged.txt looked like before
+    this wiring landed. The CLI path (``core.pipeline``) always passed
+    it; the Qt shell did not.
+    """
+
+    _ensure_app()
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_flac_stub(session / "1-vova.flac")
+    _write_speaker_map(session, {
+        "1-vova": {"player": "Вова", "characters": [], "role": "GM"},
+    })
+
+    captured: dict[str, object] = {}
+
+    def _fake_make_source(model_id, *, options=None, speaker_map=None):
+        captured["model_id"] = model_id
+        captured["speaker_map"] = speaker_map
+        return object()
+
+    monkeypatch.setattr(
+        "ui.engines.pipeline_controller.make_source", _fake_make_source
+    )
+
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    controller = PipelineController(AppModel(), tracks, meta)
+    meta.openSession(session.as_uri())
+
+    controller._get_or_make_source("gigaam")
+
+    assert captured["speaker_map"], (
+        "make_source was called without a speaker map — merged.txt would "
+        "carry raw audio stems instead of player names"
+    )
+    assert captured["speaker_map"].get("1-vova") == "Вова", captured["speaker_map"]
+
+
+def test_speaker_map_absent_session_is_not_fatal(monkeypatch) -> None:
+    """No open session → empty map, not a crash.
+
+    ``make_source`` treats an empty mapping as "no mapping" and falls
+    back to the stem, which is the pre-existing behaviour.
+    """
+
+    _ensure_app()
+
+    captured: dict[str, object] = {}
+
+    def _fake_make_source(model_id, *, options=None, speaker_map=None):
+        captured["speaker_map"] = speaker_map
+        return object()
+
+    monkeypatch.setattr(
+        "ui.engines.pipeline_controller.make_source", _fake_make_source
+    )
+
+    controller = PipelineController(AppModel(), TrackListModel(), SessionMeta())
+    controller._get_or_make_source("gigaam")
+
+    assert captured["speaker_map"] == {}
