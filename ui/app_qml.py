@@ -13,6 +13,7 @@ this module is the only GUI entry point today.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QUrl
@@ -47,15 +48,54 @@ def _register_theme_singleton() -> None:
     qmlRegisterSingletonType(theme_url, "App.Theme", 1, 0, "Theme")
 
 
-def main() -> int:
-    # The warm parchment palette fights Material/Fusion, so stay on
-    # Basic and style each control ourselves — same call the QML
-    # mapping doc recommends.
-    QQuickStyle.setStyle("Basic")
+@dataclass
+class Shell:
+    """Everything :func:`build_shell` wired together.
 
-    app = QGuiApplication(sys.argv)
-    app.setApplicationName("Session Transcriber")
-    app.setOrganizationName("Session Transcriber")
+    Holding these on one object is not cosmetic: ``setContextProperty``
+    only keeps a *weak* reference to Python-owned QObjects, so without
+    a strong ref somewhere the garbage collector tears the models down
+    mid-render. ``main`` keeps the Shell alive for the whole process;
+    harnesses keep it for the duration of their run.
+    """
+
+    app: QGuiApplication
+    engine: QQmlApplicationEngine
+    app_model: AppModel
+    preferences: AppPreferences
+    model_registry: ModelRegistry
+    tracks_model: TrackListModel
+    sources_model: SourceListModel
+    session_meta: SessionMeta
+    pipeline: PipelineController
+    #: Live PeaksWorker/QThread pair, swapped on every folder open.
+    peaks_state: dict[str, object] = field(default_factory=dict)
+
+    def window(self) -> QObject | None:
+        """Root ``QQuickWindow``, or ``None`` if Main.qml failed."""
+
+        roots = self.engine.rootObjects()
+        return roots[0] if roots else None
+
+
+def build_shell(app: QGuiApplication) -> Shell:
+    """Construct the whole object graph and load ``Main.qml``.
+
+    Split out of :func:`main` so that *every* consumer — the real
+    entry point, the screenshot helper, boot smoke tests, any future
+    harness — drives the same wiring instead of re-deriving it.
+
+    That re-derivation was a real problem: the screenshot helper built
+    ``PipelineController`` without the model registry or preferences
+    and never started a ``PeaksWorker``, so captured frames showed no
+    waveforms, no ruler and a timeline window computed from a default
+    duration. Findings from those frames looked like application bugs
+    and were not.
+
+    ``app`` is passed in rather than created here: a process may only
+    have one ``QGuiApplication``, and test sessions typically already
+    hold one.
+    """
 
     _register_theme_singleton()
 
@@ -93,6 +133,7 @@ def main() -> int:
     # the worker finishes; without them the GC would tear the thread
     # down mid-extract.
     _peaks_state: dict[str, object] = {"thread": None, "worker": None}
+    _shell_ref: list[Shell] = []
 
     def _on_audio_paths_changed(paths: list[tuple[int, int, str]]) -> None:
         # Tear down any prior worker — dropping a new folder supersedes
@@ -140,7 +181,35 @@ def main() -> int:
     root_ctx.setContextProperty("pipeline",       pipeline)
 
     engine.load(QUrl.fromLocalFile(str(_QML_ROOT / "Main.qml")))
-    if not engine.rootObjects():
+
+    shell = Shell(
+        app=app,
+        engine=engine,
+        app_model=app_model,
+        preferences=preferences,
+        model_registry=model_registry,
+        tracks_model=tracks_model,
+        sources_model=sources_model,
+        session_meta=session_meta,
+        pipeline=pipeline,
+        peaks_state=_peaks_state,
+    )
+    _shell_ref.append(shell)
+    return shell
+
+
+def main() -> int:
+    # The warm parchment palette fights Material/Fusion, so stay on
+    # Basic and style each control ourselves — same call the QML
+    # mapping doc recommends.
+    QQuickStyle.setStyle("Basic")
+
+    app = QGuiApplication(sys.argv)
+    app.setApplicationName("Session Transcriber")
+    app.setOrganizationName("Session Transcriber")
+
+    shell = build_shell(app)
+    if shell.window() is None:
         return 1
 
     return app.exec()

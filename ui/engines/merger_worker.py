@@ -29,7 +29,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from domain.annotations import ChatMessage, SpeechSegment
+from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
 from domain.timeline import Timeline
 from mergers.script_merger import ScriptMerger
 from renderers.plain_text import PlainTextRenderer
@@ -65,6 +65,7 @@ class MergerWorker(QObject):
         chat_log_path: Path | None = None,
         total_duration: float = 0.0,
         gap_sec: float = 1.0,
+        combat_log_paths: list[Path] | None = None,
     ) -> None:
         super().__init__()
         self._session_dir = session_dir
@@ -72,6 +73,7 @@ class MergerWorker(QObject):
         self._chat_log_path = chat_log_path
         self._total_duration = float(total_duration)
         self._gap_sec = float(gap_sec)
+        self._combat_log_paths = list(combat_log_paths or [])
         self._cancelled = False
 
     @Slot()
@@ -97,11 +99,14 @@ class MergerWorker(QObject):
             self.progress.emit(0.5)
 
             # ── Stage 3 of 4: merge ────────────────────────────────
+            game_log_entries = self._parse_combat_dumps()
+            if self._should_cancel():
+                return
             timeline = Timeline(
                 speech=self._speech,
                 emotions=[],
                 chat=chat_messages,
-                game_log=[],
+                game_log=game_log_entries,
             )
             if self._should_cancel():
                 return
@@ -152,3 +157,18 @@ class MergerWorker(QObject):
             # No info.txt — chat can't be time-aligned. Surface as
             # "no chat" rather than failing the whole merge.
             return []
+
+    def _parse_combat_dumps(self) -> list[GameLogEntry]:
+        if not self._combat_log_paths:
+            return []
+        from sources.game_log.combat_dump import CombatDumpSource
+
+        entries: list[GameLogEntry] = []
+        for path in self._combat_log_paths:
+            try:
+                src = CombatDumpSource(combat_log_path=path)
+                entries.extend(src.extract(self._session_dir))
+            except (FileNotFoundError, ValueError, KeyError):
+                # Сломанный/пустой dump не должен валить весь merge.
+                continue
+        return entries

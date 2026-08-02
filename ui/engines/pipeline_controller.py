@@ -28,7 +28,12 @@ from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
 from core.discovery import find_fvtt_chat_log
-from core.speaker_map import load_speaker_map_raw, save_speaker_map_raw
+from core.file_matchers import detect_combat_logs
+from core.speaker_map import (
+    load_speaker_map,
+    load_speaker_map_raw,
+    save_speaker_map_raw,
+)
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
 from ui.engines.merger_worker import MergerWorker
@@ -154,6 +159,20 @@ class PipelineController(QObject):
         if self._merge_thread is not None and self._merge_thread.isRunning():
             return
 
+        # Pre-flight: without a model on disk every track fails
+        # separately with a developer-facing RuntimeError ("GigaAM-v3
+        # model is not installed. Run installer or
+        # GigaAMSource().install(params)"). Six red rows of that is
+        # what a first-time user used to get. One sentence pointing at
+        # the Models screen is the whole fix.
+        if self._registry is not None and not self._registry.anyInstalled:
+            self._app.setErrorMessage(
+                "Не установлена ни одна модель распознавания. "
+                "Откройте раздел «Модели» и установите рекомендованную — "
+                "это делается один раз."
+            )
+            return
+
         self._tracks.resetProgress()
         self._tracks.resetStates()
         self._app.clearMergeState()
@@ -167,10 +186,10 @@ class PipelineController(QObject):
         self._cancelled = False
         self._collected_segments = {}
 
-        # Initial marking: every non-excluded row is queued. On-disk
-        # cache lookup (skipping rows that already have a transcript)
-        # is a core/cache.py concern and is not wired yet — until it
-        # lands the pipeline re-runs ASR on every non-excluded row.
+        # Initial marking: every non-excluded row is queued. The
+        # per-track transcript cache lives one layer down, inside the
+        # source's extract() — this path calls transcribe_track()
+        # directly and so does not benefit from it yet.
         self._queue = []
         for row in range(self._tracks.rowCount()):
             if self._is_excluded(row):
@@ -417,6 +436,13 @@ class PipelineController(QObject):
         ``make_source`` raises ``ValueError`` on unknown IDs and
         ``RuntimeError`` if the backend isn't installed — both are
         converted to per-track errors upstream.
+
+        The speaker map goes in here, not at merge time: every backend
+        resolves ``SpeechSegment.speaker`` from the audio stem inside
+        ``transcribe_track``, so a source built without one labels
+        every line with the raw file stem ("1-v_vladimir") and nothing
+        downstream can recover the player. The CLI path has always
+        passed it (``core.pipeline``); this path did not.
         """
 
         if model_id not in self._sources:
@@ -425,8 +451,25 @@ class PipelineController(QObject):
                 if self._preferences is not None
                 else None
             )
-            self._sources[model_id] = make_source(model_id, options=options)
+            self._sources[model_id] = make_source(
+                model_id,
+                options=options,
+                speaker_map=self._speaker_map(),
+            )
         return self._sources[model_id]
+
+    def _speaker_map(self) -> dict[str, str]:
+        """Flat ``{track_stem: label}`` for the open session.
+
+        Empty when no session is open — ``make_source`` treats that as
+        "no mapping" and falls back to the stem, which is the old
+        behaviour.
+        """
+
+        session_dir_str = self._session.sessionDir() if self._session is not None else ""
+        if not session_dir_str:
+            return {}
+        return load_speaker_map(Path(session_dir_str))
 
     def _spawn(
         self,
@@ -500,6 +543,7 @@ class PipelineController(QObject):
 
         session_dir = Path(session_dir_str)
         chat_log = find_fvtt_chat_log(session_dir)
+        combat_logs = list(detect_combat_logs(session_dir))
         total_seconds = float(self._session.totalSeconds) if self._session is not None else 0.0
 
         thread = QThread(self)
@@ -508,6 +552,7 @@ class PipelineController(QObject):
             speech_segments=all_segments,
             chat_log_path=chat_log,
             total_duration=total_seconds,
+            combat_log_paths=combat_logs,
         )
         worker.moveToThread(thread)
 

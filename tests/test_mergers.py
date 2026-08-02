@@ -209,3 +209,56 @@ class TestScriptMergerNoneSpeaker:
         result = merger.merge(tl)
         # Both have speaker=None, gluing condition requires speaker is not None
         assert len(result) == 2
+
+
+class TestMergeGapSuitsVadBackends:
+    """The default gap must glue VAD-sliced monologues back together.
+
+    Whisper does not trim silence, so its consecutive same-speaker
+    segments sit back to back (median gap 0.06 s on a real session) and
+    almost anything glues them. A VAD-sliced backend cuts the silence
+    out, so the gap between segments is the real pause in speech
+    (median 1.41 s). At the old 1.0 s threshold a long monologue stayed
+    shattered into separate turns and the transcript read as though one
+    speaker had been given the floor repeatedly.
+    """
+
+    def test_default_glues_a_typical_vad_pause(self):
+        from mergers.script_merger import DEFAULT_MERGE_GAP_SEC
+
+        # Median same-speaker pause measured on session 15.
+        assert DEFAULT_MERGE_GAP_SEC > 1.41
+
+    def test_default_does_not_glue_across_a_real_turn_boundary(self):
+        from mergers.script_merger import DEFAULT_MERGE_GAP_SEC
+
+        # Beyond ~3 s the numbers keep improving only because genuine
+        # turn boundaries get swallowed, which hides interleaving.
+        assert DEFAULT_MERGE_GAP_SEC <= 2.5
+
+    def test_monologue_fragments_become_one_turn(self):
+        """Four fragments of one monologue, pauses just over a second."""
+
+        merger = ScriptMerger()
+        result = merger.merge(_tl(speech=[
+            _seg(0.0, 4.0, "GM", "и вот вы выходите на площадь"),
+            _seg(5.4, 9.0, "GM", "посреди неё стоит фонтан"),
+            _seg(10.5, 14.0, "GM", "вода в нём почему-то чёрная"),
+            _seg(15.4, 18.0, "GM", "что делаете"),
+        ]))
+
+        assert len(result) == 1, [e.text for e in result]
+        assert result[0].text.startswith("и вот вы выходите")
+        assert result[0].text.endswith("что делаете")
+
+    def test_a_real_exchange_still_interleaves(self):
+        """Gluing must not swallow the other speaker's reply."""
+
+        merger = ScriptMerger()
+        result = merger.merge(_tl(speech=[
+            _seg(0.0, 2.0, "GM", "что делаете"),
+            _seg(2.5, 4.0, "Alice", "иду к фонтану"),
+            _seg(4.5, 6.0, "GM", "ты подходишь"),
+        ]))
+
+        assert [e.speaker for e in result] == ["GM", "Alice", "GM"]

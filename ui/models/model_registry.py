@@ -298,6 +298,48 @@ class ModelRegistry(QAbstractListModel):
 
         return sum(1 for r in self._rows if r.installed)
 
+    @Property(bool, notify=installedStateChanged)
+    def anyInstalled(self) -> bool:
+        """Is at least one speech backend actually on disk?
+
+        Drives the first-run card: without this the shell happily
+        invites you to open a session and then fails once per track
+        with a developer-facing RuntimeError.
+        """
+
+        return any(r.installed for r in self._rows)
+
+    @Property(int, notify=installedStateChanged)
+    def recommendedRow(self) -> int:
+        """Row index of the model to offer on first run, or -1.
+
+        Prefers the settings default; falls back to the first row so
+        the card never renders a dead button just because the default
+        went away.
+        """
+
+        for i, row in enumerate(self._rows):
+            if row.backend_id == _SETTINGS_DEFAULT_ACTIVE:
+                return i
+        return 0 if self._rows else -1
+
+    @Property(str, notify=installedStateChanged)
+    def recommendedTitle(self) -> str:
+        row = self.recommendedRow
+        return self._rows[row].name if 0 <= row < len(self._rows) else ""
+
+    @Property(str, notify=installedStateChanged)
+    def recommendedSizeLabel(self) -> str:
+        """Download size of the recommended model, as the catalogue knows it.
+
+        Read from the backend registry rather than written into the
+        copy: the first-run card used to advertise a hardcoded "580 MB"
+        while the catalogue said ~900 MB.
+        """
+
+        row = self.recommendedRow
+        return self._rows[row].size if 0 <= row < len(self._rows) else ""
+
     @Property(str, notify=installedStateChanged)
     def installedSizeLabel(self) -> str:
         """Human-readable total size across installed backends."""

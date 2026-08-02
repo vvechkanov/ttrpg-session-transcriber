@@ -322,6 +322,58 @@ Item {
             }
         }
 
+        // Shimmer placeholder for segments whose peaks haven't been
+        // decoded yet. Peak extraction is a full ffmpeg decode and
+        // takes seconds-to-minutes per track, during which a lane was
+        // simply blank — indistinguishable from "nothing here" or
+        // "the app hung". Deliberately NOT a fake waveform: it shows
+        // that work is in flight without inventing audio that isn't
+        // there.
+        Repeater {
+            model: root.segments.length > 0
+                   ? root.segments
+                   : [{ startPct: 0, endPct: 100, peaks: root.peaks }]
+            delegate: Item {
+                readonly property real _startPct: modelData.startPct || 0
+                readonly property real _endPct: (modelData.endPct != null) ? modelData.endPct : 100
+                readonly property bool _pending: !(modelData.peaks && modelData.peaks.length > 0)
+
+                x: track.width * (_startPct / 100.0)
+                y: 0
+                width: Math.max(0, track.width * ((_endPct - _startPct) / 100.0))
+                height: track.height
+                visible: _pending && width > 0
+                clip: true
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: 3
+                    color: root._fillColor
+                    opacity: 0.10
+                }
+
+                Rectangle {
+                    id: sheen
+                    width: Math.max(48, parent.width * 0.18)
+                    height: parent.height
+                    opacity: 0.18
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "transparent" }
+                        GradientStop { position: 0.5; color: root._fillColor }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                    XAnimator on x {
+                        running: sheen.parent.visible
+                        loops: Animation.Infinite
+                        from: -sheen.width
+                        to: sheen.parent.width
+                        duration: 1400
+                    }
+                }
+            }
+        }
+
         // Row-wide progress overlay — rendered once on top of the
         // per-segment canvases so the "N% painted left-to-right"
         // visual matches the pre-4b behaviour.

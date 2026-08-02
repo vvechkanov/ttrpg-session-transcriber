@@ -35,15 +35,7 @@ from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from ui.engines import PipelineController
-from ui.models import (
-    AppModel,
-    AppPreferences,
-    ModelRegistry,
-    SessionMeta,
-    SourceListModel,
-    TrackListModel,
-)
+from ui.app_qml import Shell, build_shell
 
 QML_ROOT = ROOT / "ui" / "qml"
 OUT_DIR = ROOT / "docs" / "screenshots" / "qml"
@@ -90,36 +82,21 @@ def _register_theme() -> None:
     qmlRegisterSingletonType(theme_url, "App.Theme", 1, 0, "Theme")
 
 
-def _build_engine(app_model: AppModel) -> QQmlApplicationEngine:
-    engine = QQmlApplicationEngine()
-    engine.addImportPath(str(QML_ROOT))
+def build_shell_for_capture(app: QGuiApplication) -> Shell:
+    """Delegate to the real shell builder.
 
-    preferences = AppPreferences()
-    model_registry = ModelRegistry()
-    tracks_model = TrackListModel()
-    sources_model = SourceListModel()
-    session_meta = SessionMeta()
-    pipeline = PipelineController(app_model, tracks_model, session_meta)
+    This helper used to hand-roll its own object graph, and it drifted:
+    ``PipelineController`` was built without the model registry or
+    preferences and no ``PeaksWorker`` ever started, so captures showed
+    no waveforms, no ruler, and timeline percentages derived from a
+    default duration. Anyone reading those frames would diagnose
+    application bugs that don't exist. Going through
+    :func:`ui.app_qml.build_shell` keeps that from recurring — the only
+    remaining difference from a real launch is the offscreen platform
+    plugin.
+    """
 
-    ctx = engine.rootContext()
-    ctx.setContextProperty("appModel", app_model)
-    ctx.setContextProperty("preferences", preferences)
-    ctx.setContextProperty("modelRegistry", model_registry)
-    ctx.setContextProperty("tracksModel", tracks_model)
-    ctx.setContextProperty("sourcesModel", sources_model)
-    ctx.setContextProperty("sessionMeta", session_meta)
-    ctx.setContextProperty("pipeline", pipeline)
-
-    # Stash strong refs on the engine so the GC doesn't wipe them
-    # mid-render — Python-owned QObjects set via setContextProperty
-    # are only weakly held by the context.
-    engine._refs = (
-        preferences, model_registry, tracks_model,
-        sources_model, session_meta, pipeline,
-    )  # type: ignore[attr-defined]
-
-    engine.load(QUrl.fromLocalFile(str(QML_ROOT / "Main.qml")))
-    return engine
+    return build_shell(app)
 
 
 def capture_all() -> list[Path]:
@@ -131,13 +108,12 @@ def capture_all() -> list[Path]:
     _register_fonts(app)
     _register_theme()
 
-    app_model = AppModel()
-    engine = _build_engine(app_model)
+    shell = build_shell_for_capture(app)
+    app_model = shell.app_model
 
-    roots = engine.rootObjects()
-    if not roots:
+    window = shell.window()
+    if window is None:
         raise SystemExit("Main.qml failed to load")
-    window = roots[0]
     if not isinstance(window, QQuickWindow):
         raise SystemExit(f"root object is not a QQuickWindow: {type(window).__name__}")
 

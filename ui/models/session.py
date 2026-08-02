@@ -517,9 +517,33 @@ class TrackListModel(QAbstractListModel):
     def roleNames(self) -> dict[int, QByteArray]:
         return {role: QByteArray(name) for role, name in self._ROLES.items()}
 
-    @Slot(result=int)
+    #: Emitted whenever the row set changes size or a row's
+    #: :attr:`TrackEntry.excluded` flag flips. Both :attr:`count` and
+    #: :attr:`activeCount` notify on it, so the "5 из 6" header stays
+    #: live.
+    countChanged = Signal()
+
+    @Property(int, notify=countChanged)
+    def count(self) -> int:
+        """Row count as a *notifying* property.
+
+        ``rowCount()`` is a plain ``QAbstractListModel`` method, so a
+        QML binding that calls it never re-evaluates — it latches the
+        value at component-creation time (zero, on a fresh shell) and
+        stays there. Bindings must read this instead.
+        """
+
+        return len(self._rows)
+
+    @Property(int, notify=countChanged)
     def activeCount(self) -> int:
-        """Non-excluded tracks — used by the "5 из 6" section header."""
+        """Non-excluded tracks — used by the "5 из 6" section header.
+
+        A property rather than a ``Slot`` for the same reason as
+        :attr:`count`: as a slot the header rendered a permanent
+        "0 из 0".
+        """
+
         return sum(1 for t in self._rows if not t.excluded)
 
     # ── Aggregate progress (for the RunControl dial) ──────────────────
@@ -681,6 +705,15 @@ class TrackListModel(QAbstractListModel):
         if entry.role != mapped_role:
             entry.role = mapped_role
             roles_changed.append(TrackListModel.RoleRole)
+            # ``excluded`` mirrors the "Слушатель" role — loadFromDir
+            # derives it that way. Without this, flipping the role in
+            # the popover left the flag stale until the next reload,
+            # so a track the user just marked listener-only still went
+            # through ASR.
+            listener = mapped_role == "Слушатель"
+            if entry.excluded != listener:
+                entry.excluded = listener
+                roles_changed.append(TrackListModel.ExcludedRole)
         if entry.characters != cleaned_chars:
             entry.characters = cleaned_chars
             roles_changed.extend(
@@ -699,6 +732,9 @@ class TrackListModel(QAbstractListModel):
             self.dataChanged.emit(idx, idx, roles_changed)
             if TrackListModel.CharactersRole in roles_changed:
                 self.aggregatedCharactersChanged.emit()
+            if TrackListModel.ExcludedRole in roles_changed:
+                self.countChanged.emit()
+                self.overallProgressChanged.emit()
 
     @Slot(int, str)
     def setModelOverride(self, row: int, option_id: str) -> None:
@@ -870,6 +906,7 @@ class TrackListModel(QAbstractListModel):
                 seg_jobs.append((row_idx, seg_idx, str(seg.audio_path)))
         self._rows = new_rows
         self.endResetModel()
+        self.countChanged.emit()
         self.overallProgressChanged.emit()
         self.aggregatedCharactersChanged.emit()
         # 4b: one peaks job per TrackSegment. PeaksWorker stores peaks
@@ -989,6 +1026,7 @@ class TrackListModel(QAbstractListModel):
             )
         )
         self.endInsertRows()
+        self.countChanged.emit()
         self.overallProgressChanged.emit()
         # Manually-appended rows start with no characters but the strip
         # still needs to know the union may have grown (the new row's

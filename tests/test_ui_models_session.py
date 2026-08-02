@@ -708,3 +708,83 @@ def test_has_speaker_map_role_distinguishes_fresh_vs_saved(tmp_path: Path) -> No
     assert tracks.data(
         tracks.index(fresh_row), TrackListModel.HasSpeakerMapRole
     ) is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Reactive row counters (the "0 из 6" header bug)
+# ─────────────────────────────────────────────────────────────────────
+def test_count_and_active_count_are_notifying_properties(tmp_path: Path) -> None:
+    """``count``/``activeCount`` must be properties, not slots.
+
+    TimelineScreen bound its "N из M" header to ``rowCount()`` and
+    ``activeCount()`` — plain method calls. A QML binding only tracks
+    *properties*, so it latched the initial zeros and the header read
+    "0 из 0" forever, even with six tracks loaded.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+    _write_flac_stub(session / "2-bob.flac")
+
+    tracks = TrackListModel()
+
+    # Both must be declared on the metaobject as properties.
+    meta = tracks.metaObject()
+    declared = {
+        meta.property(i).name()
+        for i in range(meta.propertyOffset(), meta.propertyCount())
+    }
+    assert {"count", "activeCount"} <= declared, (
+        f"count/activeCount must be Q_PROPERTYs, got: {sorted(declared)}"
+    )
+
+    seen: list[int] = []
+    tracks.countChanged.connect(lambda: seen.append(tracks.count))
+
+    assert tracks.count == 0
+    tracks.loadFromDir(str(session))
+
+    assert tracks.count == 2
+    assert tracks.activeCount == 2
+    assert seen, "countChanged must fire when rows load"
+    assert seen[-1] == 2
+
+
+def test_marking_listener_excludes_the_track(tmp_path: Path) -> None:
+    """Flipping a row to "Слушатель" must clear it from the active set.
+
+    ``excluded`` is derived from the role at load time. The popover
+    save path updated ``role`` only, so a track the user had just
+    marked listener-only still went through ASR until the session was
+    reopened.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+    _write_flac_stub(session / "2-bob.flac")
+
+    tracks = TrackListModel()
+    tracks.loadFromDir(str(session))
+    assert tracks.activeCount == 2
+
+    bumps: list[int] = []
+    tracks.countChanged.connect(lambda: bumps.append(tracks.activeCount))
+
+    tracks.updateSpeakerMapRow(1, "Bob", "Слушатель", [])
+
+    assert tracks.data(tracks.index(1), TrackListModel.ExcludedRole) is True
+    assert tracks.activeCount == 1
+    assert bumps and bumps[-1] == 1
+
+    # And back again — the flag must not be one-way.
+    tracks.updateSpeakerMapRow(1, "Bob", "PC", ["Боб"])
+    assert tracks.data(tracks.index(1), TrackListModel.ExcludedRole) is False
+    assert tracks.activeCount == 2

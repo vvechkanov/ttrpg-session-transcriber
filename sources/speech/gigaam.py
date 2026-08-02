@@ -20,6 +20,11 @@ from typing import Any, Callable
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import InstallProgress, Source
+from sources.speech._track_cache import (
+    compute_cache_key,
+    load_cached_segments,
+    write_cached_segments,
+)
 from sources.speech._bundle_download import (
     all_files_present,
     files_by_logical,
@@ -187,27 +192,70 @@ class GigaAMSource(Source):
 
     # ---- Source --------------------------------------------------------
 
+    def _cache_config(self) -> dict[str, object]:
+        """Decoder-affecting settings, for the per-track cache key."""
+
+        return {
+            "engine": _SOURCE_ENGINE,
+            "variant": self.variant,
+            "precision": self.precision,
+            "device": self.device,
+            "num_threads": self.num_threads,
+            "beam": ENABLE_HOTWORDS_BIASING,
+        }
+
     def extract(self, session_dir: Path) -> list[SpeechSegment]:
         """Транскрибировать все аудио в ``session_dir`` через GigaAM.
 
         Побочный эффект: пишет canonical JSON на каждый трек в
         ``session_dir/transcripts/<stem>.json``.
+
+        Треки, для которых такой JSON уже лежит и его ключ кэша
+        совпадает с текущими настройками и файлом аудио,
+        **не распознаются заново** — сегменты читаются с диска.
         """
-        self._ensure_loaded()
         audio_files = _scan_audio_files(session_dir)
         if not audio_files:
             return []
 
         transcripts_dir = session_dir / "transcripts"
         transcripts_dir.mkdir(parents=True, exist_ok=True)
+        config = self._cache_config()
+
+        # Resolve what still needs work before loading the model — a
+        # fully cached session must not pay for weights it won't use.
+        pending: list[tuple[Path, Path, str]] = []
+        cached: list[tuple[Path, list[SpeechSegment]]] = []
+        for audio_path in audio_files:
+            out_path = transcripts_dir / f"{audio_path.stem}.json"
+            key = compute_cache_key(audio_path, config)
+            speaker = resolve_speaker(audio_path.stem, self.speaker_map)
+            hit = load_cached_segments(out_path, key, speaker=speaker)
+            if hit is None:
+                pending.append((audio_path, out_path, key))
+            else:
+                cached.append((audio_path, hit))
+
+        if cached:
+            logger.info(
+                "GigaAM: %d/%d треков взято из кэша",
+                len(cached), len(audio_files),
+            )
 
         all_segments: list[SpeechSegment] = []
-        for audio_path in audio_files:
+        for _, hit in cached:
+            all_segments.extend(hit)
+
+        if pending:
+            self._ensure_loaded()
+        for audio_path, out_path, key in pending:
             track_segments = self.transcribe_track(audio_path)
-            _write_canonical_json(
+            write_cached_segments(
                 track_segments,
-                transcripts_dir / f"{audio_path.stem}.json",
+                out_path,
                 source_engine=_SOURCE_ENGINE,
+                schema_version=_CANONICAL_SCHEMA_VERSION,
+                cache_key=key,
             )
             all_segments.extend(track_segments)
 
@@ -470,22 +518,42 @@ class GigaAMSource(Source):
 # ---- Module-level helpers (не экспортируются) -----------------------------
 
 
-def _pick_decoding_method(hotwords_file: Path | None) -> str:
-    """Выбрать decoding_method в зависимости от наличия hotwords.
+#: Opt-in switch for hotwords biasing.
+#:
+#: Biasing requires ``modified_beam_search`` (ContextGraph needs
+#: branching paths), and that decoder **hangs forever** on some real
+#: speech with NeMo transducer models — the risk PR #3077 warned about,
+#: confirmed here on 2026-08-02.
+#:
+#: Reproducer: a 0.54 s segment (8640 samples, rms 0.066) from a real
+#: session. ``greedy_search`` decodes it in 0.04 s; ``modified_beam_search``
+#: never returns — killed after 180 s, deterministic, on CPU and CUDA
+#: alike. Any session containing such a chunk simply never finishes,
+#: which is exactly what the product did.
+#:
+#: Until there is a per-segment watchdog (or an upstream fix), biasing
+#: is off unless someone deliberately turns it on. The cost is low: the
+#: transcript feeds an LLM that already knows the campaign and fixes
+#: proper nouns for free, whereas a hang cannot be fixed downstream at
+#: all. Note also that part of the biasing never applied anyway —
+#: GigaAM's char-level tokeniser has no digits and no "ё", so those
+#: hotwords are silently dropped at load.
+ENABLE_HOTWORDS_BIASING = False
 
-    Возвращает ``"modified_beam_search"`` если hotwords файл непустой,
-    иначе ``"greedy_search"``.
 
-    Обоснование (spec §6.5.4):
-        - hotwords-биасинг в sherpa-onnx работает ТОЛЬКО с
-          modified_beam_search (ContextGraph требует ветвления путей).
-        - modified_beam_search для NeMo transducer моделей (PR #3077)
-          имеет зарегистрированный риск регрессий. RNNT устойчивее TDT,
-          но не 100%.
-        - Стратегия: платим цену beam search только если hotwords реально
-          есть. Дефолтная установка без кастомных hotwords → greedy
-          (быстрее, детерминированно, без риска PR #3077).
+def _pick_decoding_method(
+    hotwords_file: Path | None,
+    *,
+    allow_beam_search: bool = ENABLE_HOTWORDS_BIASING,
+) -> str:
+    """Выбрать decoding_method.
+
+    Возвращает ``"greedy_search"`` — быстро, детерминированно, не
+    виснет — если только biasing не включён явно И hotwords-файл не
+    непустой. См. :data:`ENABLE_HOTWORDS_BIASING`.
     """
+    if not allow_beam_search:
+        return "greedy_search"
     if hotwords_file is None:
         return "greedy_search"
     if not hotwords_file.is_file():

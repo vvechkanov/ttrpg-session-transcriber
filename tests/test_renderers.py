@@ -95,8 +95,8 @@ class TestPlainTextRendererMixed:
         result = r.render(events).decode("utf-8")
         assert result == "GM: First\n\nPlayer: Second\n\nGM: Third\n\n"
 
-    def test_game_event_skipped(self):
-        """GameEvent (not produced in P2) is silently skipped."""
+    def test_game_event_rendered_via_generic_fallback(self):
+        """Unknown GameEvent.action falls through to ``[ИГРА] ...`` line."""
         r = PlainTextRenderer()
         events = [
             _speech("GM", "text"),
@@ -104,10 +104,10 @@ class TestPlainTextRendererMixed:
             _chat("Player", "nice roll"),
         ]
         result = r.render(events).decode("utf-8")
-        # GameEvent should not appear
-        assert "Fighter" not in result
         assert "GM: text" in result
         assert "[ЧАТ] Player: nice roll" in result
+        # Generic fallback line for unknown action vocabulary.
+        assert "[ИГРА] roll — Fighter — d20: 15" in result
 
     def test_output_is_utf8_bytes(self):
         r = PlainTextRenderer()

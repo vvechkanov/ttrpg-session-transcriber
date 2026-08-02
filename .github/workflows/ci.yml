@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # Manual rerun escape hatch — the synchronize trigger silently
+  # dropped a push event once (see commit 07e7c34) and we had no
+  # way to re-fire CI without making another commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
