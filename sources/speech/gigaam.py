@@ -470,22 +470,42 @@ class GigaAMSource(Source):
 # ---- Module-level helpers (не экспортируются) -----------------------------
 
 
-def _pick_decoding_method(hotwords_file: Path | None) -> str:
-    """Выбрать decoding_method в зависимости от наличия hotwords.
+#: Opt-in switch for hotwords biasing.
+#:
+#: Biasing requires ``modified_beam_search`` (ContextGraph needs
+#: branching paths), and that decoder **hangs forever** on some real
+#: speech with NeMo transducer models — the risk PR #3077 warned about,
+#: confirmed here on 2026-08-02.
+#:
+#: Reproducer: a 0.54 s segment (8640 samples, rms 0.066) from a real
+#: session. ``greedy_search`` decodes it in 0.04 s; ``modified_beam_search``
+#: never returns — killed after 180 s, deterministic, on CPU and CUDA
+#: alike. Any session containing such a chunk simply never finishes,
+#: which is exactly what the product did.
+#:
+#: Until there is a per-segment watchdog (or an upstream fix), biasing
+#: is off unless someone deliberately turns it on. The cost is low: the
+#: transcript feeds an LLM that already knows the campaign and fixes
+#: proper nouns for free, whereas a hang cannot be fixed downstream at
+#: all. Note also that part of the biasing never applied anyway —
+#: GigaAM's char-level tokeniser has no digits and no "ё", so those
+#: hotwords are silently dropped at load.
+ENABLE_HOTWORDS_BIASING = False
 
-    Возвращает ``"modified_beam_search"`` если hotwords файл непустой,
-    иначе ``"greedy_search"``.
 
-    Обоснование (spec §6.5.4):
-        - hotwords-биасинг в sherpa-onnx работает ТОЛЬКО с
-          modified_beam_search (ContextGraph требует ветвления путей).
-        - modified_beam_search для NeMo transducer моделей (PR #3077)
-          имеет зарегистрированный риск регрессий. RNNT устойчивее TDT,
-          но не 100%.
-        - Стратегия: платим цену beam search только если hotwords реально
-          есть. Дефолтная установка без кастомных hotwords → greedy
-          (быстрее, детерминированно, без риска PR #3077).
+def _pick_decoding_method(
+    hotwords_file: Path | None,
+    *,
+    allow_beam_search: bool = ENABLE_HOTWORDS_BIASING,
+) -> str:
+    """Выбрать decoding_method.
+
+    Возвращает ``"greedy_search"`` — быстро, детерминированно, не
+    виснет — если только biasing не включён явно И hotwords-файл не
+    непустой. См. :data:`ENABLE_HOTWORDS_BIASING`.
     """
+    if not allow_beam_search:
+        return "greedy_search"
     if hotwords_file is None:
         return "greedy_search"
     if not hotwords_file.is_file():

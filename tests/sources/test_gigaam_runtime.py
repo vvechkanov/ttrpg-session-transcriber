@@ -38,11 +38,35 @@ class TestPickDecodingMethod:
         f.write_text("   \n  \n", encoding="utf-8")
         assert _pick_decoding_method(f) == "greedy_search"
 
-    def test_nonempty_file_returns_beam_search(self, tmp_path):
+    def test_nonempty_file_still_greedy_by_default(self, tmp_path):
+        """A hotwords file alone must NOT switch on beam search.
+
+        It used to. ``modified_beam_search`` hangs forever on some real
+        speech with NeMo transducer models (the PR #3077 risk, confirmed
+        2026-08-02: a 0.54 s segment that greedy decodes in 0.04 s never
+        returns under beam search). Since the installer ships a hotwords
+        file, that made hanging the default behaviour and no session
+        ever finished.
+        """
+
         from sources.speech.gigaam import _pick_decoding_method
         f = tmp_path / "hotwords.txt"
         f.write_text("двадцатка\nкрит\n", encoding="utf-8")
-        assert _pick_decoding_method(f) == "modified_beam_search"
+        assert _pick_decoding_method(f) == "greedy_search"
+
+    def test_beam_search_available_when_explicitly_allowed(self, tmp_path):
+        """Biasing is still reachable — deliberately, not by accident."""
+
+        from sources.speech.gigaam import _pick_decoding_method
+        f = tmp_path / "hotwords.txt"
+        f.write_text("двадцатка\nкрит\n", encoding="utf-8")
+        assert _pick_decoding_method(
+            f, allow_beam_search=True
+        ) == "modified_beam_search"
+
+    def test_opt_in_flag_defaults_to_off(self):
+        from sources.speech.gigaam import ENABLE_HOTWORDS_BIASING
+        assert ENABLE_HOTWORDS_BIASING is False
 
 
 class TestDetectProvider:
