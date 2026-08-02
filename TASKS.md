@@ -1,5 +1,15 @@
 # TTRPG Session Transcriber — Tasks
 
+> ## ⚠️ ARCHIVED — не источник правды
+>
+> Документ устарел и сохранён только ради истории приоритетов. Он описывает
+> шестислойный рефакторинг (P2), миграцию на PySide6 (P5.0) и GigaAM-бэкенд (P3)
+> как предстоящую работу — всё это давно сделано, а перечисленные к удалению
+> `scripts/wisper_launcher.py`, `merge_whisperx.py`, `parse_fvtt_chat.py` удалены
+> ещё в Phase 10.
+>
+> **Актуальное состояние фич — `FEATURE_REQUESTS.md`.** Не сверяйся с чекбоксами ниже.
+
 Чек-лист задач для превращения проекта в полноценный open-source продукт. Архитектура — в `ARCHITECTURE.md`, обоснование ранних решений — в `~/.claude/plans/virtual-wondering-karp.md`.
 
 **Имя проекта:** TTRPG Session Transcriber (`ttrpg-session-transcriber`)
