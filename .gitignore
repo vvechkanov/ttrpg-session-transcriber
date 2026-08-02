@@ -15,6 +15,11 @@ app_run.log
 /speaker_map.json
 .claude/
 
+# Python packaging build artifacts (pip install -e . / python -m build)
+build/
+dist/
+*.egg-info/
+
 # Test output
 Тестовое/
 
