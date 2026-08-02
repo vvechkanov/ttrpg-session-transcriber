@@ -15,8 +15,43 @@ def _event_sort_key(e: ScriptEvent) -> tuple[float, int]:
     return (e.at, 2)  # GameEvent
 
 
+#: Silence, in seconds, that still counts as "the same turn".
+#:
+#: Was 1.0, inherited from the WhisperX-era merge_whisperx.py. That
+#: value is tied to how Whisper chunks audio: it does not trim silence,
+#: so consecutive segments from one speaker sit essentially back to
+#: back — measured on a real session, median gap 0.06 s, and 87% of
+#: same-speaker pairs under 1.0 s. Gluing at 1.0 s therefore rebuilt
+#: whole turns.
+#:
+#: VAD-sliced backends (GigaAM) behave the opposite way: the VAD cuts
+#: silence out, so the gap between segments is the *actual pause* in
+#: speech — median 1.41 s on the same session, only 26% under 1.0 s.
+#: At the old threshold a two-minute monologue stayed shattered into
+#: five or six separate turns, and the share of text sitting in runs
+#: of five-plus consecutive same-speaker turns went from 4.1% (old
+#: pipeline) to 16.6%.
+#:
+#: Swept against the old pipeline's conversational structure on
+#: session 15 (2273 turns, mean run 1.24, max 11, 4.1% in long runs):
+#:
+#:     gap    turns   mean run   max   % in runs >=5
+#:     1.0     2749       1.58    18           16.6
+#:     1.5     2374       1.36     9            7.9
+#:     2.0     2150       1.23     8            3.9   <- matches
+#:     3.0     1962       1.12     6            1.1
+#:
+#: 2.0 reproduces the old structure almost exactly. Higher values keep
+#: "improving" the numbers, but only by gluing across genuine turn
+#: boundaries — that hides interleaving rather than fixing it.
+#:
+#: The Whisper path is barely affected: raising 1.0 -> 2.0 there glues
+#: 160 more pairs out of 2411, because its gaps are near zero anyway.
+DEFAULT_MERGE_GAP_SEC = 2.0
+
+
 class ScriptMerger(Merger):
-    def __init__(self, gap_sec: float = 1.0):
+    def __init__(self, gap_sec: float = DEFAULT_MERGE_GAP_SEC):
         self.gap_sec = gap_sec
 
     def merge(self, timeline: Timeline) -> list[ScriptEvent]:
