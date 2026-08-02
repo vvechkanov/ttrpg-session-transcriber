@@ -20,6 +20,11 @@ from typing import Any, Callable
 from domain.annotations import SpeechSegment
 from domain.speaker_map import resolve_speaker
 from sources.base import InstallProgress, Source
+from sources.speech._track_cache import (
+    compute_cache_key,
+    load_cached_segments,
+    write_cached_segments,
+)
 from sources.speech._bundle_download import (
     all_files_present,
     files_by_logical,
@@ -187,27 +192,70 @@ class GigaAMSource(Source):
 
     # ---- Source --------------------------------------------------------
 
+    def _cache_config(self) -> dict[str, object]:
+        """Decoder-affecting settings, for the per-track cache key."""
+
+        return {
+            "engine": _SOURCE_ENGINE,
+            "variant": self.variant,
+            "precision": self.precision,
+            "device": self.device,
+            "num_threads": self.num_threads,
+            "beam": ENABLE_HOTWORDS_BIASING,
+        }
+
     def extract(self, session_dir: Path) -> list[SpeechSegment]:
         """Транскрибировать все аудио в ``session_dir`` через GigaAM.
 
         Побочный эффект: пишет canonical JSON на каждый трек в
         ``session_dir/transcripts/<stem>.json``.
+
+        Треки, для которых такой JSON уже лежит и его ключ кэша
+        совпадает с текущими настройками и файлом аудио,
+        **не распознаются заново** — сегменты читаются с диска.
         """
-        self._ensure_loaded()
         audio_files = _scan_audio_files(session_dir)
         if not audio_files:
             return []
 
         transcripts_dir = session_dir / "transcripts"
         transcripts_dir.mkdir(parents=True, exist_ok=True)
+        config = self._cache_config()
+
+        # Resolve what still needs work before loading the model — a
+        # fully cached session must not pay for weights it won't use.
+        pending: list[tuple[Path, Path, str]] = []
+        cached: list[tuple[Path, list[SpeechSegment]]] = []
+        for audio_path in audio_files:
+            out_path = transcripts_dir / f"{audio_path.stem}.json"
+            key = compute_cache_key(audio_path, config)
+            speaker = resolve_speaker(audio_path.stem, self.speaker_map)
+            hit = load_cached_segments(out_path, key, speaker=speaker)
+            if hit is None:
+                pending.append((audio_path, out_path, key))
+            else:
+                cached.append((audio_path, hit))
+
+        if cached:
+            logger.info(
+                "GigaAM: %d/%d треков взято из кэша",
+                len(cached), len(audio_files),
+            )
 
         all_segments: list[SpeechSegment] = []
-        for audio_path in audio_files:
+        for _, hit in cached:
+            all_segments.extend(hit)
+
+        if pending:
+            self._ensure_loaded()
+        for audio_path, out_path, key in pending:
             track_segments = self.transcribe_track(audio_path)
-            _write_canonical_json(
+            write_cached_segments(
                 track_segments,
-                transcripts_dir / f"{audio_path.stem}.json",
+                out_path,
                 source_engine=_SOURCE_ENGINE,
+                schema_version=_CANONICAL_SCHEMA_VERSION,
+                cache_key=key,
             )
             all_segments.extend(track_segments)
 
