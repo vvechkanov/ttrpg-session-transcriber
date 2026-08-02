@@ -159,6 +159,20 @@ class PipelineController(QObject):
         if self._merge_thread is not None and self._merge_thread.isRunning():
             return
 
+        # Pre-flight: without a model on disk every track fails
+        # separately with a developer-facing RuntimeError ("GigaAM-v3
+        # model is not installed. Run installer or
+        # GigaAMSource().install(params)"). Six red rows of that is
+        # what a first-time user used to get. One sentence pointing at
+        # the Models screen is the whole fix.
+        if self._registry is not None and not self._registry.anyInstalled:
+            self._app.setErrorMessage(
+                "Не установлена ни одна модель распознавания. "
+                "Откройте раздел «Модели» и установите рекомендованную — "
+                "это делается один раз."
+            )
+            return
+
         self._tracks.resetProgress()
         self._tracks.resetStates()
         self._app.clearMergeState()
@@ -172,10 +186,10 @@ class PipelineController(QObject):
         self._cancelled = False
         self._collected_segments = {}
 
-        # Initial marking: every non-excluded row is queued. On-disk
-        # cache lookup (skipping rows that already have a transcript)
-        # is a core/cache.py concern and is not wired yet — until it
-        # lands the pipeline re-runs ASR on every non-excluded row.
+        # Initial marking: every non-excluded row is queued. The
+        # per-track transcript cache lives one layer down, inside the
+        # source's extract() — this path calls transcribe_track()
+        # directly and so does not benefit from it yet.
         self._queue = []
         for row in range(self._tracks.rowCount()):
             if self._is_excluded(row):

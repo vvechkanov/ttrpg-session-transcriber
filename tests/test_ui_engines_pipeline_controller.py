@@ -506,3 +506,82 @@ def test_speaker_map_absent_session_is_not_fatal(monkeypatch) -> None:
     controller._get_or_make_source("gigaam")
 
     assert captured["speaker_map"] == {}
+
+
+class _RegistryStub:
+    """Minimal stand-in for ModelRegistry's pre-flight surface."""
+
+    def __init__(self, any_installed: bool) -> None:
+        self.anyInstalled = any_installed
+        self.activeModelId = "gigaam"
+
+
+def test_run_without_a_model_explains_itself(tmp_path: Path) -> None:
+    """No model installed → one sentence, not six stack traces.
+
+    Every track used to fail separately with a developer-facing
+    RuntimeError ("GigaAM-v3 model is not installed. Run installer or
+    GigaAMSource().install(params)"), which is what a first-time user
+    saw after dropping their first folder.
+    """
+
+    _ensure_app()
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+    _write_flac_stub(session / "2-bob.flac")
+
+    app_model = AppModel()
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    controller = PipelineController(
+        app_model, tracks, meta, _RegistryStub(any_installed=False)
+    )
+    meta.openSession(session.as_uri())
+
+    controller.runAsr()
+
+    message = app_model.errorMessage
+    assert message, "a missing model must surface a message"
+    assert "Модели" in message, message
+    assert "RuntimeError" not in message and "install(" not in message, (
+        f"developer-facing text leaked to the user: {message}"
+    )
+    assert app_model.phase != "asr", "must not start ASR without a model"
+
+
+def test_guard_passes_when_a_model_is_installed(tmp_path: Path) -> None:
+    """The guard must not block the normal path.
+
+    Stops at the guard rather than letting ``runAsr`` spawn a worker —
+    starting real ASR here would go looking for model weights.
+    """
+
+    _ensure_app()
+
+    session = tmp_path / "session"
+    session.mkdir()
+    _write_flac_stub(session / "1-alice.flac")
+
+    app_model = AppModel()
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    controller = PipelineController(
+        app_model, tracks, meta, _RegistryStub(any_installed=True)
+    )
+    meta.openSession(session.as_uri())
+
+    # Every track excluded, and the merge spawn stubbed out: the guard
+    # is then the only thing that could refuse, and it must not.
+    # Letting a real merge thread start would leave a live QThread
+    # behind and hang the test session.
+    for row in range(tracks.rowCount()):
+        tracks.updateSpeakerMapRow(row, "Alice", "Слушатель", [])
+    spawned: list[bool] = []
+    controller._spawn_merger = lambda: spawned.append(True)  # type: ignore[method-assign]
+
+    controller.runAsr()
+
+    assert app_model.errorMessage == "", app_model.errorMessage
+    assert spawned == [True], "the guard swallowed a run it should have allowed"

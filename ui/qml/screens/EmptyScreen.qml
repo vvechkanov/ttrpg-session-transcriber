@@ -178,13 +178,17 @@ Rectangle {
                 // follow-up; until then this area stays empty.
 
                 // ── First-install banner ──────────────────────────
+                // Only while there is genuinely nothing installed. It
+                // used to greet returning users too, inviting them to
+                // install a model they already had.
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.topMargin: 32
                     radius: Theme.radiusLg
                     border.width: 1
                     border.color: Theme.accentSoft
-                    implicitHeight: bannerRow.implicitHeight + 40
+                    visible: !modelRegistry || !modelRegistry.anyInstalled
+                    implicitHeight: visible ? bannerRow.implicitHeight + 40 : 0
 
                     gradient: Gradient {
                         orientation: Gradient.Horizontal
@@ -238,7 +242,16 @@ Rectangle {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: "Для распознавания русской речи рекомендуем <b>GigaAM-v3 RNNT</b> — 580 MB, лучшая точность для живой речи D&D. Установим её автоматически, когда вы запустите первую сессию."
+                                // Model name and size come from the catalogue.
+                                // This copy used to hardcode "580 MB" against a
+                                // catalogue that says ~900 MB, and promised
+                                // automatic installation on first run — which
+                                // nothing implements. Transcription simply
+                                // failed once per track instead.
+                                text: "Для распознавания русской речи рекомендуем <b>"
+                                      + (modelRegistry ? modelRegistry.recommendedTitle : "")
+                                      + "</b> — " + (modelRegistry ? modelRegistry.recommendedSizeLabel : "")
+                                      + ". Её нужно установить один раз, до первой сессии."
                                 textFormat: Text.RichText
                                 color: Theme.ink2
                                 font.family: Theme.fontSans
@@ -253,6 +266,18 @@ Rectangle {
                             sizeTag: "md"
                             iconName: "download"
                             text: "Установить сейчас"
+                            enabled: modelRegistry && modelRegistry.recommendedRow >= 0
+                            onClicked: {
+                                if (!modelRegistry)
+                                    return
+                                // Switch to the models screen first: install
+                                // runs on a worker thread and progress is only
+                                // visible there. Starting a multi-hundred-meg
+                                // download with no visible progress reads as a
+                                // dead button.
+                                appModel.screen = "models"
+                                modelRegistry.install(modelRegistry.recommendedRow)
+                            }
                         }
                     }
                 }
