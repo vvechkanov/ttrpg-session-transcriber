@@ -17,6 +17,7 @@ from core.pipeline import run as _  # noqa: F401
 from PySide6.QtCore import QThread
 
 from domain.annotations import SpeechSegment
+from mergers.script_merger import DEFAULT_MERGE_GAP_SEC
 from ui.engines.merger_worker import MergerWorker
 
 
@@ -120,3 +121,39 @@ def test_merger_cancel_before_run_short_circuits(qtbot, tmp_path: Path) -> None:
     assert done == []
     assert errors == []
     assert not (session / "merged.txt").exists()
+
+
+def test_merger_default_gap_tracks_the_merger(qtbot, tmp_path: Path) -> None:
+    """The shell must glue speech at the same gap the CLI does.
+
+    The worker duplicates ``core.pipeline.run``, so a gap literal of its
+    own silently forks the two paths — which is exactly what happened
+    when the merger moved from 1.0s to 2.0s for VAD-sliced backends and
+    the shell stayed behind. Assert on behaviour, not on the constant:
+    two segments 1.5s apart sit inside the merger's default and must
+    come out as one line.
+    """
+    session = tmp_path / "session-gap"
+    session.mkdir()
+
+    speech = [
+        SpeechSegment(start=0.0, end=2.0, speaker="Andrey", text="first half", confidence=None),
+        SpeechSegment(start=3.5, end=5.0, speaker="Andrey", text="second half", confidence=None),
+    ]
+
+    worker = MergerWorker(
+        session_dir=session,
+        speech_segments=speech,
+        chat_log_path=None,
+        total_duration=5.0,
+    )
+
+    assert worker._gap_sec == DEFAULT_MERGE_GAP_SEC
+
+    done: list[str] = []
+    worker.done.connect(done.append)
+    _run_on_thread(qtbot, worker)
+
+    assert len(done) == 1
+    text = Path(done[0]).read_text(encoding="utf-8")
+    assert text.count("Andrey:") == 1, text

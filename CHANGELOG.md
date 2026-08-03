@@ -52,6 +52,9 @@ of recovered speech, and produces zero silence hallucinations against 39.
   indefinitely on real speech
 
 ### Fixed
+- The same-speaker merge gap fix (1.0s → 2.0s, needed by VAD-slicing backends) never
+  reached the QML shell: `MergerWorker` carried a gap literal of its own, so the CLI
+  glued speech at 2.0s while the UI kept shattering monologues at 1.0s
 - `speaker_map.json` never reached the ASR sources from the Qt shell, so `merged.txt`
   carried audio file stems instead of player names
 - Waveform peaks are decoded in parallel; lanes shimmer while pending

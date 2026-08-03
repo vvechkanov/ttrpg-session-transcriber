@@ -31,7 +31,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
 from domain.timeline import Timeline
-from mergers.script_merger import ScriptMerger
+from mergers.script_merger import DEFAULT_MERGE_GAP_SEC, ScriptMerger
 from renderers.plain_text import PlainTextRenderer
 
 
@@ -64,7 +64,13 @@ class MergerWorker(QObject):
         speech_segments: list[SpeechSegment],
         chat_log_path: Path | None = None,
         total_duration: float = 0.0,
-        gap_sec: float = 1.0,
+        # Must track the merger's own default. This worker duplicates
+        # ``core.pipeline.run`` (see docs/architecture-review-2026-08.md
+        # F-8/5), and a local literal here meant the 1.0 -> 2.0 fix in
+        # commit 5a907b2 never reached the GUI: the CLI glued speech at
+        # 2.0s while the shell kept shattering VAD-sliced monologues at
+        # 1.0s. Import the constant rather than restate it.
+        gap_sec: float = DEFAULT_MERGE_GAP_SEC,
         combat_log_paths: list[Path] | None = None,
     ) -> None:
         super().__init__()
