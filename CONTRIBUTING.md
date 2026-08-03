@@ -38,16 +38,10 @@ pytest tests/
 
 ### Lint and format
 
-```bash
-ruff check .
-ruff format .
-```
-
-If you have `pre-commit` installed, the same checks run automatically before each commit:
-
-```bash
-pre-commit install
-```
+> **Not wired up yet.** There is no ruff configuration in `pyproject.toml`, no `lint`
+> job in CI, and no `pre-commit` config in the repository. Making ruff a blocking gate
+> (including automated layer-boundary checks) is a planned task — see `TASKS.md` §4.2.
+> Until then, match the style of the surrounding code.
 
 ## How to contribute
 
@@ -70,13 +64,14 @@ Open an issue using the **Feature Request** template. Before opening, please che
 1. **Fork** the repository and create a branch from `master`
 2. **Make your change** — keep it focused, one logical change per PR
 3. **Add tests** if you're adding code that should be tested. See `tests/` for examples.
-4. **Run `ruff check .` and `pytest tests/`** locally before pushing
+4. **Run `pytest tests/`** locally before pushing
 5. **Open a pull request** using the PR template
 6. **Wait for CI** to pass. The maintainer will review the PR.
 
 ### Code style
 
-- Python style is enforced by [ruff](https://docs.astral.sh/ruff/) (config in `pyproject.toml`)
+- Python style follows [ruff](https://docs.astral.sh/ruff/) defaults; the config and the
+  blocking CI gate are still to be added (`TASKS.md` §4.2)
 - Line length: 100 characters
 - Type hints encouraged but not yet required
 - Docstrings: short and useful, not bureaucratic
@@ -96,12 +91,17 @@ Example: `feat(asr): add SherpaOnnxBackend with GigaAM-v3 support`
 
 ## Architecture overview
 
-See [TASKS.md](TASKS.md) for the high-level roadmap and the canonical design decisions. The short version:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for layers, contracts and ADRs, [TASKS.md](TASKS.md)
+for the plan of work, and [VISION.md](VISION.md) for the product specification. The short
+version — six layers, imports point one way only:
 
-- **`scripts/asr_backends/`** — pluggable ASR backends. All backends produce a canonical JSON contract documented in `base.py`.
-- **`scripts/merge_whisperx.py`** — merges per-track transcripts into a unified timeline. Engine-agnostic — do not add Whisper-specific assumptions here.
-- **`scripts/parse_fvtt_chat.py`** — converts Foundry VTT chat log into the same canonical JSON format so it can be merged with audio segments.
-- **`launcher/`** — single-EXE installer (PyInstaller). Pure Python, dark-themed installer UI.
+- **`domain/`** — pure dataclasses: annotations, timeline, script events, speaker map. Imports nothing from the project.
+- **`sources/`** — anything that produces annotations with timestamps: ASR backends (`speech/`), Foundry VTT chat and combat dumps (`game_log/`). All speech backends produce the same canonical JSON contract.
+- **`mergers/`** — combine a `Timeline` into one ordered list of script events. Engine-agnostic — do not add Whisper-specific assumptions here.
+- **`renderers/`** — format script events into the output artifact (`merged.txt` today).
+- **`core/`** — orchestration: discovery, pipeline stages, chunking, GPU pre-flight, backend installers.
+- **`ui/`** — PySide6/QML app (`ui/qml`, `ui/models`, `ui/engines`) plus the CLI (`ui/cli.py`).
+- **`launcher/`** — single-EXE bootstrap installer (PyInstaller). Pure Python, dark-themed installer UI. Frozen — see FEATURE_REQUESTS.md #1.
 
 ## Code of Conduct
 

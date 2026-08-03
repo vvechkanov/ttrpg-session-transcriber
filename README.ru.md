@@ -99,15 +99,21 @@ python -m ui
 Мультитрек Craig (.flac на каждого игрока)
                 +
 Чат-лог Foundry VTT (опционально)
+                +
+Выгрузка боевого лога (опционально)
                 ↓
         ┌───────────────┐
-        │  ASR backend  │ ← faster-whisper / sherpa-onnx / whisperx
+        │    sources/   │ ← faster-whisper / sherpa-onnx / whisperx
+        └───────────────┘     + парсеры чата и боя
+                ↓
+   per-track JSON (канонический schema) → Timeline
+                ↓
+        ┌───────────────┐
+        │    mergers/   │ ← один упорядоченный сценарий на общей оси
         └───────────────┘
                 ↓
-   per-track JSON (канонический schema)
-                ↓
         ┌───────────────┐
-        │ merge timeline │ ← merge_whisperx.py
+        │   renderers/  │
         └───────────────┘
                 ↓
         merged.txt + chunks/

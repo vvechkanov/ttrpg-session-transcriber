@@ -99,15 +99,21 @@ Output appears in the same folder:
 Craig multi-track recording (.flac per player)
                 +
 Foundry VTT chat log export (optional)
+                +
+combat log dump (optional)
                 ↓
         ┌───────────────┐
-        │  ASR backend  │ ← faster-whisper / sherpa-onnx / whisperx
+        │    sources/   │ ← faster-whisper / sherpa-onnx / whisperx
+        └───────────────┘     + chat and combat parsers
+                ↓
+   per-track JSON (canonical schema) → Timeline
+                ↓
+        ┌───────────────┐
+        │    mergers/   │ ← one ordered script on a shared time axis
         └───────────────┘
                 ↓
-   per-track JSON (canonical schema)
-                ↓
         ┌───────────────┐
-        │ merge timeline │ ← merge_whisperx.py
+        │   renderers/  │
         └───────────────┘
                 ↓
         merged.txt + chunks/
