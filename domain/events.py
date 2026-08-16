@@ -1,6 +1,7 @@
 """Нормализованные события после merger-а, готовые для renderer-а."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 
@@ -14,6 +15,11 @@ class SpeechEvent:
     text: str
     emotion: str | None = None
     parallel_group: int | None = None
+    #: Когда это произошло по настенным часам сессии. Проставляется
+    #: мерджером из ``Timeline.recording_start``; ``None``, когда старт
+    #: записи или зона неизвестны — рендерер тогда печатает без времени.
+    wall_clock: datetime | None = None
+
 
 
 @dataclass
@@ -24,6 +30,12 @@ class ChatEvent:
     channel: Literal["ic", "ooc"]
     author: str
     text: str
+
+    #: Когда это произошло по настенным часам сессии. Проставляется
+    #: мерджером из ``Timeline.recording_start``; ``None``, когда старт
+    #: записи или зона неизвестны — рендерер тогда печатает без времени.
+    wall_clock: datetime | None = None
+
 
 
 @dataclass
@@ -45,6 +57,12 @@ class GameEvent:
     actor: str
     action: str
     detail: str
+
+    #: Когда это произошло по настенным часам сессии. Проставляется
+    #: мерджером из ``Timeline.recording_start``; ``None``, когда старт
+    #: записи или зона неизвестны — рендерер тогда печатает без времени.
+    wall_clock: datetime | None = None
+
 
 
 ScriptEvent = SpeechEvent | ChatEvent | GameEvent

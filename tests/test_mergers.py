@@ -6,6 +6,8 @@ No audio, no models, no subprocess. Must run in <5s.
 import pytest
 from domain.annotations import ChatMessage, SpeechSegment
 from domain.events import ChatEvent, SpeechEvent
+from datetime import datetime, timedelta, timezone
+
 from domain.timeline import Timeline
 from mergers.script_merger import ScriptMerger
 
@@ -262,3 +264,64 @@ class TestMergeGapSuitsVadBackends:
         ]))
 
         assert [e.speaker for e in result] == ["GM", "Alice", "GM"]
+
+
+class TestWallClockStamping:
+    """Absolute time reaches events without touching the render contract.
+
+    A renderer that wants to print "20:15" needs the recording start and
+    the session's timezone, and `render(events) -> bytes` carries
+    neither. Rather than widen that signature for every renderer, the
+    merger — the one place where relative offsets and the recording
+    start meet — stamps each event.
+    """
+
+    #: Session 17: Record pressed at 20:42:09 local, which is +02:00.
+    REC_START = datetime(
+        2026, 8, 15, 20, 42, 9, tzinfo=timezone(timedelta(hours=2))
+    )
+
+    def _timeline(self, recording_start):
+        from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
+
+        return Timeline(
+            speech=[SpeechSegment(start=60.0, end=62.0, speaker="Вова", text="да")],
+            emotions=[],
+            chat=[ChatMessage(at=120.0, channel="ic", author="Бель", text="27")],
+            game_log=[
+                GameLogEntry(at=180.0, actor="Киран", action="turn_start", detail="")
+            ],
+            recording_start=recording_start,
+        )
+
+    def test_every_event_kind_gets_stamped(self):
+        events = ScriptMerger().merge(self._timeline(self.REC_START))
+        assert events, "nothing to check"
+        assert all(e.wall_clock is not None for e in events)
+
+    def test_stamp_reads_as_the_session_clock(self):
+        """The point of the exercise: strftime gives the players' hours."""
+        events = ScriptMerger().merge(self._timeline(self.REC_START))
+        stamps = {e.wall_clock.strftime("%H:%M") for e in events}
+        # +60 s, +120 s, +180 s past 20:42:09.
+        assert stamps == {"20:43", "20:44", "20:45"}
+
+    def test_speech_is_stamped_from_its_start(self):
+        from domain.events import SpeechEvent
+
+        events = ScriptMerger().merge(self._timeline(self.REC_START))
+        speech = next(e for e in events if isinstance(e, SpeechEvent))
+        assert speech.wall_clock == self.REC_START + timedelta(seconds=speech.start)
+
+    def test_no_recording_start_leaves_events_unstamped(self):
+        """Unknown zone must produce no time, not a UTC time mislabelled."""
+        events = ScriptMerger().merge(self._timeline(None))
+        assert events
+        assert all(e.wall_clock is None for e in events)
+
+    def test_stamp_keeps_the_instant_not_just_the_digits(self):
+        """It stays an aware datetime — a real moment, comparable."""
+        events = ScriptMerger().merge(self._timeline(self.REC_START))
+        first = min(e.wall_clock for e in events)
+        assert first.tzinfo is not None
+        assert first.utcoffset() == timedelta(hours=2)
