@@ -2,7 +2,7 @@
 
 Phase 7 wiring: replaces the Phase 5 simulated loop with a real call
 into :class:`mergers.script_merger.ScriptMerger` +
-:class:`renderers.plain_text.PlainTextRenderer`. The "render" phase
+:class:`renderers.base.Renderer` chosen by name. The "render" phase
 from ``core.pipeline.run`` is collapsed inside this worker — the
 handoff's timeline exposes only ``idle/asr/merge/done``, and the
 renderer call is an implementation detail of the merge step.
@@ -32,7 +32,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
 from domain.timeline import Timeline
 from mergers.script_merger import ScriptMerger
-from renderers.plain_text import PlainTextRenderer
+from renderers import RENDERERS
 
 
 class MergerWorker(QObject):
@@ -66,6 +66,7 @@ class MergerWorker(QObject):
         total_duration: float = 0.0,
         gap_sec: float = 1.0,
         combat_log_paths: list[Path] | None = None,
+        renderer_name: str = "plain-text",
     ) -> None:
         super().__init__()
         self._session_dir = session_dir
@@ -74,6 +75,7 @@ class MergerWorker(QObject):
         self._total_duration = float(total_duration)
         self._gap_sec = float(gap_sec)
         self._combat_log_paths = list(combat_log_paths or [])
+        self._renderer_name = renderer_name
         self._cancelled = False
 
     @Slot()
@@ -116,7 +118,18 @@ class MergerWorker(QObject):
             # ── Stage 4 of 4: render + write ───────────────────────
             if self._should_cancel():
                 return
-            payload = PlainTextRenderer().render(events)
+            renderer_name = self._renderer_name
+            renderer_cls = RENDERERS.get(renderer_name)
+            if renderer_cls is None:
+                # Настройка могла остаться от версии, где такой рендерер
+                # был. Падать из-за формата вывода, когда транскрипт уже
+                # собран, — худший из возможных вариантов.
+                logger.warning(
+                    "unknown renderer %r, falling back to plain-text",
+                    renderer_name,
+                )
+                renderer_cls = RENDERERS["plain-text"]
+            payload = renderer_cls().render(events)
 
             output_path = self._session_dir / "merged.txt"
             output_path.write_bytes(payload)

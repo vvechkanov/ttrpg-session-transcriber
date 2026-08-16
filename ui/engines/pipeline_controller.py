@@ -381,6 +381,17 @@ class PipelineController(QObject):
         self.saveSpeakerMapEntry(row, player, wire_role, list(current_chars))
 
     # ── Internals ─────────────────────────────────────────────────────
+    def _renderer_name(self) -> str:
+        """Формат merged.txt из настроек, с падением на plain-text.
+
+        ``AppPreferences`` может не быть вовсе (CLI, тесты), а в старых
+        настройках ключа ещё нет — оба случая означают исторический
+        формат, а не ошибку.
+        """
+        if self._preferences is None:
+            return "plain-text"
+        return getattr(self._preferences, "renderer", "") or "plain-text"
+
     def _is_excluded(self, row: int) -> bool:
         idx = self._tracks.index(row, 0)
         return bool(self._tracks.data(idx, TrackListModel.ExcludedRole))
@@ -565,6 +576,7 @@ class PipelineController(QObject):
             chat_log_path=chat_log,
             total_duration=total_seconds,
             combat_log_paths=combat_logs,
+            renderer_name=self._renderer_name(),
         )
         worker.moveToThread(thread)
 

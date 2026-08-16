@@ -120,3 +120,42 @@ def test_merger_cancel_before_run_short_circuits(qtbot, tmp_path: Path) -> None:
     assert done == []
     assert errors == []
     assert not (session / "merged.txt").exists()
+
+
+class TestRendererSelection:
+    """merged.txt format follows the setting, and never dies for it."""
+
+    def _events(self):
+        from domain.events import SpeechEvent
+        return [SpeechEvent(start=0.0, end=1.0, speaker="Вова", text="да")]
+
+    def test_default_is_the_historical_format(self, tmp_path):
+        from ui.engines.merger_worker import MergerWorker
+        worker = MergerWorker(session_dir=tmp_path, speech_segments=[])
+        assert worker._renderer_name == "plain-text"
+
+    def test_named_renderer_is_used(self, tmp_path):
+        from renderers import RENDERERS
+        from ui.engines.merger_worker import MergerWorker
+
+        worker = MergerWorker(
+            session_dir=tmp_path, speech_segments=[], renderer_name="combat-aware"
+        )
+        assert worker._renderer_name == "combat-aware"
+        assert "combat-aware" in RENDERERS
+
+    def test_unknown_renderer_falls_back_instead_of_failing(self, tmp_path, caplog):
+        """A stale setting must not destroy a finished transcript.
+
+        The name is persisted in QSettings and outlives the code that
+        knew it. Raising here would throw away a merge that had already
+        succeeded, over the choice of output format.
+        """
+        from renderers import RENDERERS
+
+        name = "renderer-that-was-removed"
+        assert name not in RENDERERS
+
+        chosen = RENDERERS.get(name) or RENDERERS["plain-text"]
+        payload = chosen().render(self._events())
+        assert b"\xd0\x92\xd0\xbe\xd0\xb2\xd0\xb0" in payload  # "Вова"

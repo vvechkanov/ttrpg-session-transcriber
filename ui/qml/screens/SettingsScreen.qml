@@ -312,6 +312,29 @@ Rectangle {
 
                         SettingField {
                             Layout.fillWidth: true
+                            label: "ФОРМАТ merged.txt"
+                            hint: "Вне боя оба формата совпадают "
+                                + "построчно — combat-aware отличается "
+                                + "только внутри боёвки."
+
+                            SelectField {
+                                id: rendererSelect
+                                Layout.fillWidth: true
+                                readonly property var values: ["plain-text", "combat-aware"]
+                                model: [
+                                    { v: "plain-text",   l: "Простой текст" },
+                                    { v: "combat-aware", l: "С разметкой боёв" }
+                                ]
+                                currentIndex: Math.max(0, values.indexOf(preferences.renderer))
+                                onCurrentIndexChanged: {
+                                    if (currentIndex >= 0)
+                                        preferences.renderer = values[currentIndex]
+                                }
+                            }
+                        }
+
+                        SettingField {
+                            Layout.fillWidth: true
                             label: "OOC В FOUNDRY-ЧАТЕ"
 
                             SelectField {
