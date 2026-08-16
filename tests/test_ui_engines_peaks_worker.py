@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 import time
 
+import pytest
+
 from PySide6.QtGui import QGuiApplication
 
 from ui.engines import peaks_worker as pw
@@ -110,3 +112,68 @@ def test_one_unreadable_file_does_not_kill_the_batch(monkeypatch) -> None:
 
     assert sorted(got) == [0, 1, 3], got
     assert done == [True], "allDone must fire exactly once"
+
+
+class TestSegmentDurationReachesTheModel:
+    """Per-segment duration must reach the row that owns it.
+
+    Without it TrackSegment.duration_sec stayed None forever,
+    _segments_payload fell back to endPct = 100, and a recording shorter
+    than the timeline window drew its waveform — and the ASR progress
+    sweep — across silence on the right.
+    """
+
+    def test_worker_reports_the_segment_address(self, tiny_wav_factory):
+        from ui.engines.peaks_worker import PeaksWorker
+
+        path = tiny_wav_factory("one", duration_sec=1.0)
+        worker = PeaksWorker([(3, 1, str(path))])
+
+        seen: list[tuple] = []
+        worker.segmentDurationReady.connect(
+            lambda row, seg, secs: seen.append((row, seg, secs))
+        )
+        worker.run()
+
+        assert len(seen) == 1
+        row, seg_idx, seconds = seen[0]
+        assert (row, seg_idx) == (3, 1)
+        assert seconds == pytest.approx(1.0, abs=0.2)
+
+    def test_model_stores_it_and_republishes_the_row(self, tmp_path):
+        from datetime import datetime, timezone
+
+        from ui.models.session import TrackEntry, TrackListModel, TrackSegment
+
+        model = TrackListModel()
+        model._rows = [
+            TrackEntry(
+                name="Вова",
+                role="GM",
+                characters=[],
+                audio_path=tmp_path / "a.flac",
+                segments=(
+                    TrackSegment(
+                        audio_path=tmp_path / "a.flac",
+                        start_ts=datetime(2026, 8, 15, 18, 42, tzinfo=timezone.utc),
+                        duration_sec=None,
+                    ),
+                ),
+            )
+        ]
+
+        changed: list = []
+        model.dataChanged.connect(lambda *a: changed.append(a))
+        model.setSegmentDuration(0, 0, 1200.0)
+
+        assert model._rows[0].segments[0].duration_sec == 1200.0
+        assert changed, "QML was not told the row changed"
+
+    def test_out_of_range_and_zero_are_ignored(self, tmp_path):
+        from ui.models.session import TrackListModel
+
+        model = TrackListModel()
+        model._rows = []
+        # Must not raise for a row that is not there.
+        model.setSegmentDuration(7, 0, 100.0)
+        model.setSegmentDuration(0, 0, 0.0)

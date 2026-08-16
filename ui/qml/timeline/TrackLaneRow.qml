@@ -55,6 +55,36 @@ Item {
     // worker computed for that specific audio file.
     property var segments: []
 
+    // Extent of this row's audio on the ruler, 0..100. Falls back to
+    // the full lane only when no segments have been published at all —
+    // the QML default, which the prototype and the component tests use.
+    // Production always publishes at least one segment.
+    //
+    // Segments of one row can have a gap between them when a Craig
+    // recording was restarted; the sweep crosses it linearly. ASR runs
+    // serially over the row and reports one number, so there is nothing
+    // finer to be faithful to.
+    readonly property real _audioStartPct: {
+        if (!root.segments || !root.segments.length)
+            return 0
+        let lo = 100
+        for (let i = 0; i < root.segments.length; ++i) {
+            const start = root.segments[i].startPct
+            lo = Math.min(lo, (start != null && !isNaN(start)) ? start : 0)
+        }
+        return lo
+    }
+    readonly property real _audioEndPct: {
+        if (!root.segments || !root.segments.length)
+            return 100
+        let hi = 0
+        for (let i = 0; i < root.segments.length; ++i) {
+            const end = root.segments[i].endPct
+            hi = Math.max(hi, (end != null && !isNaN(end)) ? end : 100)
+        }
+        return Math.max(hi, root._audioStartPct)
+    }
+
     // True while the pipeline is idle (so fields are safe to edit and
     // the badge can open the override popover).
     property bool editableLocked: false
@@ -374,14 +404,28 @@ Item {
             }
         }
 
-        // Row-wide progress overlay — rendered once on top of the
-        // per-segment canvases so the "N% painted left-to-right"
-        // visual matches the pre-4b behaviour.
+        // Progress overlay — one per row, on top of the per-segment
+        // canvases, so "N% painted left-to-right" reads as one sweep
+        // even though the PipelineController reports a single 0..1 for
+        // the whole row.
+        //
+        // It sweeps the audio, not the lane. The two used to be the
+        // same thing: the timeline began at the recording, so a track
+        // filled the full width. Now the window spans the whole session
+        // and the audio may start well into it — filling from the left
+        // edge would put 50% of ASR somewhere in a stretch that has no
+        // sound in it at all.
         Rectangle {
+            objectName: "progressOverlay"
             visible: root._running && !root.excluded
-            x: 0
+            x: track.width * (root._audioStartPct / 100.0)
             y: 0
-            width: track.width * root.progress
+            width: Math.max(
+                0,
+                track.width
+                * ((root._audioEndPct - root._audioStartPct) / 100.0)
+                * root.progress
+            )
             height: track.height
             color: root._fillColor
             opacity: 0.12
@@ -390,11 +434,13 @@ Item {
 
         // Status chip bottom-anchored. Only renders when the pipeline
         // is active (anything other than the idle state).
+        // Pinned to where the audio starts, not to the lane edge. The
+        // chip labels this row's ASR run; parking it an hour to the
+        // left of the sound it describes made the two look unrelated.
         TrackStatusChip {
             visible: !root.excluded && root.trackState !== "idle"
                      && root.trackState !== "done"
-            anchors.left: parent.left
-            anchors.leftMargin: 4
+            x: track.width * (root._audioStartPct / 100.0) + 4
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 2
             trackState: root.trackState

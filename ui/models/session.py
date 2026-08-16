@@ -12,7 +12,7 @@ folder or picks one via the Empty-screen "Выбрать папку…" button.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -353,11 +353,11 @@ class TrackSegment:
     that segment's ``info.txt``. ``None`` when the segment has no
     ``info.txt`` or its ``Start time`` line is missing / malformed.
 
-    ``duration_sec`` — probed duration in seconds. Populated only
-    when cheaply available; 4a leaves it ``None`` because the ffprobe
-    pass moved off the UI thread in an earlier commit and a second
-    probe here would re-freeze folder-pick. 4b will either reuse the
-    async probe result or drop the field entirely.
+    ``duration_sec`` — probed duration in seconds. ``None`` until the
+    background :class:`ui.engines.peaks_worker.PeaksWorker` reports it
+    through :meth:`TrackListModel.setSegmentDuration`; discovery never
+    probes on the UI thread, because doing so used to freeze
+    folder-pick for the length of N ffprobe launches.
     """
 
     audio_path: Path
@@ -1185,6 +1185,34 @@ class TrackListModel(QAbstractListModel):
             idx,
             [TrackListModel.PeaksRole, TrackListModel.SegmentsRole],
         )
+
+
+    @Slot(int, int, float)
+    def setSegmentDuration(self, row: int, seg_idx: int, seconds: float) -> None:
+        """Record a probed segment length so the lane knows where it ends.
+
+        Called via a queued connection from :class:`PeaksWorker`, which
+        probes durations before decoding anything. Until this existed
+        ``duration_sec`` stayed ``None`` for every segment and
+        :meth:`_segments_payload` fell back to ``endPct = 100`` — so a
+        3h18m recording inside a 4h window drew its waveform, and the
+        ASR progress sweep, all the way to the right edge of a lane that
+        is part silence.
+        """
+
+        if not (0 <= row < len(self._rows)) or seconds <= 0:
+            return
+        entry = self._rows[row]
+        if not (0 <= seg_idx < len(entry.segments)):
+            return
+        segment = entry.segments[seg_idx]
+        if segment.duration_sec == seconds:
+            return
+        updated = list(entry.segments)
+        updated[seg_idx] = replace(segment, duration_sec=seconds)
+        entry.segments = tuple(updated)
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [TrackListModel.SegmentsRole])
 
 
 # ─────────────────────────────────────────────────────────────────────
