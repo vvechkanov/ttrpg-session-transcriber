@@ -25,6 +25,7 @@ events and before the renderer write.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -32,8 +33,11 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
 from domain.timeline import Timeline
 from mergers.script_merger import ScriptMerger
-from renderers import RENDERERS
+from core.session_clock import session_clock_start
+from renderers import RENDERERS, Renderer
 
+
+logger = logging.getLogger(__name__)
 
 class MergerWorker(QObject):
     """One-shot worker that glues segments + chat into a merged.txt file."""
@@ -109,6 +113,13 @@ class MergerWorker(QObject):
                 emotions=[],
                 chat=chat_messages,
                 game_log=game_log_entries,
+                # Без этого ни одно событие не получает абсолютного
+                # времени, и рендерер, который умеет печатать часы,
+                # печатает пустоту. GUI не ходит через core.pipeline,
+                # так что считать это надо здесь же.
+                recording_start=session_clock_start(
+                    self._session_dir, self._chat_log_path
+                ),
             )
             if self._should_cancel():
                 return
@@ -118,18 +129,7 @@ class MergerWorker(QObject):
             # ── Stage 4 of 4: render + write ───────────────────────
             if self._should_cancel():
                 return
-            renderer_name = self._renderer_name
-            renderer_cls = RENDERERS.get(renderer_name)
-            if renderer_cls is None:
-                # Настройка могла остаться от версии, где такой рендерер
-                # был. Падать из-за формата вывода, когда транскрипт уже
-                # собран, — худший из возможных вариантов.
-                logger.warning(
-                    "unknown renderer %r, falling back to plain-text",
-                    renderer_name,
-                )
-                renderer_cls = RENDERERS["plain-text"]
-            payload = renderer_cls().render(events)
+            payload = _renderer_for(self._renderer_name).render(events)
 
             output_path = self._session_dir / "merged.txt"
             output_path.write_bytes(payload)
@@ -192,3 +192,20 @@ class MergerWorker(QObject):
                 # Сломанный/пустой dump не должен валить весь merge.
                 continue
         return entries
+
+
+def _renderer_for(name: str) -> Renderer:
+    """Рендерер по имени, с падением на plain-text.
+
+    Имя живёт в QSettings и переживает код, который его знал. Уронить
+    здесь мердж, который уже отработал, ради выбора формата вывода —
+    худшее, что можно сделать; поэтому неизвестное имя это предупреждение
+    в лог, а не исключение. CLI на том же месте падает намеренно: там имя
+    пришло из аргументов команды прямо сейчас, и молчаливая подмена
+    формата скрыла бы опечатку.
+    """
+    renderer_cls = RENDERERS.get(name)
+    if renderer_cls is None:
+        logger.warning("unknown renderer %r, falling back to plain-text", name)
+        renderer_cls = RENDERERS["plain-text"]
+    return renderer_cls()

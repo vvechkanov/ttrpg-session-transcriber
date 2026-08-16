@@ -181,3 +181,88 @@ class TestOutsideCombat:
 
 def test_registered_under_its_name():
     assert RENDERERS["combat-aware"] is CombatAwareRenderer
+
+
+class TestNothingIsLost:
+    """Completeness beats tidiness — the project's own quality criterion.
+
+    CombatDumpSource builds action names out of the dump
+    (``f"effect_{event_type}"``), so any whitelist of known actions is
+    guaranteed to fall behind the data. An unknown kind must print,
+    not vanish.
+    """
+
+    def test_unknown_action_inside_a_fight_still_prints(self):
+        events = _fight()
+        events.insert(-2, _game(5, "effect_suppressed", "Киран", "Bless"))
+        events.insert(-2, _game(6, "death_save", "Бель", "провал"))
+
+        out = _render(events)
+        assert "Киран: Bless" in out
+        assert "Бель: провал" in out
+
+    def test_every_game_event_survives_the_block(self):
+        kinds = [
+            "action", "hp_change", "movement", "effect_applied",
+            "effect_removed", "effect_changed", "brand_new_kind",
+        ]
+        events = _fight()
+        for i, kind in enumerate(kinds):
+            events.insert(-2, _game(5 + i, kind, "Актёр", f"деталь-{i}"))
+
+        out = _render(events)
+        for i in range(len(kinds)):
+            assert f"деталь-{i}" in out, f"{kinds[i]} disappeared"
+
+
+class TestMalformedStreams:
+    """A dump is someone else's export; it will arrive in odd shapes."""
+
+    def test_empty_stream(self):
+        assert _render([]) == ""
+
+    def test_end_without_a_start_is_not_swallowed(self):
+        """No block was open, so it falls through to plain-text."""
+        out = _render([_game(0, "encounter_end")])
+        assert "БОЙ ОКОНЧЕН" in out
+
+    def test_summaries_without_a_fight_still_print(self):
+        out = _render([_game(0, "encounter_summary_global", detail="rounds=2")])
+        assert out.strip(), "the summary vanished"
+
+    def test_nested_starts_close_the_previous_block(self):
+        """Two encounter_starts in a row must yield two blocks."""
+        events = [
+            _game(0, "encounter_start", detail="Первый"),
+            _game(1, "turn_start", "Киран"),
+            _game(2, "encounter_start", detail="Второй"),
+            _game(3, "turn_start", "Бель"),
+            _game(4, "encounter_end"),
+        ]
+        out = _render(events)
+        assert "БОЙ 1: Первый" in out
+        assert "БОЙ 2: Второй" in out
+        assert "ход Киран" in out
+        assert "ход Бель" in out
+
+
+class TestInitiativeOrder:
+    def test_fractional_tiebreaks_are_respected(self):
+        """Foundry breaks ties with fractions: 18.14 acts before 18.02.
+
+        Rounding both to 18 sent the order to the alphabet, and the
+        printed queue then disagreed with the actual turn order.
+        """
+        events = [
+            _game(0, "encounter_start", detail="Мост"),
+            _game(1, "initiative", "Яна", "init=18.14, lvl=4, pc"),
+            _game(1, "initiative", "Абрам", "init=18.02, lvl=4, pc"),
+            _game(9, "encounter_end"),
+        ]
+        out = _render(events)
+        assert "Инициатива: Яна (18.14) → Абрам (18.02)" in out
+
+    def test_whole_numbers_stay_whole(self):
+        out = _render(_fight())
+        assert "Киран (28)" in out
+        assert "28.0" not in out

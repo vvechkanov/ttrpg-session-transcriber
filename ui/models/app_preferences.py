@@ -13,6 +13,7 @@ Keys grouped by section:
 * ``merger/max_gap``         — free-form seconds (string so the
                                TextField doesn't round-trip via float)
 * ``merger/ooc_mode``        — "skip" | "italic" | "include"
+* ``merger/renderer``        — "plain-text" | "combat-aware"
 * ``interface/language``     — "ru" | "en"
 * ``interface/show_tooltips`` — bool
 * ``interface/sound_on_done`` — bool

@@ -9,7 +9,6 @@ Does not import ``ui``, tkinter, argparse, or torch directly.
 from __future__ import annotations
 
 import logging
-from datetime import datetime  # noqa: F401 — для аннотации _session_clock_start
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -18,10 +17,11 @@ from core.chunking import ChunkingOptions, chunk_text_file
 from core.discovery import find_fvtt_chat_log, find_info_file
 from core.file_matchers import detect_combat_logs
 from core.gpu_check import check_gpu_or_warn
+from core.session_clock import session_clock_start
 from domain.annotations import ChatMessage, GameLogEntry
 from domain.timeline import Timeline
 from mergers import MERGERS
-from renderers import RENDERERS
+from renderers import get_renderer
 from sources import SPEECH_SOURCES
 from sources.base import Source
 from sources.game_log.combat_dump import CombatDumpSource
@@ -158,7 +158,7 @@ def run(
         emotions=[],
         chat=chat_messages,
         game_log=game_log_entries,
-        recording_start=_session_clock_start(session_dir, chat_log),
+        recording_start=session_clock_start(session_dir, chat_log),
     )
 
     stage_cb("merge", params.merger)
@@ -166,7 +166,7 @@ def run(
     events = merger.merge(timeline)
 
     stage_cb("render", params.renderer)
-    renderer = RENDERERS[params.renderer]()
+    renderer = get_renderer(params.renderer)
     payload = renderer.render(events)
 
     output_path = session_dir / params.output_filename
@@ -208,31 +208,6 @@ def run_batch(
             run(session_dir, params, on_stage=on_stage)
         except Exception:
             logger.exception("Session %s failed, continuing batch", session_dir)
-
-
-def _session_clock_start(
-    session_dir: Path, chat_log: Path | None
-) -> "datetime | None":
-    """Старт записи как aware-datetime в зоне самой сессии, или ``None``.
-
-    Зона берётся тем же резолвером, что и всё остальное в проекте, —
-    по чат-логу и боевым дампам. Если сказать нечего (нет ``info.txt``
-    или офсет лишь угадан), возвращается ``None``: рендерер тогда
-    печатает без времени. Подставить сюда UTC значило бы выдать чужие
-    часы за местные.
-    """
-    from datetime import timedelta, timezone
-
-    from core.coverage import session_start
-    from core.timeline_window import display_offset_hours
-
-    rec_start = session_start(session_dir)
-    if rec_start is None:
-        return None
-    offset = display_offset_hours(chat_log, rec_start)
-    if offset is None:
-        return None
-    return rec_start.astimezone(timezone(timedelta(hours=offset)))
 
 
 def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:

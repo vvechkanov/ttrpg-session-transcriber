@@ -33,8 +33,6 @@ _EMPTY_SCENE_NAMES = frozenset({"", "unknown scene", "unnamed scene"})
 _RULE = "━━━"
 _INDENT = "  "
 
-#: Игровые события, которые внутри блока идут отдельной строкой, а не
-#: сворачиваются в заголовок хода.
 #: Итоги приходят после ``encounter_end`` с тем же таймштампом, так
 #: что блок нельзя закрывать сразу на конце боя — иначе подвал теряет
 #: раунды и XP, а построчная статистика вываливается наружу.
@@ -43,13 +41,21 @@ _SUMMARY_ACTIONS = frozenset({
     "encounter_summary_actor",
 })
 
-_DETAIL_ACTIONS = frozenset({
-    "action",
-    "hp_change",
-    "effect_applied",
-    "effect_removed",
-    "effect_changed",
-    "movement",
+#: События, которые внутри блока становятся структурой, а не строкой:
+#: инициатива уезжает в шапку, раунд и ход — в заголовки, итоги — в
+#: подвал. Всё остальное печатается как есть.
+#:
+#: Именно так, через «всё остальное», а не белым списком известных
+#: действий: ``CombatDumpSource`` собирает имена из данных
+#: (``f"effect_{event_type}"``), так что список неизбежно отстанет от
+#: дампа, и незнакомый тип эффекта исчез бы из вывода молча. Полнота
+#: транскрипта здесь дороже аккуратности формата.
+_STRUCTURAL_ACTIONS = frozenset({
+    "initiative",
+    "round_start",
+    "turn_start",
+    "encounter_summary_global",
+    "encounter_summary_actor",
 })
 
 
@@ -184,18 +190,25 @@ class _Block:
         Порядок берётся из значений, а не из порядка записей: дамп
         перечисляет участников как ему удобно, а читать это будут как
         очередь ходов.
+
+        Значение читается как дробное: Foundry разрешает ничьи
+        тайбрейком (18.02 против 18.14), и округление до целого свело
+        бы обоих к 18 — дальше сортировка ушла бы в алфавит, и
+        напечатанная очередь разошлась бы с реальным порядком ходов.
         """
-        rolled: list[tuple[int, str]] = []
+        rolled: list[tuple[float, str]] = []
         for event in self.items:
             if not isinstance(event, GameEvent) or event.action != "initiative":
                 continue
-            value = _first_int(event.detail, "init")
+            value = _first_number(event.detail, "init")
             if value is not None and event.actor:
                 rolled.append((value, event.actor))
         if not rolled:
             return ""
         rolled.sort(key=lambda pair: (-pair[0], pair[1]))
-        return "Инициатива: " + " → ".join(f"{n} ({v})" for v, n in rolled)
+        return "Инициатива: " + " → ".join(
+            f"{name} ({value:g})" for value, name in rolled
+        )
 
     # ── Тело ─────────────────────────────────────────────────────────
 
@@ -205,10 +218,6 @@ class _Block:
 
         for event in self.items:
             if isinstance(event, GameEvent):
-                if event.action == "initiative":
-                    continue  # уже в шапке
-                if event.action in _SUMMARY_ACTIONS:
-                    continue  # уже в подвале
                 if event.action == "round_start":
                     round_no = event.detail.strip()
                     continue
@@ -216,8 +225,9 @@ class _Block:
                     lines.append("")
                     lines.append(_turn_heading(round_no, event))
                     continue
-                if event.action in _DETAIL_ACTIONS:
-                    lines.append(f"{_INDENT}· {_detail_line(event)}")
+                if event.action in _STRUCTURAL_ACTIONS:
+                    continue  # уже в шапке или подвале
+                lines.append(f"{_INDENT}· {_detail_line(event)}")
                 continue
 
             lines.append(f"{_INDENT}{_stamp(event)}{_said(event)}")
@@ -265,8 +275,13 @@ def _span(start: datetime | None, end: datetime | None) -> str:
 
 
 def _first_int(detail: str, key: str) -> int | None:
-    match = re.search(rf"\b{re.escape(key)}\s*=\s*(-?\d+)", detail)
-    return int(match.group(1)) if match else None
+    value = _first_number(detail, key)
+    return int(value) if value is not None else None
+
+
+def _first_number(detail: str, key: str) -> float | None:
+    match = re.search(rf"\b{re.escape(key)}\s*=\s*(-?\d+(?:\.\d+)?)", detail)
+    return float(match.group(1)) if match else None
 
 
 def _summarise(detail: str) -> str:
@@ -281,6 +296,9 @@ def _summarise(detail: str) -> str:
     if rounds is not None:
         parts.append(f"{rounds} {_plural_rounds(rounds)}")
     xp = _first_int(detail, "xp")
+    # XP печатается только ненулевой: «XP +0» — это не итог, а шум;
+    # раунды печатаются всегда, потому что бой из нуля раундов сам по
+    # себе новость.
     if xp:
         parts.append(f"XP +{xp}")
     return (" · " + " · ".join(parts)) if parts else ""

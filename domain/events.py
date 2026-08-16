@@ -21,7 +21,6 @@ class SpeechEvent:
     wall_clock: datetime | None = None
 
 
-
 @dataclass
 class ChatEvent:
     """Сообщение чата с закрытым набором каналов."""
@@ -31,11 +30,8 @@ class ChatEvent:
     author: str
     text: str
 
-    #: Когда это произошло по настенным часам сессии. Проставляется
-    #: мерджером из ``Timeline.recording_start``; ``None``, когда старт
-    #: записи или зона неизвестны — рендерер тогда печатает без времени.
+    #: Абсолютное время события — см. :attr:`SpeechEvent.wall_clock`.
     wall_clock: datetime | None = None
-
 
 
 @dataclass
@@ -58,11 +54,8 @@ class GameEvent:
     action: str
     detail: str
 
-    #: Когда это произошло по настенным часам сессии. Проставляется
-    #: мерджером из ``Timeline.recording_start``; ``None``, когда старт
-    #: записи или зона неизвестны — рендерер тогда печатает без времени.
+    #: Абсолютное время события — см. :attr:`SpeechEvent.wall_clock`.
     wall_clock: datetime | None = None
-
 
 
 ScriptEvent = SpeechEvent | ChatEvent | GameEvent

@@ -318,7 +318,6 @@ Rectangle {
                                 + "только внутри боёвки."
 
                             SelectField {
-                                id: rendererSelect
                                 Layout.fillWidth: true
                                 readonly property var values: ["plain-text", "combat-aware"]
                                 model: [

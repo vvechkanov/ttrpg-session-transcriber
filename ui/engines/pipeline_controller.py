@@ -390,7 +390,7 @@ class PipelineController(QObject):
         """
         if self._preferences is None:
             return "plain-text"
-        return getattr(self._preferences, "renderer", "") or "plain-text"
+        return self._preferences.renderer or "plain-text"
 
     def _is_excluded(self, row: int) -> bool:
         idx = self._tracks.index(row, 0)

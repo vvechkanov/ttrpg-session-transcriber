@@ -209,6 +209,7 @@ a = Analysis(  # noqa: F821 — PyInstaller injects Analysis
         "sources.game_log.fvtt_chat",
         "mergers.script_merger",
         "renderers.plain_text",
+        "renderers.combat_aware",
         # Qt Quick Controls Basic style plugin — the QQuickStyle.setStyle
         # call in ui/app_qml.py is a string lookup, so PyInstaller can't
         # see it. Missing this on Windows manifests as "QtQuick.Controls:
