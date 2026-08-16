@@ -113,11 +113,20 @@ def run(
     logger.info("Extracting speech via %s", params.speech_backend)
     speech_segments = speech_src.extract(session_dir)
 
+    # Discovered before the chat: the combat dumps double as a timezone
+    # anchor for the chat log (same events, one file in UTC and one in
+    # browser-local time), so FvttChatSource needs them up front.
+    combat_logs = detect_combat_logs(session_dir)
+
     chat_log = find_fvtt_chat_log(session_dir)
     chat_messages: list[ChatMessage] = []
     if chat_log is not None:
         info_file = find_info_file(session_dir)
-        chat_src = FvttChatSource(chat_log_path=chat_log, info_file_path=info_file)
+        chat_src = FvttChatSource(
+            chat_log_path=chat_log,
+            info_file_path=info_file,
+            combat_paths=combat_logs,
+        )
         stage_cb("chat", chat_log.name)
         logger.info("Extracting FVTT chat from %s", chat_log.name)
         chat_messages = chat_src.extract(session_dir)
@@ -125,7 +134,6 @@ def run(
         stage_cb("chat", "no chat log")
         logger.info("No FVTT chat log found in %s", session_dir)
 
-    combat_logs = detect_combat_logs(session_dir)
     game_log_entries: list[GameLogEntry] = []
     if combat_logs:
         info_file = find_info_file(session_dir)

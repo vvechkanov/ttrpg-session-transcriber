@@ -17,6 +17,22 @@ if TYPE_CHECKING:
     from sources.game_log.fvtt_chat import TzResolution
 
 
+def session_combat_paths(chat_log_path: Path) -> tuple[Path, ...]:
+    """Боевые дампы рядом с чат-логом — сырьё для таймзонного якоря.
+
+    Ищутся по папке чат-лога, а не отдельным аргументом: и чат-лог, и
+    дампы лежат в корне сессии (оба искателя нерекурсивные), так что
+    ``chat_log_path.parent`` — это и есть папка сессии. Отдельный
+    параметр только дал бы возможность передать несогласованную пару.
+
+    Публичная, потому что тем же вопросом задаётся
+    :func:`core.timeline_window.chat_span`.
+    """
+    from core.file_matchers import detect_combat_logs
+
+    return detect_combat_logs(chat_log_path.parent)
+
+
 def detect_fvtt_tz_offset(chat_log_path: Path, info_path: Path) -> float:
     """Автодетект UTC offset чат-лога — то же число, что возьмёт мерджер.
 
@@ -56,4 +72,6 @@ def describe_fvtt_tz(chat_log_path: Path, info_path: Path) -> TzResolution:
         return EMPTY_LOG_RESOLUTION
 
     rec_start = parse_info_start_time(info_path)
-    return resolve_tz_offset(entries, rec_start)
+    return resolve_tz_offset(
+        entries, rec_start, combat_paths=session_combat_paths(chat_log_path)
+    )

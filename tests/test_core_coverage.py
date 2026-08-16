@@ -62,20 +62,60 @@ class TestAnalyseCoverage:
     def test_combat_clock_follows_the_resolved_offset(
         self, tmp_path, pin_system_tz
     ):
-        """Combat times must not be printed in the machine's zone.
+        """Combat times must be printed in the offset the chat resolved to.
 
-        The session was played at +2. Open the folder on a laptop set to
-        UTC and the chat log still reads 7:11 PM — so the banner has to
-        as well, or the two disagree on screen. Pinning the ladder to a
-        different offset here is exactly that scenario.
+        Open a session recorded at +2 on a laptop set to UTC and the chat
+        log still reads 7:11 PM — so the banner has to as well, or the
+        two disagree on screen next to each other.
+
+        The dump here carries too few chat_messages for the combat anchor
+        to fire, which is what leaves the ladder on the system rung and
+        lets the test pin the resolved offset to something the OS zone
+        certainly is not.
         """
+        import json
+
         from core.coverage import analyse_coverage
 
         pin_system_tz(5.0)
-        report = analyse_coverage(_copy_fixture(tmp_path / "elsewhere"))
+        session = tmp_path / "elsewhere"
+        session.mkdir()
+        (session / "info.txt").write_text(
+            "Start time: 2026-08-15T18:00:00Z\n", encoding="utf-8"
+        )
+        (session / "fvtt-log-e.txt").write_text(
+            "[8/15/2026, 11:30:00 PM] GM\nhi\n---------------------------\n",
+            encoding="utf-8",
+        )
+        (session / "Бой 1.txt").write_text(
+            json.dumps({
+                "started_at": "2026-08-15T17:11:00Z",
+                "ended_at": "2026-08-15T17:40:00Z",
+            }),
+            encoding="utf-8",
+        )
+
+        report = analyse_coverage(session)
         assert report is not None
-        # 17:11:48Z rendered at +5, not at whatever the OS thinks.
+        # 17:11Z at the resolved +5 → 22:11, whatever the OS zone says.
         assert report.combats_missed[0][1] == "22:11"
+
+    def test_combat_anchor_decides_the_clock_when_available(
+        self, late_session, pin_system_tz
+    ):
+        """The dump, not the machine, must set the offset here.
+
+        The pin is moved to +9 on purpose: with it left at the true +2
+        the assertion passes whether or not coverage hands the combat
+        paths to the resolver, and the wiring goes untested. At +9 only
+        the anchor rung can produce these times.
+        """
+        from core.coverage import analyse_coverage
+
+        pin_system_tz(9.0)
+        report = analyse_coverage(late_session)
+        assert report.combats_missed[0][1:] == ("19:11", "20:18")
+        assert report.chat_dropped == 260
 
     def test_message_names_the_loss(self, late_session):
         from core.coverage import analyse_coverage

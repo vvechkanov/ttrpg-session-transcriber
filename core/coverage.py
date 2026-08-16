@@ -183,7 +183,9 @@ def _analyse_chat(session_dir: Path, info_start: datetime) -> _ChatFacts:
         return _ChatFacts()
 
     try:
-        offset = resolve_tz_offset(entries, info_start).offset_hours
+        offset = resolve_tz_offset(
+            entries, info_start, combat_paths=detect_combat_logs(session_dir)
+        ).offset_hours
     except (TypeError, ValueError):
         return _ChatFacts()
 

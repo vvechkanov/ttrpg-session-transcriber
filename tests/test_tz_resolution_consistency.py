@@ -18,6 +18,7 @@ from pathlib import Path
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
 CHAT_LOG = FIXTURE_DIR / "fvtt-log-fixture.txt"
 INFO = FIXTURE_DIR / "info.txt"
+COMBAT = FIXTURE_DIR / "combat.json"
 
 #: The session was played in CEST. Every consumer must land on this.
 TRUE_OFFSET = 2.0
@@ -50,16 +51,27 @@ def test_heuristic_alone_is_wrong_here():
 
 
 def test_merger_and_ui_helper_agree(tmp_path, pin_system_tz):
+    """Both must land on +2 without help from the machine's own zone.
+
+    The pin is a deliberately wrong +9. Leaving it at the true +2 would
+    let the system rung supply the right answer to both sides and the
+    test would pass even if the combat dump never reached either one.
+    """
     from core.fvtt_helpers import detect_fvtt_tz_offset
     from sources.game_log.fvtt_chat import FvttChatSource
 
-    pin_system_tz(TRUE_OFFSET)
+    pin_system_tz(9.0)
 
-    src = FvttChatSource(chat_log_path=CHAT_LOG, info_file_path=INFO)
+    src = FvttChatSource(
+        chat_log_path=CHAT_LOG,
+        info_file_path=INFO,
+        combat_paths=[COMBAT],
+    )
     src.extract(tmp_path)
 
     assert src.last_resolution is not None
     assert src.last_resolution.offset_hours == TRUE_OFFSET
+    assert src.last_resolution.source == "combat"
     assert detect_fvtt_tz_offset(CHAT_LOG, INFO) == src.last_resolution.offset_hours
 
 
@@ -92,9 +104,9 @@ def test_late_start_drops_pre_recording_chat(tmp_path, pin_system_tz):
 
     total = len(parse_fvtt_log(CHAT_LOG))
     kept = len(
-        FvttChatSource(chat_log_path=CHAT_LOG, info_file_path=INFO).extract(
-            tmp_path
-        )
+        FvttChatSource(
+            chat_log_path=CHAT_LOG, info_file_path=INFO, combat_paths=[COMBAT]
+        ).extract(tmp_path)
     )
     assert total == 353
     assert kept == 93
