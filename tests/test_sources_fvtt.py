@@ -680,3 +680,47 @@ class TestFindCombatOffset:
         dump = tmp_path / "Бой.txt"
         dump.write_text(json.dumps(payload), encoding="utf-8")
         assert find_combat_offset(self._entries(), [dump]) is None
+
+
+class TestAnchorQuantisation:
+    """The craig-start marker must not be rounded to a whole hour.
+
+    This is the reachable rung — it outranks everything below, so a zone
+    it cannot express is a zone the product cannot express.
+    """
+
+    def _resolve(self, marker_local, rec_start):
+        from sources.game_log.fvtt_chat import find_anchor_offset
+        entries = [
+            {"datetime": marker_local, "speaker": "GM", "text": "craig-start"}
+        ]
+        return find_anchor_offset(entries, rec_start)
+
+    def test_half_hour_zone_survives(self):
+        """India is UTC+5:30 — whole-hour rounding turned it into +6."""
+        rec = datetime(2026, 4, 25, 18, 9, 1, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 25, 23, 39, 5)  # +5:30, 4s of jitter
+        assert self._resolve(marker, rec) == 5.5
+
+    def test_quarter_hour_zone_survives(self):
+        """Nepal is UTC+5:45."""
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 25, 23, 45, 3)
+        assert self._resolve(marker, rec) == 5.75
+
+    def test_marker_jitter_is_still_absorbed(self):
+        """Sending the marker a few minutes late must not move the answer.
+
+        The quantum is 15 minutes, so anything under 7.5 rounds home.
+        """
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        for late_minutes in (0, 1, 4, 7):
+            marker = datetime(2026, 4, 25, 20, late_minutes, 0)
+            assert self._resolve(marker, rec) == 2.0, (
+                f"marker {late_minutes} min late moved the offset"
+            )
+
+    def test_absurd_marker_still_rejected(self):
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 27, 5, 0, 0)  # ~35 hours out
+        assert self._resolve(marker, rec) is None
