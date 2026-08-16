@@ -162,6 +162,7 @@ def build_shell(app: QGuiApplication) -> Shell:
         # ffprobe-stall on a malformed file would otherwise hang the
         # shell on folder-pick.
         worker.durationReady.connect(session_meta.setTotalSeconds)
+        worker.segmentDurationReady.connect(tracks_model.setSegmentDuration)
         worker.allDone.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

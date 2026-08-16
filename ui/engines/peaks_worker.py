@@ -60,6 +60,14 @@ class PeaksWorker(QObject):
     #: thread responsive.
     durationReady = Signal(float)
 
+    #: То же самое, но с адресом сегмента. Нужно, чтобы дорожка знала
+    #: собственную длину: без неё ``TrackSegment.duration_sec``
+    #: оставался ``None``, правый край сегмента считался за 100% лейна,
+    #: и заливка прогресса ASR доезжала до края экрана, а не до конца
+    #: звука. Скалярный ``durationReady`` остаётся — линейке нужен
+    #: максимум, а не адрес.
+    segmentDurationReady = Signal(int, int, float)
+
     #: Emitted when the whole batch is done (success or skip). QML
     #: can hide loading shimmer on this.
     allDone = Signal()
@@ -85,13 +93,14 @@ class PeaksWorker(QObject):
         # The probe is a metadata read (~20 ms) while a decode is
         # minutes, so this gets the ruler its full extent immediately
         # instead of growing it one slow file at a time.
-        for _row, _seg_idx, path_str in self._segments:
+        for row, seg_idx, path_str in self._segments:
             if self._cancelled:
                 self.allDone.emit()
                 return
             duration = probe_duration(Path(path_str))
             if duration > 0:
                 self.durationReady.emit(duration)
+                self.segmentDurationReady.emit(row, seg_idx, duration)
 
         # Then decode in parallel. Signals are emitted from this
         # thread as results land, not from the pool threads, so
