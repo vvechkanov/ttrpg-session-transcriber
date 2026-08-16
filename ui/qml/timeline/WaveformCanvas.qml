@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Layouts
 import App.Theme
 
 // Waveform with a phase-driven fill overlay.
@@ -9,14 +8,19 @@ import App.Theme
 // cached as <audio>.peaks.bin. An empty peaks list renders an empty
 // lane (used before extraction finishes on ingest).
 //
-// Two passes:
-//   1. `baseColor` — every bar at the "dry" muted grey.
-//   2. `fillColor` — the first `progress * N` bars on top, tinted.
+// Bars are downsampled to whatever fits the lane. core.peaks emits
+// DEFAULT_BIN_COUNT = 2000 values, and a lane is ~1100-1500 px wide:
+// one item per value cannot fit and never could. The previous version
+// laid the values out with a Repeater and a fixed 1.5 px gap, so the
+// gaps alone demanded ~3000 px and the computed bar width came out
+// *negative* — Qt draws nothing for a negative width, which is why no
+// real session ever showed a waveform. The prototype's ~100 fake peaks
+// happened to fit, so the arithmetic looked fine.
 //
-// The caller picks the fill colour by per-track status (accent for
-// normal ASR, green for cached, purple for whisper-override, redSoft
-// for failed) via the `fillColor` prop.
-Item {
+// Painting instead of instantiating is also the right shape: 2000
+// Rectangles per lane across six lanes is 12 000 scene-graph nodes for
+// what is one static picture per track.
+Canvas {
     id: root
 
     property var peaks: []            // list<real>
@@ -30,46 +34,64 @@ Item {
 
     readonly property real _minHeight: 2
     readonly property real _padX: 2
-    readonly property real _gap: 1.5
+    readonly property real _gap: 1
+    readonly property real _minBarWidth: 1.5
 
-    Row {
-        anchors.fill: parent
-        anchors.leftMargin: root._padX
-        anchors.rightMargin: root._padX
-        spacing: root._gap
+    // How many bars actually fit, never more than we have data for:
+    // stretching 200 values across 400 bars would invent detail that
+    // was never decoded.
+    readonly property int _barCount: {
+        const n = peaks ? peaks.length : 0
+        if (n === 0 || width <= 2 * _padX)
+            return 0
+        const fits = Math.floor(
+            (width - 2 * _padX + _gap) / (_minBarWidth + _gap)
+        )
+        return Math.max(1, Math.min(n, fits))
+    }
 
-        Repeater {
-            model: root.peaks
+    onPeaksChanged: requestPaint()
+    onProgressChanged: requestPaint()
+    onMutedChanged: requestPaint()
+    onFillColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
 
-            delegate: Item {
-                width: (root.width - 2 * root._padX
-                        - root._gap * (root.peaks.length - 1))
-                       / Math.max(root.peaks.length, 1)
-                height: root.height
+    onPaint: {
+        const ctx = getContext("2d")
+        ctx.reset()
 
-                // Phase-fill tint decision for this bar:
-                //   fraction of this bar's left edge ≤ progress → use
-                //   `fillColor`; otherwise `baseColor`.
-                readonly property real _barFrac:
-                    index / Math.max(root.peaks.length, 1)
-                readonly property bool _isFilled: _barFrac < root.progress
+        const bars = _barCount
+        if (bars === 0)
+            return
 
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width
-                    height: Math.max(
-                        root._minHeight,
-                        (modelData * 0.8 + 0.15) * root.height
-                    )
-                    radius: 1.5
-                    color: parent._isFilled ? root.fillColor : root.baseColor
+        const values = peaks
+        const total = values.length
+        const pitch = (width - 2 * _padX) / bars
+        const barW = Math.max(_minBarWidth, pitch - _gap)
+        const filledUntil = Math.round(progress * bars)
 
-                    Behavior on color {
-                        ColorAnimation { duration: 220 }
-                    }
-                }
+        for (let i = 0; i < bars; ++i) {
+            // Bucket maximum, not average: peaks exist to show where
+            // sound happened, and averaging flattens a short loud
+            // syllable into the surrounding silence.
+            const from = Math.floor(i * total / bars)
+            const to = Math.max(from + 1, Math.floor((i + 1) * total / bars))
+            let peak = 0
+            for (let k = from; k < to && k < total; ++k) {
+                const v = values[k]
+                if (v > peak)
+                    peak = v
             }
+
+            const h = Math.max(_minHeight, (peak * 0.8 + 0.15) * height)
+            ctx.fillStyle = i < filledUntil ? fillColor : baseColor
+            ctx.fillRect(
+                _padX + i * pitch,
+                (height - h) / 2,
+                barW,
+                h
+            )
         }
     }
 }
