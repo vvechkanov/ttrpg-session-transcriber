@@ -166,17 +166,27 @@ class PipelineController(QObject):
         # what a first-time user used to get. One sentence pointing at
         # the Models screen is the whole fix.
         if self._registry is not None and not self._registry.anyInstalled:
+            # Сбрасываем перед установкой: сеттеры режут по равенству,
+            # и повторное «Повторить» без модели иначе не поднимает ни
+            # одного сигнала — кнопка ощущается мёртвой.
+            self._app.setErrorMessage("")
+            self._app.setErrorTitle("Распознавание не запущено")
             self._app.setErrorMessage(
                 "Не установлена ни одна модель распознавания. "
                 "Откройте раздел «Модели» и установите рекомендованную — "
                 "это делается один раз."
             )
+            # Without the phase the message is invisible: it renders
+            # inside FailedBanner, which is bound to phase === "failed".
+            self._app.phase = "failed"
+            self.finished.emit()
             return
 
         self._tracks.resetProgress()
         self._tracks.resetStates()
         self._app.clearMergeState()
         self._app.setErrorMessage("")
+        self._app.setErrorTitle("")
         if self._output_path:
             self._output_path = ""
             self.outputPathChanged.emit()
@@ -533,6 +543,8 @@ class PipelineController(QObject):
             # No real session open — nothing to write merged.txt to.
             # Surface as an error phase so the UI stops on "failed"
             # rather than spinning.
+            self._app.setErrorMessage("")
+            self._app.setErrorTitle("Распознавание не запущено")
             self._app.setErrorMessage(
                 "Сессия не выбрана — откройте папку перед запуском."
             )

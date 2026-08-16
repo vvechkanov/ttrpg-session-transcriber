@@ -36,7 +36,8 @@ from PySide6.QtGui import QGuiApplication
 from domain.annotations import SpeechSegment
 from sources.base import Source
 from ui.engines import PipelineController
-from ui.models import AppModel, ModelRegistry, SessionMeta, SourceListModel, TrackListModel
+from tests.conftest import RegistryStub
+from ui.models import AppModel, SessionMeta, SourceListModel, TrackListModel
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +102,17 @@ class _FakeSource(Source):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_pipeline(app_model, tracks_model, session_meta):
+def _build_pipeline(app_model, tracks_model, session_meta, *, installed=True):
     """Wire up a PipelineController the same way app_qml.main() does."""
-    model_registry = ModelRegistry()
+    model_registry = RegistryStub(any_installed=installed)
     pipeline = PipelineController(app_model, tracks_model, session_meta, model_registry)
     session_meta.sessionOpened.connect(tracks_model.loadFromDir)
-    session_meta.sessionOpened.connect(SourceListModel().loadFromDir)
+    # Kept alive on the pipeline: connecting a temporary receiver looks
+    # like wiring but is not — PySide drops the connection with the
+    # object, so this lane never loaded and the "same way app_qml does"
+    # claim was only half true.
+    pipeline._test_sources_model = SourceListModel()
+    session_meta.sessionOpened.connect(pipeline._test_sources_model.loadFromDir)
     return pipeline
 
 
@@ -273,4 +279,52 @@ def test_pipeline_failed_when_no_session_open(qtbot, monkeypatch):
     )
     assert app_model.errorMessage, (
         "errorMessage must be non-empty when no session is open"
+    )
+
+
+@pytest.mark.gui
+def test_run_without_a_model_refuses_visibly(qtbot, two_track_session, monkeypatch):
+    """Pressing Run with no model installed must say so on screen.
+
+    The refusal used to set an error message and return. That message
+    renders only inside FailedBanner, which is bound to
+    ``phase === "failed"`` — and the phase stayed "idle", so the banner
+    never appeared. A first-time user pressed the button and nothing
+    happened at all: no run, no error, no explanation.
+
+    It also never emitted ``finished``, which is what left three tests
+    in this module timing out on any machine without a model — every
+    CI job, and nobody's laptop.
+    """
+    _ensure_app()
+
+    session_dir, _tracks = two_track_session
+    fake_source = _FakeSource()
+    monkeypatch.setattr("core.asr.make_source", lambda model_id, **kw: fake_source)
+    monkeypatch.setattr(
+        "ui.engines.pipeline_controller.make_source",
+        lambda model_id, **kw: fake_source,
+    )
+
+    app_model = AppModel()
+    tracks_model = TrackListModel()
+    session_meta = SessionMeta()
+    pipeline = _build_pipeline(
+        app_model, tracks_model, session_meta, installed=False
+    )
+    session_meta.openSession(str(session_dir))
+
+    with qtbot.waitSignal(pipeline.finished, timeout=5_000):
+        pipeline.runAsr()
+
+    assert app_model.phase == "failed", (
+        "phase must be 'failed' or FailedBanner stays hidden and the "
+        "message is invisible"
+    )
+    assert "Модели" in app_model.errorMessage, (
+        f"the message should point at the Models screen; "
+        f"got {app_model.errorMessage!r}"
+    )
+    assert not (session_dir / "merged.txt").exists(), (
+        "nothing should have been transcribed"
     )
