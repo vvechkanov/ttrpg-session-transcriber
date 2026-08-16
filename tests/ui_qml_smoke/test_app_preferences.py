@@ -134,3 +134,12 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _renderer_round_trip() -> None:
+    """The renderer choice must survive a restart like its neighbours."""
+    prefs = AppPreferences()
+    assert prefs.renderer == "plain-text", "default must stay the old format"
+
+    prefs.renderer = "combat-aware"
+    assert AppPreferences().renderer == "combat-aware"

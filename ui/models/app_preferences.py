@@ -13,6 +13,7 @@ Keys grouped by section:
 * ``merger/max_gap``         — free-form seconds (string so the
                                TextField doesn't round-trip via float)
 * ``merger/ooc_mode``        — "skip" | "italic" | "include"
+* ``merger/renderer``        — "plain-text" | "combat-aware"
 * ``interface/language``     — "ru" | "en"
 * ``interface/show_tooltips`` — bool
 * ``interface/sound_on_done`` — bool
@@ -54,6 +55,7 @@ class AppPreferences(QObject):
     workingFolderChanged = Signal()
     mergerMaxGapChanged = Signal()
     mergerOocModeChanged = Signal()
+    rendererChanged = Signal()
     interfaceLanguageChanged = Signal()
     showTooltipsChanged = Signal()
     soundOnDoneChanged = Signal()
@@ -86,6 +88,12 @@ class AppPreferences(QObject):
         )
         self._merger_ooc_mode: str = str(
             self._settings.value("merger/ooc_mode", "skip")
+        )
+        # Формат merged.txt. По умолчанию plain-text: он и был всегда,
+        # и вне боя combat-aware от него не отличается — так что смена
+        # ничего не ломает, но выбирает её пользователь, а не мы.
+        self._renderer: str = str(
+            self._settings.value("merger/renderer", "plain-text")
         )
         self._interface_language: str = str(
             self._settings.value("interface/language", "ru")
@@ -175,6 +183,20 @@ class AppPreferences(QObject):
         self._settings.setValue("merger/ooc_mode", value)
         self._settings.sync()
         self.mergerOocModeChanged.emit()
+
+    # ── renderer ─────────────────────────────────────────────────────
+    @Property(str, notify=rendererChanged)
+    def renderer(self) -> str:
+        return self._renderer
+
+    @renderer.setter  # type: ignore[no-redef]
+    def renderer(self, value: str) -> None:
+        if value == self._renderer:
+            return
+        self._renderer = value
+        self._settings.setValue("merger/renderer", value)
+        self._settings.sync()
+        self.rendererChanged.emit()
 
     # ── interfaceLanguage ────────────────────────────────────────────
     @Property(str, notify=interfaceLanguageChanged)

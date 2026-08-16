@@ -1,10 +1,33 @@
 """ScriptMerger: Timeline → sorted list[ScriptEvent] with same-speaker gluing."""
 
+from datetime import datetime, timedelta
+
 from domain.annotations import SpeechSegment
 from domain.events import ChatEvent, GameEvent, ScriptEvent, SpeechEvent
 from domain.timeline import Timeline
 
 from mergers.base import Merger
+
+
+def _stamp_wall_clock(
+    events: list[ScriptEvent], recording_start: datetime | None
+) -> None:
+    """Проставить событиям абсолютное время, если оно известно.
+
+    Мерджер — единственное место, где встречаются относительные ``at``
+    и старт записи, поэтому штамп ставится здесь, а не в рендерере: так
+    контракт ``render(events) -> bytes`` остаётся нетронутым, а время
+    достаётся любому будущему рендереру даром.
+
+    ``recording_start`` уже в зоне сессии (см. :class:`Timeline`), и
+    арифметика над aware-datetime зону сохраняет — значит форматировать
+    можно прямо, без дополнительных знаний о таймзонах.
+    """
+    if recording_start is None:
+        return
+    for event in events:
+        offset = event.start if isinstance(event, SpeechEvent) else event.at
+        event.wall_clock = recording_start + timedelta(seconds=offset)
 
 
 def _event_sort_key(e: ScriptEvent) -> tuple[float, int]:
@@ -121,5 +144,8 @@ class ScriptMerger(Merger):
         events: list[ScriptEvent] = [*speech_events, *chat_events, *game_events]
         events.sort(key=_event_sort_key)
 
-        # Step 7
+        # Step 7: stamp wall-clock times, if the session knows them.
+        _stamp_wall_clock(events, timeline.recording_start)
+
+        # Step 8
         return events

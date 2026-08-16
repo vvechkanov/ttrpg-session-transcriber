@@ -17,10 +17,11 @@ from core.chunking import ChunkingOptions, chunk_text_file
 from core.discovery import find_fvtt_chat_log, find_info_file
 from core.file_matchers import detect_combat_logs
 from core.gpu_check import check_gpu_or_warn
+from core.session_clock import session_clock_start
 from domain.annotations import ChatMessage, GameLogEntry
 from domain.timeline import Timeline
 from mergers import MERGERS
-from renderers import RENDERERS
+from renderers import get_renderer
 from sources import SPEECH_SOURCES
 from sources.base import Source
 from sources.game_log.combat_dump import CombatDumpSource
@@ -157,6 +158,7 @@ def run(
         emotions=[],
         chat=chat_messages,
         game_log=game_log_entries,
+        recording_start=session_clock_start(session_dir, chat_log),
     )
 
     stage_cb("merge", params.merger)
@@ -164,7 +166,7 @@ def run(
     events = merger.merge(timeline)
 
     stage_cb("render", params.renderer)
-    renderer = RENDERERS[params.renderer]()
+    renderer = get_renderer(params.renderer)
     payload = renderer.render(events)
 
     output_path = session_dir / params.output_filename

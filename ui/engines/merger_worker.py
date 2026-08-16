@@ -2,7 +2,7 @@
 
 Phase 7 wiring: replaces the Phase 5 simulated loop with a real call
 into :class:`mergers.script_merger.ScriptMerger` +
-:class:`renderers.plain_text.PlainTextRenderer`. The "render" phase
+:class:`renderers.base.Renderer` chosen by name. The "render" phase
 from ``core.pipeline.run`` is collapsed inside this worker — the
 handoff's timeline exposes only ``idle/asr/merge/done``, and the
 renderer call is an implementation detail of the merge step.
@@ -25,6 +25,7 @@ events and before the renderer write.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -32,8 +33,11 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from domain.annotations import ChatMessage, GameLogEntry, SpeechSegment
 from domain.timeline import Timeline
 from mergers.script_merger import ScriptMerger
-from renderers.plain_text import PlainTextRenderer
+from core.session_clock import session_clock_start
+from renderers import RENDERERS, Renderer
 
+
+logger = logging.getLogger(__name__)
 
 class MergerWorker(QObject):
     """One-shot worker that glues segments + chat into a merged.txt file."""
@@ -66,6 +70,7 @@ class MergerWorker(QObject):
         total_duration: float = 0.0,
         gap_sec: float = 1.0,
         combat_log_paths: list[Path] | None = None,
+        renderer_name: str = "plain-text",
     ) -> None:
         super().__init__()
         self._session_dir = session_dir
@@ -74,6 +79,7 @@ class MergerWorker(QObject):
         self._total_duration = float(total_duration)
         self._gap_sec = float(gap_sec)
         self._combat_log_paths = list(combat_log_paths or [])
+        self._renderer_name = renderer_name
         self._cancelled = False
 
     @Slot()
@@ -107,6 +113,13 @@ class MergerWorker(QObject):
                 emotions=[],
                 chat=chat_messages,
                 game_log=game_log_entries,
+                # Без этого ни одно событие не получает абсолютного
+                # времени, и рендерер, который умеет печатать часы,
+                # печатает пустоту. GUI не ходит через core.pipeline,
+                # так что считать это надо здесь же.
+                recording_start=session_clock_start(
+                    self._session_dir, self._chat_log_path
+                ),
             )
             if self._should_cancel():
                 return
@@ -116,7 +129,7 @@ class MergerWorker(QObject):
             # ── Stage 4 of 4: render + write ───────────────────────
             if self._should_cancel():
                 return
-            payload = PlainTextRenderer().render(events)
+            payload = _renderer_for(self._renderer_name).render(events)
 
             output_path = self._session_dir / "merged.txt"
             output_path.write_bytes(payload)
@@ -179,3 +192,20 @@ class MergerWorker(QObject):
                 # Сломанный/пустой dump не должен валить весь merge.
                 continue
         return entries
+
+
+def _renderer_for(name: str) -> Renderer:
+    """Рендерер по имени, с падением на plain-text.
+
+    Имя живёт в QSettings и переживает код, который его знал. Уронить
+    здесь мердж, который уже отработал, ради выбора формата вывода —
+    худшее, что можно сделать; поэтому неизвестное имя это предупреждение
+    в лог, а не исключение. CLI на том же месте падает намеренно: там имя
+    пришло из аргументов команды прямо сейчас, и молчаливая подмена
+    формата скрыла бы опечатку.
+    """
+    renderer_cls = RENDERERS.get(name)
+    if renderer_cls is None:
+        logger.warning("unknown renderer %r, falling back to plain-text", name)
+        renderer_cls = RENDERERS["plain-text"]
+    return renderer_cls()

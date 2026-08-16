@@ -6,7 +6,7 @@ default / absent callback path still works (byte-compat with earlier
 tests and CLI callers).
 
 We mock out ``SPEECH_SOURCES`` / ``find_fvtt_chat_log`` / ``MERGERS``
-/ ``RENDERERS`` / ``check_gpu_or_warn`` so the test never touches
+/ ``get_renderer`` / ``check_gpu_or_warn`` so the test never touches
 real ASR backends or GPU detection.
 """
 
@@ -48,7 +48,10 @@ def patched_pipeline(monkeypatch: pytest.MonkeyPatch):
         "core.pipeline.SPEECH_SOURCES", {"fake": _FakeSource}
     )
     monkeypatch.setattr("core.pipeline.MERGERS", {"script": _FakeMerger})
-    monkeypatch.setattr("core.pipeline.RENDERERS", {"plain-text": _FakeRenderer})
+    # pipeline resolves through get_renderer() so an unknown name in a
+    # CLI argument raises where the user typed it, instead of silently
+    # producing a different format.
+    monkeypatch.setattr("core.pipeline.get_renderer", lambda name: _FakeRenderer())
     monkeypatch.setattr("core.pipeline.check_gpu_or_warn", lambda device: None)
     monkeypatch.setattr(
         "core.pipeline.find_fvtt_chat_log", lambda session_dir: None
