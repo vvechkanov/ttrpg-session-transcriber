@@ -419,3 +419,80 @@ class TestWindowCoversTimeBeforeRecording:
         assert window.recording_start is None
         assert window.recording_start_pct == 0.0
         assert window.covers_time_before_recording is False
+
+
+class TestEventDensity:
+    """Real event positions, replacing the fabricated tick comb.
+
+    SourceLaneRow used to draw 12-18 ticks at positions derived from the
+    parser id's character codes — the same pattern on every session,
+    described in the source as a "content density suggestion". It looked
+    like data. These are the actual moments instead.
+    """
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def test_combat_events_are_parsed(self):
+        meta = parse_combat_file(self.FIXTURE / "combat.json")
+        assert meta is not None
+        assert len(meta.events) == 170
+        assert all(e.tzinfo is not None for e in meta.events)
+        # Every roll belongs inside the encounter it came from.
+        assert min(meta.events) >= meta.started_at
+        assert max(meta.events) <= meta.ended_at
+
+    def test_combat_events_default_to_empty(self):
+        """A dump without chat_messages still parses — just no ticks."""
+        meta = CombatMeta(
+            started_at=datetime(2026, 8, 15, 17, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 8, 15, 18, 0, tzinfo=timezone.utc),
+            label="Бой",
+        )
+        assert meta.events == ()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"rounds": {"1": {}}},
+            {"rounds": "nope"},
+            {"rounds": [{"turns": ["x"]}]},
+            {"rounds": [{"turns": [{"chat_messages": [["a"]]}]}]},
+        ],
+    )
+    def test_malformed_dump_yields_no_events(self, tmp_path, payload):
+        """Wrong types must cost the ticks, not raise out of a parser."""
+        import json
+
+        payload = dict(payload)
+        payload["started_at"] = "2026-08-15T17:00:00Z"
+        payload["ended_at"] = "2026-08-15T18:00:00Z"
+        path = tmp_path / "Бой.txt"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        meta = parse_combat_file(path)
+        assert meta is not None
+        assert meta.events == ()
+
+    def test_chat_events_land_where_the_merger_puts_them(self, pin_system_tz):
+        """Ticks must agree with the offset the merge will actually use."""
+        from core.timeline_window import chat_events
+
+        pin_system_tz(9.0)  # deliberately wrong; the combat anchor wins
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        moments = chat_events(self.FIXTURE / "fvtt-log-fixture.txt", info_start)
+
+        assert len(moments) == 353
+        assert list(moments) == sorted(moments)
+        # First entry is 18:55:09 local at the true +2 → 16:55:09Z.
+        assert moments[0] == datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+
+    def test_chat_events_empty_without_info_start(self):
+        from core.timeline_window import chat_events
+
+        assert chat_events(self.FIXTURE / "fvtt-log-fixture.txt", None) == ()
+
+    def test_chat_events_empty_for_missing_file(self, tmp_path):
+        from core.timeline_window import chat_events
+
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        assert chat_events(tmp_path / "nope.txt", info_start) == ()

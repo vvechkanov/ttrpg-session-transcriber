@@ -40,6 +40,7 @@ from core.speaker_map import load_speaker_map_raw, migrate_legacy_speaker_map
 from core.timeline_window import (
     TimelineWindow,
     build_window,
+    chat_events,
     chat_span,
     display_offset_hours,
     parse_combat_file,
@@ -1174,6 +1175,11 @@ class SourceEntry:
     file_name: str
     start_pct: float
     end_pct: float
+    #: Позиции реальных событий на линейке, 0..100 — сообщения чата или
+    #: боевые броски. Пусто, если разобрать не удалось: тогда полоса
+    #: ровная. Раньше здесь рисовалась псевдослучайная гребёнка,
+    #: зависящая только от имени парсера, и выглядела она как данные.
+    density: tuple[float, ...] = ()
 
 
 #: SourceListModel also starts empty — populated only after folder drop.
@@ -1186,6 +1192,7 @@ class SourceListModel(QAbstractListModel):
     FileRole     = Qt.ItemDataRole.UserRole + 3
     StartRole    = Qt.ItemDataRole.UserRole + 4
     EndRole      = Qt.ItemDataRole.UserRole + 5
+    DensityRole  = Qt.ItemDataRole.UserRole + 6
 
     _ROLES = {
         ParserIdRole: b"parserId",
@@ -1193,6 +1200,7 @@ class SourceListModel(QAbstractListModel):
         FileRole:     b"fileName",
         StartRole:    b"startPct",
         EndRole:      b"endPct",
+        DensityRole:  b"density",
     }
 
     def __init__(self, parent: Any = None) -> None:
@@ -1217,6 +1225,7 @@ class SourceListModel(QAbstractListModel):
             case SourceListModel.FileRole:     return s.file_name
             case SourceListModel.StartRole:    return s.start_pct
             case SourceListModel.EndRole:      return s.end_pct
+            case SourceListModel.DensityRole:  return list(s.density)
         return None
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -1259,9 +1268,20 @@ class SourceListModel(QAbstractListModel):
         # Chat span is derived from the *first* chat log only. Real
         # sessions carry at most one fvtt-log-*.txt per export; if
         # more show up later we'd need a policy for merging spans.
+        # One parse per chat log, reused for the span, the density
+        # ticks and the window. The span used to be taken by a separate
+        # chat_span() call per row, which re-read and re-parsed the same
+        # file each time.
+        chat_moments: dict[Path, tuple] = {}
+        for path in chat_paths:
+            moments = chat_events(path, info_start)
+            if moments:
+                chat_moments[path] = moments
+
         chat_range: tuple | None = None
-        if chat_paths:
-            chat_range = chat_span(chat_paths[0], info_start)
+        if chat_paths and chat_paths[0] in chat_moments:
+            first = chat_moments[chat_paths[0]]
+            chat_range = (first[0], first[-1])
 
         combat_metas: list = []
         for combat_path in combat_paths:
@@ -1283,18 +1303,21 @@ class SourceListModel(QAbstractListModel):
 
         new_rows: list[SourceEntry] = []
         for path in chat_paths:
-            span = chat_span(path, info_start) if window is not None else None
-            if window is not None and span is not None:
-                start_pct = window.pct_for(span[0])
-                end_pct = window.pct_for(span[1])
+            moments = chat_moments.get(path, ())
+            if window is not None and moments:
+                start_pct = window.pct_for(moments[0])
+                end_pct = window.pct_for(moments[-1])
+                density = tuple(window.pct_for(m) for m in moments)
             else:
                 start_pct, end_pct = 0.0, 100.0
+                density = ()
             new_rows.append(SourceEntry(
                 parser_id="foundry-chat",
                 label="Foundry чат",
                 file_name=path.name,
                 start_pct=start_pct,
                 end_pct=end_pct,
+                density=density,
             ))
 
         # Re-parse each combat file so row order matches ``combat_paths``
@@ -1306,14 +1329,17 @@ class SourceListModel(QAbstractListModel):
             if window is not None and meta is not None:
                 start_pct = window.pct_for(meta.started_at)
                 end_pct = window.pct_for(meta.ended_at)
+                density = tuple(window.pct_for(m) for m in meta.events)
             else:
                 start_pct, end_pct = 0.0, 100.0
+                density = ()
             new_rows.append(SourceEntry(
                 parser_id="combat-log",
                 label="Боевой лог",
                 file_name=path.name,
                 start_pct=start_pct,
                 end_pct=end_pct,
+                density=density,
             ))
 
         self.beginResetModel()

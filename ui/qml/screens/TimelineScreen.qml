@@ -306,6 +306,7 @@ Rectangle {
                                             fileName:    model.fileName
                                             startPct:    model.startPct
                                             endPct:      model.endPct
+                                            density:     model.density
                                         }
                                     }
 

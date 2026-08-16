@@ -46,6 +46,10 @@ class CombatMeta:
     started_at: datetime  # UTC, tz-aware
     ended_at: datetime    # UTC, tz-aware
     label: str            # path.stem, e.g. "Бой 1"
+    #: Моменты отдельных боевых сообщений (UTC), для плотности на
+    #: полосе. Пусто, если дамп их не несёт — полоса тогда просто
+    #: ровная, без штрихов, и это честнее выдуманной гребёнки.
+    events: tuple[datetime, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,7 +195,44 @@ def parse_combat_file(path: Path) -> CombatMeta | None:
     if ended < started:
         return None
 
-    return CombatMeta(started_at=started, ended_at=ended, label=path.stem)
+    return CombatMeta(
+        started_at=started,
+        ended_at=ended,
+        label=path.stem,
+        events=_combat_events(data),
+    )
+
+
+def _combat_events(data: dict) -> tuple[datetime, ...]:
+    """Моменты боевых сообщений из уже разобранного дампа.
+
+    Тип проверяется на каждом уровне, а не гасится через ``or []``:
+    массив, приехавший объектом (``{"rounds": {"1": ...}}``), иначе
+    роняет ``AttributeError`` из функции, которая обещала не бросать.
+    """
+    moments: list[datetime] = []
+    rounds = data.get("rounds")
+    if not isinstance(rounds, list):
+        return ()
+    for round_data in rounds:
+        if not isinstance(round_data, dict):
+            continue
+        turns = round_data.get("turns")
+        if not isinstance(turns, list):
+            continue
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            messages = turn.get("chat_messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                moment = _parse_iso_utc(message.get("timestamp"))
+                if moment is not None:
+                    moments.append(moment)
+    return tuple(moments)
 
 
 def _parse_iso_utc(value: object) -> datetime | None:
@@ -212,6 +253,47 @@ def _parse_iso_utc(value: object) -> datetime | None:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt
+
+
+def chat_events(
+    chat_log_path: Path, info_start: datetime | None
+) -> tuple[datetime, ...]:
+    """Моменты всех сообщений чата в UTC, по возрастанию.
+
+    Для плотности на полосе источника. Пустой кортеж — если разобрать
+    не удалось; полоса тогда рисуется ровной, без штрихов.
+
+    Офсет берётся тем же резолвером, что у мерджера: штрихи обязаны
+    стоять там же, где события реально лягут в ``merged.txt``.
+    """
+    if info_start is None:
+        return ()
+
+    try:
+        from core.fvtt_helpers import session_combat_paths
+        from sources.game_log.fvtt_chat import parse_fvtt_log, resolve_tz_offset
+    except ImportError:
+        return ()
+
+    try:
+        entries = parse_fvtt_log(chat_log_path)
+    except (OSError, UnicodeError, ValueError):
+        return ()
+    if not entries:
+        return ()
+
+    info_utc = info_start.astimezone(timezone.utc)
+    try:
+        offset = resolve_tz_offset(
+            entries, info_utc, combat_paths=session_combat_paths(chat_log_path)
+        ).offset_hours
+    except (TypeError, ValueError):
+        return ()
+
+    moments = [
+        _local_to_utc(entry["datetime"], offset) for entry in entries
+    ]
+    return tuple(sorted(m for m in moments if m is not None))
 
 
 def chat_span(
@@ -437,6 +519,7 @@ __all__ = [
     "parse_info_start",
     "parse_combat_file",
     "chat_span",
+    "chat_events",
     "build_window",
     "display_offset_hours",
 ]
