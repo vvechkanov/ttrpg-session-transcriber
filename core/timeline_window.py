@@ -59,6 +59,25 @@ class TimelineWindow:
 
     t0: datetime      # UTC, tz-aware
     t_end: datetime   # UTC, tz-aware, > t0
+    #: Когда Craig начал писать. ``None`` — нет ``info.txt``. Отдельно
+    #: от ``t0``, потому что запись может начаться позже сессии: чат и
+    #: бои живут левее её, и это надо было уметь показать.
+    recording_start: datetime | None = None
+
+    @property
+    def recording_start_pct(self) -> float:
+        """Где на линейке начинается запись. ``0.0`` если старт неизвестен.
+
+        Всё левее этой отметки — материал, у которого нет аудио.
+        """
+        if self.recording_start is None:
+            return 0.0
+        return self.pct_for(self.recording_start)
+
+    @property
+    def covers_time_before_recording(self) -> bool:
+        """``True``, если в окне есть что-то до старта записи."""
+        return self.recording_start_pct > 0.0
 
     def pct_for(self, ts: datetime) -> float:
         """Map an absolute UTC timestamp to a 0..100 position.
@@ -263,6 +282,43 @@ def chat_span(
     return first_utc, last_utc
 
 
+def display_offset_hours(
+    chat_log_path: Path | None, info_start: datetime | None
+) -> float:
+    """На сколько сдвигать UTC, чтобы показать время так, как его видели.
+
+    Линейка обязана называть тот же час, что стоит в чат-логе у
+    пользователя на экране, поэтому смещение берётся из того же
+    резолвера, что и у мерджера, — по чат-логу и боевым дампам.
+
+    Без чат-лога брать неоткуда: тогда зона машины, но **на дату
+    сессии**, а не на сегодня, иначе зимняя сессия, открытая летом,
+    покажет время на час мимо. Совсем без якорей — ``0.0``.
+    """
+    if chat_log_path is not None and info_start is not None:
+        try:
+            from core.fvtt_helpers import session_combat_paths
+            from sources.game_log.fvtt_chat import parse_fvtt_log, resolve_tz_offset
+
+            entries = parse_fvtt_log(chat_log_path)
+            if entries:
+                return resolve_tz_offset(
+                    entries,
+                    info_start.astimezone(timezone.utc),
+                    combat_paths=session_combat_paths(chat_log_path),
+                ).offset_hours
+        except (ImportError, OSError, UnicodeError, TypeError, ValueError):
+            pass
+
+    if info_start is None:
+        return 0.0
+    try:
+        offset = info_start.astimezone().utcoffset()
+    except (ValueError, OSError):
+        return 0.0
+    return offset.total_seconds() / 3600 if offset is not None else 0.0
+
+
 def _local_to_utc(local_dt: datetime, tz_offset_hours: float) -> datetime | None:
     """Convert a naive local-time ``datetime`` to UTC.
 
@@ -303,8 +359,9 @@ def build_window(
     Policy (see :doc:`../docs/adr/ADR-016-module-ui-contract.md` — no,
     actually documented only here because 3a is scoped small):
 
-    * ``t0 = info_start`` if known, else the earliest of
-      ``chat.first`` and ``combat.started_at``.
+    * ``t0`` = the earliest of ``info_start``, ``chat.first`` and every
+      ``combat.started_at``. The recording is one anchor among them,
+      not the origin: it can start after the session did.
     * ``t_end = max(info_start + max_track_duration, chat.last,
       max(combat.ended_at), info_start + default_hours)``.
       The default-hours floor prevents a window that's just 2 minutes
@@ -330,14 +387,17 @@ def build_window(
     if not candidates_start:
         return None
 
-    # Prefer info_start for t0 (it's the only anchor we can trust to be
-    # the recording start — chat/combat events happen *after* tracking
-    # begins). Only fall back to the earliest event if info_start is
-    # missing entirely.
-    if info_start is not None:
-        t0 = info_start.astimezone(timezone.utc)
-    else:
-        t0 = min(candidates_start)
+    # The window starts at the earliest thing that happened, which is
+    # not necessarily the recording. Anchoring t0 on info_start (as this
+    # did) assumes chat and combat only ever happen *after* Record is
+    # pressed — and when someone hits Record late, everything before it
+    # clamps onto 0% instead: the chat bar pretends to start with the
+    # audio and an encounter that ended before the recording collapses
+    # to zero width. On a real session that drew a whole fight as a
+    # one-pixel tick directly underneath a banner announcing it had no
+    # audio. Where the recording sits is kept separately, in
+    # ``recording_start``, so the UI can shade the part with no sound.
+    t0 = min(candidates_start)
 
     candidates_end: list[datetime] = []
     if info_start is not None and max_track_duration is not None and max_track_duration > 0:
@@ -362,7 +422,13 @@ def build_window(
     if (t_end - t0).total_seconds() < _MIN_WINDOW_SECONDS:
         return None
 
-    return TimelineWindow(t0=t0, t_end=t_end)
+    return TimelineWindow(
+        t0=t0,
+        t_end=t_end,
+        recording_start=(
+            info_start.astimezone(timezone.utc) if info_start is not None else None
+        ),
+    )
 
 
 __all__ = [
@@ -372,4 +438,5 @@ __all__ = [
     "parse_combat_file",
     "chat_span",
     "build_window",
+    "display_offset_hours",
 ]

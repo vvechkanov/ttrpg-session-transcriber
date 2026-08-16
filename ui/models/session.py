@@ -41,6 +41,7 @@ from core.timeline_window import (
     TimelineWindow,
     build_window,
     chat_span,
+    display_offset_hours,
     parse_combat_file,
     parse_info_start,
 )
@@ -72,6 +73,23 @@ def _coverage_warning_for(session_dir: Path) -> str:
     return report.message if report is not None else ""
 
 
+def _display_offset_for(session_dir: Path) -> float:
+    """Смещение для настенного времени на линейке, или ``0.0``.
+
+    Как и :func:`_coverage_warning_for`, обёрнуто широко: подпись на
+    линейке не стоит того, чтобы из-за неё не открылась сессия.
+    """
+    try:
+        chat_logs = detect_fvtt_chat_logs(session_dir)
+        return display_offset_hours(
+            chat_logs[0] if chat_logs else None,
+            parse_info_start(session_dir / "info.txt"),
+        )
+    except Exception:  # noqa: BLE001 — см. докстринг
+        logger.exception("Display offset failed for %s", session_dir)
+        return 0.0
+
+
 class SessionMeta(QObject):
     """Scalar session facts shared by the ruler, waveforms, and top bar.
 
@@ -87,6 +105,7 @@ class SessionMeta(QObject):
     sessionTitleChanged = Signal()
     campaignTitleChanged = Signal()
     coverageWarningChanged = Signal()
+    timelineWindowChanged = Signal()
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -109,10 +128,49 @@ class SessionMeta(QObject):
         # Заполняется в openSession — до всякого ASR, чтобы поздний
         # старт записи было видно ещё до запуска пайплайна.
         self._coverage_warning = ""
+        # Смещение для показа настенного времени на линейке. Считается
+        # тем же резолвером, что и у мерджера, — иначе линейка называла
+        # бы часы, которых нет в чат-логе рядом.
+        self._display_offset_h = 0.0
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
         return self._total_min
+
+    @Property(float, notify=timelineWindowChanged)
+    def recordingStartPct(self) -> float:
+        """Где на линейке начинается запись, 0..100.
+
+        ``0.0`` когда запись покрывает сессию с самого начала — тогда
+        и подсвечивать нечего.
+        """
+        w = self._timeline_window
+        return w.recording_start_pct if w is not None else 0.0
+
+    @Property(int, notify=timelineWindowChanged)
+    def windowMinutes(self) -> int:
+        """Длина всего окна таймлайна в минутах, не длина записи.
+
+        Линейка размечает окно; запись — лишь его часть, и на сессии с
+        поздним стартом заметно меньшая.
+        """
+        w = self._timeline_window
+        if w is None:
+            return 0
+        return max(0, int((w.t_end - w.t0).total_seconds() // 60))
+
+    @Property(int, notify=timelineWindowChanged)
+    def windowStartClockMinutes(self) -> int:
+        """Начало окна как минуты от полуночи, в зоне самой сессии.
+
+        Линейка подписывает деления настенным временем, поэтому ей
+        нужна точка отсчёта, а не только длина.
+        """
+        w = self._timeline_window
+        if w is None:
+            return 0
+        local = w.t0 + timedelta(hours=self._display_offset_h)
+        return local.hour * 60 + local.minute
 
     @Property(str, notify=coverageWarningChanged)
     def coverageWarning(self) -> str:
@@ -203,6 +261,7 @@ class SessionMeta(QObject):
         # rebuilds it from scratch on the sessionOpened signal below.
         self._timeline_window = None
         self._coverage_warning = _coverage_warning_for(path)
+        self._display_offset_h = _display_offset_for(path)
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
@@ -233,6 +292,7 @@ class SessionMeta(QObject):
         """
 
         self._timeline_window = window
+        self.timelineWindowChanged.emit()
 
     @Slot(float)
     def setTotalSeconds(self, seconds: float) -> None:

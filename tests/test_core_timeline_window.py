@@ -338,3 +338,84 @@ class TestChatSpan:
         chat_path.write_text("", encoding="utf-8")
         info_start = datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc)
         assert chat_span(chat_path, info_start) is None
+
+
+class TestWindowCoversTimeBeforeRecording:
+    """The window starts with the session, not with the recording.
+
+    Anchoring t0 on info_start assumed nothing happens before Record is
+    pressed. When someone presses it late, everything earlier clamped
+    onto 0%: the chat bar started flush with the audio and an encounter
+    that finished before the recording collapsed to zero width — drawn
+    as a one-pixel tick directly under a banner announcing it had no
+    audio.
+    """
+
+    #: A real shape: chat from 18:55, fight 19:11-20:18, Record at 20:42.
+    CHAT_FIRST = datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+    CHAT_LAST = datetime(2026, 8, 15, 21, 31, 2, tzinfo=timezone.utc)
+    REC_START = datetime(2026, 8, 15, 18, 42, 9, tzinfo=timezone.utc)
+    COMBAT = CombatMeta(
+        started_at=datetime(2026, 8, 15, 17, 11, 48, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 8, 15, 18, 18, 35, tzinfo=timezone.utc),
+        label="Бой",
+    )
+
+    def _window(self):
+        return build_window(
+            info_start=self.REC_START,
+            max_track_duration=11879.8,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[self.COMBAT],
+        )
+
+    def test_starts_at_the_earliest_event_not_the_recording(self):
+        window = self._window()
+        assert window is not None
+        assert window.t0 == self.CHAT_FIRST
+        assert window.t0 < self.REC_START
+
+    def test_recording_start_is_kept_separately(self):
+        window = self._window()
+        assert window.recording_start == self.REC_START
+        assert window.covers_time_before_recording
+        # 1h47m of a 5h47m window.
+        assert window.recording_start_pct == pytest.approx(30.8, abs=0.2)
+
+    def test_missed_encounter_keeps_its_width(self):
+        """The fight must be a bar you can see, not a collapsed pixel."""
+        window = self._window()
+        start = window.pct_for(self.COMBAT.started_at)
+        end = window.pct_for(self.COMBAT.ended_at)
+        assert end - start == pytest.approx(19.2, abs=0.3)
+        # And it sits wholly left of the recording — that is the point.
+        assert end < window.recording_start_pct
+
+    def test_chat_no_longer_pretends_to_start_with_the_audio(self):
+        window = self._window()
+        assert window.pct_for(self.CHAT_FIRST) == 0.0
+        assert window.recording_start_pct > 0.0
+
+    def test_no_shading_when_the_recording_covers_everything(self):
+        """Record pressed first — nothing to mark as missing."""
+        rec = datetime(2026, 8, 15, 16, 0, 0, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=rec,
+            max_track_duration=None,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[self.COMBAT],
+        )
+        assert window.t0 == rec
+        assert window.recording_start_pct == 0.0
+        assert window.covers_time_before_recording is False
+
+    def test_recording_start_is_none_without_info_txt(self):
+        window = build_window(
+            info_start=None,
+            max_track_duration=None,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[],
+        )
+        assert window.recording_start is None
+        assert window.recording_start_pct == 0.0
+        assert window.covers_time_before_recording is False
