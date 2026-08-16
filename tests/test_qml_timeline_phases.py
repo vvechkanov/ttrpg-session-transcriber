@@ -313,3 +313,124 @@ def test_timeline_failed_banner_shows_error_message():
     # Clean up for subsequent tests.
     ctx.app_model.setErrorMessage("")
     ctx.set_phase("idle")
+
+
+# ---------------------------------------------------------------------------
+# Coverage banner (recording started after the session did)
+# ---------------------------------------------------------------------------
+
+_TZ_FIXTURE = _PROJECT_ROOT / "tests" / "fixtures" / "tz_late_start"
+
+
+def _late_start_session(root: Path, name: str = "late-session") -> Path:
+    """Session folder whose Craig recording misses the first 1h47m."""
+    import shutil
+
+    session = root / name
+    session.mkdir()
+    shutil.copy(_TZ_FIXTURE / "info.txt", session / "info.txt")
+    shutil.copy(
+        _TZ_FIXTURE / "fvtt-log-fixture.txt", session / "fvtt-log-fixture.txt"
+    )
+    shutil.copy(_TZ_FIXTURE / "combat.json", session / "Бой.txt")
+    return session
+
+
+@pytest.fixture()
+def banner_ctx(pin_system_tz):
+    """Engine context with the coverage banner reset before and after.
+
+    The engine is a module-level singleton, so a test that leaves a
+    session open hands its state to whatever runs next. These tests
+    open folders deliberately, which makes cleaning up mandatory rather
+    than polite — without it they only pass in file order.
+    """
+    pin_system_tz(2.0)
+    ctx = _get_engine_ctx()
+    _reset_session(ctx)
+    try:
+        yield ctx
+    finally:
+        _reset_session(ctx)
+
+
+def _reset_session(ctx: _EngineContext) -> None:
+    ctx.session_meta._coverage_warning = ""
+    ctx.session_meta.coverageWarningChanged.emit()
+    ctx.app.processEvents()
+
+
+@pytest.mark.gui
+def test_coverage_banner_hidden_without_a_session(banner_ctx):
+    """Nothing open → nothing to warn about."""
+    banner = banner_ctx.find_by_object_name("coverageBanner")
+    assert banner is not None, (
+        "CoverageBanner not found by objectName='coverageBanner'"
+    )
+    assert banner.property("visible") is False
+
+
+@pytest.mark.gui
+def test_coverage_banner_appears_on_late_start(banner_ctx, tmp_path):
+    """Opening a late-start session raises the banner with real numbers."""
+    warnings: list[str] = []
+    banner_ctx._install_handler(warnings)
+    banner_ctx.session_meta.openSession(str(_late_start_session(tmp_path)))
+    banner_ctx.app.processEvents()
+    qInstallMessageHandler(None)
+
+    assert not warnings, "QML warnings raising the banner:\n" + "\n".join(warnings)
+
+    banner = banner_ctx.find_by_object_name("coverageBanner")
+    assert banner.property("visible") is True
+    message = banner.property("message")
+    assert "1 ч 47 мин" in message
+    assert "260 из 353 сообщений" in message
+
+
+@pytest.mark.gui
+def test_coverage_banner_clears_when_next_session_is_clean(banner_ctx, tmp_path):
+    """The warning must not linger onto the next folder the user opens."""
+    banner_ctx.session_meta.openSession(str(_late_start_session(tmp_path)))
+    banner_ctx.app.processEvents()
+
+    clean = tmp_path / "clean-session"
+    clean.mkdir()
+    (clean / "info.txt").write_text(
+        "Start time: 2026-08-15T17:00:00Z\n", encoding="utf-8"
+    )
+    (clean / "fvtt-log-clean.txt").write_text(
+        "[8/15/2026, 7:00:00 PM] GM\nhi\n---------------------------\n",
+        encoding="utf-8",
+    )
+    banner_ctx.session_meta.openSession(str(clean))
+    banner_ctx.app.processEvents()
+
+    banner = banner_ctx.find_by_object_name("coverageBanner")
+    assert banner.property("visible") is False
+    assert banner_ctx.session_meta.coverageWarning == ""
+
+
+@pytest.mark.gui
+def test_dismiss_is_per_session_not_forever(banner_ctx, tmp_path):
+    """Hiding the banner on one session must not mute the next one.
+
+    This is the whole reason TimelineScreen keeps a Connections block on
+    coverageWarningChanged — without it "Скрыть" silences every later
+    session too, which is precisely the silence this feature removes.
+    """
+    banner_ctx.session_meta.openSession(str(_late_start_session(tmp_path, "one")))
+    banner_ctx.app.processEvents()
+
+    banner = banner_ctx.find_by_object_name("coverageBanner")
+    assert banner.property("visible") is True
+
+    banner.dismissClicked.emit()
+    banner_ctx.app.processEvents()
+    assert banner.property("visible") is False
+
+    banner_ctx.session_meta.openSession(str(_late_start_session(tmp_path, "two")))
+    banner_ctx.app.processEvents()
+    assert banner.property("visible") is True, (
+        "dismissing on one session must not carry over to the next"
+    )

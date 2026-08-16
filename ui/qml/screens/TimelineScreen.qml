@@ -36,6 +36,16 @@ Rectangle {
     readonly property string phase: appModel ? appModel.phase : "idle"
     property int _gutterWidth: 220
 
+    // Coverage banner is dismissible, but only for the session it was
+    // raised on — opening another folder must not inherit the previous
+    // "seen it" state.
+    property bool _coverageDismissed: false
+
+    Connections {
+        target: sessionMeta
+        function onCoverageWarningChanged() { root._coverageDismissed = false }
+    }
+
     // ── Popovers / overlays ──────────────────────────────────────
     TrackOverridePopover {
         id: overridePopover
@@ -160,6 +170,18 @@ Rectangle {
                         statsLine: (appModel && appModel.doneSummary.statsLine)
                             ? appModel.doneSummary.statsLine
                             : ""
+                    }
+
+                    // ── Coverage banner (recording started late) ────
+                    // Sits above the failed banner: it is known before
+                    // the run starts, and it explains gaps the user
+                    // would otherwise blame on the transcriber.
+                    CoverageBanner {
+                        visible: !root._coverageDismissed
+                            && sessionMeta
+                            && sessionMeta.coverageWarning.length > 0
+                        message: sessionMeta ? sessionMeta.coverageWarning : ""
+                        onDismissClicked: root._coverageDismissed = true
                     }
 
                     // ── Failed banner (pipeline/merger errored out) ─

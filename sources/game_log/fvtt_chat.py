@@ -22,6 +22,7 @@ offset, обязаны идти через резолвер.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,8 @@ from typing import Literal
 
 from domain.annotations import ChatMessage
 from sources.base import Source
+
+logger = logging.getLogger(__name__)
 
 _TS_RE = re.compile(
     r"^\[(\d{1,2}/\d{1,2}/\d{4},\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)\]\s*(.+)$"
@@ -147,16 +150,48 @@ class FvttChatSource(Source):
         tz_offset = resolution.offset_hours
 
         messages: list[ChatMessage] = []
+        earliest_at: float | None = None
         for entry in entries:
             entry_utc = entry["datetime"] - timedelta(hours=tz_offset)
             entry_utc = entry_utc.replace(tzinfo=timezone.utc)
             at = (entry_utc - rec_start).total_seconds()
+            if earliest_at is None or at < earliest_at:
+                earliest_at = at
             if at < 0:
                 # Сообщение отправлено до старта записи — отбрасываем
                 continue
             messages.append(_to_chat_message(entry, at))
 
+        dropped = len(entries) - len(messages)
+        if dropped:
+            # Раньше это происходило молча. На сессии, где Craig
+            # запустили с опозданием, так исчезали сотни сообщений и
+            # целые бои — и замечали это в лучшем случае через месяц.
+            logger.warning(
+                "%s: %d of %d chat entries predate the recording and were "
+                "dropped (recording starts %s after the log begins, "
+                "tz offset %+.2fh from %s)",
+                self.chat_log_path.name,
+                dropped,
+                len(entries),
+                _format_duration(-earliest_at if earliest_at is not None else 0.0),
+                tz_offset,
+                resolution.source,
+            )
+
         return messages
+
+
+def _format_duration(seconds: float) -> str:
+    """``6420.0`` → ``"1h47m"``. Для логов.
+
+    Парная функция для UI — ``core.coverage._ru_duration`` (``"1 ч 47 мин"``).
+    Объединять их не надо: аудитории и языки разные, а ``sources`` по
+    слоевым правилам не может импортировать ``core``.
+    """
+    total_minutes = int(round(abs(seconds) / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _to_chat_message(entry: dict, at: float) -> ChatMessage:

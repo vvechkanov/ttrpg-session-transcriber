@@ -32,19 +32,25 @@
     encounter_summary_global   — общая статистика (rounds, duration, XP)
     encounter_summary_actor    — per-actor статистика (DMG, hit_rate, etc.)
 
-События с ``at < 0`` (бой раньше старта Craig segment-а) тихо
-отбрасываются — это согласуется с поведением ``FvttChatSource``.
+События с ``at < 0`` (бой раньше старта Craig segment-а) отбрасываются —
+это согласуется с поведением ``FvttChatSource``, — но не молча: в лог
+уходит warning. Если запись включили с опозданием, отброшенным может
+оказаться весь бой целиком, и снаружи это выглядит просто как «в
+транскрипте почему-то нет боёвки».
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
 from domain.annotations import GameLogEntry
 from sources.base import Source
 from sources.game_log.fvtt_chat import parse_info_start_time
+
+logger = logging.getLogger(__name__)
 
 
 class CombatDumpSource(Source):
@@ -168,7 +174,25 @@ class CombatDumpSource(Source):
                     )
                 )
 
-        return [e for e in entries if e.at >= 0]
+        kept = [e for e in entries if e.at >= 0]
+        dropped = len(entries) - len(kept)
+        if dropped:
+            # Бой раньше старта записи. Молчать тут особенно дорого: если
+            # отброшено всё, целая боёвка не попадает в транскрипт, а
+            # выглядит это как «в файле почему-то нет боя».
+            scope = (
+                f"the whole encounter ({dropped} events)"
+                if not kept
+                else f"{dropped} of {len(entries)} events"
+            )
+            logger.warning(
+                "%s: %s predate the recording and were dropped "
+                "(encounter starts %.0f min before Craig)",
+                self.combat_log_path.name,
+                scope,
+                abs(min(e.at for e in entries)) / 60,
+            )
+        return kept
 
 
 def _emit_turn_entries(
