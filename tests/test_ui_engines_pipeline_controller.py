@@ -19,6 +19,7 @@ from PySide6.QtGui import QGuiApplication
 import sys
 
 from domain.annotations import SpeechSegment
+from tests.conftest import RegistryStub
 from ui.engines.pipeline_controller import PipelineController, _format_bytes
 from ui.models import AppModel, SessionMeta, TrackListModel
 from ui.models.session import TrackListModel as _TLM  # role aliases for clarity
@@ -508,14 +509,6 @@ def test_speaker_map_absent_session_is_not_fatal(monkeypatch) -> None:
     assert captured["speaker_map"] == {}
 
 
-class _RegistryStub:
-    """Minimal stand-in for ModelRegistry's pre-flight surface."""
-
-    def __init__(self, any_installed: bool) -> None:
-        self.anyInstalled = any_installed
-        self.activeModelId = "gigaam"
-
-
 def test_run_without_a_model_explains_itself(tmp_path: Path) -> None:
     """No model installed → one sentence, not six stack traces.
 
@@ -536,7 +529,7 @@ def test_run_without_a_model_explains_itself(tmp_path: Path) -> None:
     meta = SessionMeta()
     tracks = TrackListModel()
     controller = PipelineController(
-        app_model, tracks, meta, _RegistryStub(any_installed=False)
+        app_model, tracks, meta, RegistryStub(any_installed=False)
     )
     meta.openSession(session.as_uri())
 
@@ -548,7 +541,13 @@ def test_run_without_a_model_explains_itself(tmp_path: Path) -> None:
     assert "RuntimeError" not in message and "install(" not in message, (
         f"developer-facing text leaked to the user: {message}"
     )
-    assert app_model.phase != "asr", "must not start ASR without a model"
+    # Not "!= asr": that is what let the bug through. The message is
+    # rendered by FailedBanner, which is bound to phase === "failed", so
+    # anything other than "failed" leaves it on screen-less.
+    assert app_model.phase == "failed", (
+        f"the message is invisible unless the phase says failed; "
+        f"got {app_model.phase!r}"
+    )
 
 
 def test_guard_passes_when_a_model_is_installed(tmp_path: Path) -> None:
@@ -568,7 +567,7 @@ def test_guard_passes_when_a_model_is_installed(tmp_path: Path) -> None:
     meta = SessionMeta()
     tracks = TrackListModel()
     controller = PipelineController(
-        app_model, tracks, meta, _RegistryStub(any_installed=True)
+        app_model, tracks, meta, RegistryStub(any_installed=True)
     )
     meta.openSession(session.as_uri())
 

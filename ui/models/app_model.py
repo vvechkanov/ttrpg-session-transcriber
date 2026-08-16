@@ -32,6 +32,7 @@ class AppModel(QObject):
     mergeStitchesChanged = Signal()
     doneSummaryChanged = Signal()
     errorMessageChanged = Signal()
+    errorTitleChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +57,7 @@ class AppModel(QObject):
         # when the merger worker errors out — QML renders a FailedBanner
         # off this string. Cleared on the next ``runAsr`` and on done.
         self._error_message: str = ""
+        self._error_title: str = ""
 
     # ── screen ────────────────────────────────────────────────────────
     @Property(str, notify=screenChanged)
@@ -167,6 +169,21 @@ class AppModel(QObject):
     @Property(str, notify=errorMessageChanged)
     def errorMessage(self) -> str:
         return self._error_message
+
+    #: Заголовок, который FailedBanner ставит над сообщением. Пустой —
+    #: значит «Обработка прервана», умолчание баннера. Отдельно от
+    #: текста, потому что отказ до запуска прерывать нечего: писать
+    #: «Обработка прервана» над «не установлена модель» — неправда.
+    @Property(str, notify=errorTitleChanged)
+    def errorTitle(self) -> str:
+        return self._error_title
+
+    @Slot(str)
+    def setErrorTitle(self, title: str) -> None:
+        if self._error_title == title:
+            return
+        self._error_title = title
+        self.errorTitleChanged.emit()
 
     @Slot(str)
     def setErrorMessage(self, message: str) -> None:

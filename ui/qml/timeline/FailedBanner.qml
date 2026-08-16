@@ -16,6 +16,10 @@ Rectangle {
 
     property string message: ""
 
+    // Пустой — умолчание. Отказ, случившийся до запуска, ставит свой:
+    // прерывать было нечего.
+    property string title: ""
+
     signal retryClicked()
     signal dismissClicked()
 
@@ -59,7 +63,7 @@ Rectangle {
 
             Text {
                 Layout.fillWidth: true
-                text: "Обработка прервана"
+                text: root.title.length > 0 ? root.title : "Обработка прервана"
                 color: Theme.ink
                 font.family: Theme.fontSans
                 font.pixelSize: 15

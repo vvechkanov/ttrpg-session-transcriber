@@ -24,6 +24,21 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+class RegistryStub:
+    """Minimal stand-in for ModelRegistry's pre-flight surface.
+
+    PipelineController touches exactly two attributes on the registry,
+    and both are pinned here. Constructing the real one in a test drags
+    in the developer's %APPDATA% — a QSettings read for the active
+    backend and a disk scan for what is installed — which is how three
+    integration tests came to pass on this laptop and time out in CI.
+    """
+
+    def __init__(self, any_installed: bool = True) -> None:
+        self.anyInstalled = any_installed
+        self.activeModelId = "gigaam"
+
+
 # ---------------------------------------------------------------------------
 # Timezone fixtures
 # ---------------------------------------------------------------------------

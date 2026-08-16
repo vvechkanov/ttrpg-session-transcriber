@@ -188,6 +188,7 @@ Rectangle {
                     FailedBanner {
                         visible: root.phase === "failed"
                         message: appModel ? appModel.errorMessage : ""
+                        title: appModel ? appModel.errorTitle : ""
                         onRetryClicked: pipeline.runAsr()
                         onDismissClicked: {
                             if (appModel) appModel.setErrorMessage("")

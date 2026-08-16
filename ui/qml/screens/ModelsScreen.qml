@@ -249,7 +249,19 @@ Rectangle {
                                 busy.note = note
                             }
                             function onInstallFinished(row) { busy.clear() }
-                            function onInstallFailed(row, message) { busy.clear() }
+                            // The message used to be accepted and dropped:
+                            // a 900 MB download could fail on a dead
+                            // network or a full disk and the only sign was
+                            // the progress bar vanishing. This is the very
+                            // screen the "no model installed" banner sends
+                            // people to — a second silence right there is
+                            // the worst place for one.
+                            function onInstallFailed(row, message) {
+                                busy.clear()
+                                installError.text = message && message.length > 0
+                                    ? message
+                                    : "Установка не удалась."
+                            }
                         }
 
                         // Rows
@@ -273,12 +285,63 @@ Rectangle {
                                 onRowClicked: drawer.openFor(modelRegistry.entryAt(index))
                                 onActivateClicked: modelRegistry.setActive(index)
                                 onInstallClicked: {
+                                    installError.text = ""
                                     busy.beginInstall(index)
                                     modelRegistry.install(index)
                                 }
                                 onUninstallClicked: {
                                     busy.beginUninstall(index)
                                     modelRegistry.uninstall(index)
+                                }
+                            }
+                        }
+
+                        // Install failures land here. Downloading a
+                        // model is hundreds of megabytes over someone
+                        // else's network; it fails, and it has to say
+                        // why rather than just stop.
+                        Rectangle {
+                            id: installError
+                            objectName: "installError"
+                            property string text: ""
+
+                            Layout.fillWidth: true
+                            Layout.topMargin: 8
+                            visible: text.length > 0
+                            implicitHeight: errorRow.implicitHeight + 20
+                            radius: Theme.radiusLg
+                            color: Theme.card
+                            border.width: 1
+                            border.color: Theme.redSoft
+
+                            RowLayout {
+                                id: errorRow
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 10
+
+                                SvgIcon {
+                                    Layout.alignment: Qt.AlignTop
+                                    name: "alert"; size: 16
+                                    color: Theme.red
+                                    strokeWidth: 2.0
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: installError.text
+                                    color: Theme.ink2
+                                    font.family: Theme.fontSans
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                GhostButton {
+                                    Layout.alignment: Qt.AlignTop
+                                    sizeTag: "sm"
+                                    plain: true
+                                    text: "Скрыть"
+                                    onClicked: installError.text = ""
                                 }
                             }
                         }
