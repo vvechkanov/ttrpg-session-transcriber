@@ -261,7 +261,7 @@ class TestExtractFallbackOrder:
         """Якорь в чате имеет приоритет над системной tz."""
         from sources.game_log import fvtt_chat
         # Системная tz возвращает UTC+5, маркер должен дать +2 и победить.
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 5.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 5.0)
         info = self._write_info(tmp_path, "2026-04-25T18:00:00Z")
         chat = self._write_chat(
             tmp_path,
@@ -281,7 +281,7 @@ class TestExtractFallbackOrder:
         """Без маркера — берём системную tz, не эвристику."""
         from sources.game_log import fvtt_chat
         # Системная tz +2, эвристика на этих данных дала бы 0 (Session 7).
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 2.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 2.0)
         info = self._write_info(tmp_path, "2026-04-25T18:09:01Z")
         chat = self._write_chat(
             tmp_path,
@@ -302,7 +302,7 @@ class TestExtractFallbackOrder:
     def test_heuristic_used_when_system_tz_unavailable(self, tmp_path, monkeypatch):
         """Если системная tz недоступна — катимся в эвристику."""
         from sources.game_log import fvtt_chat
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: None)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: None)
         info = self._write_info(tmp_path, "2026-04-18T16:15:16Z")
         chat = self._write_chat(
             tmp_path,
@@ -320,7 +320,7 @@ class TestExtractFallbackOrder:
         """Явный tz_offset в конструкторе побеждает все автодетекты."""
         from sources.game_log import fvtt_chat
         # Системная tz и маркер оба сказали бы +2, но мы передаём +5 явно.
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 2.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 2.0)
         info = self._write_info(tmp_path, "2026-04-25T18:00:00Z")
         chat = self._write_chat(
             tmp_path,
@@ -340,8 +340,104 @@ class TestExtractFallbackOrder:
 class TestSystemUtcOffsetHours:
     def test_returns_float_or_none(self):
         from sources.game_log.fvtt_chat import _system_utc_offset_hours
-        result = _system_utc_offset_hours()
+        from datetime import datetime, timezone
+        at = datetime(2026, 8, 15, 18, 42, 9, tzinfo=timezone.utc)
+        result = _system_utc_offset_hours(at)
         # На любом нормальном CI должен вернуть float, не None.
         assert result is None or isinstance(result, float)
         if result is not None:
             assert -14.0 <= result <= 14.0
+
+
+class TestResolveTzOffset:
+    """Direct tests for the ladder itself.
+
+    The steps are covered end-to-end through FvttChatSource above; these
+    pin the resolver's own contract — what it returns, and what it feeds
+    the steps below it.
+    """
+
+    _ENTRIES = [{"datetime": datetime(2026, 8, 15, 20, 0, 0), "speaker": "P1", "text": "hi"}]
+    _REC_START = datetime(2026, 8, 15, 18, 0, 0, tzinfo=timezone.utc)
+
+    def test_explicit_zero_is_honoured(self):
+        """``explicit=0.0`` must not be mistaken for "not supplied".
+
+        UTC+0 is a real timezone; ``if explicit:`` would silently drop it
+        through to autodetection.
+        """
+        from sources.game_log.fvtt_chat import resolve_tz_offset
+        result = resolve_tz_offset(self._ENTRIES, self._REC_START, explicit=0.0)
+        assert result.offset_hours == 0.0
+        assert result.source == "explicit"
+        assert result.is_reliable is True
+
+    def test_empty_entries_short_circuit(self):
+        from sources.game_log.fvtt_chat import (
+            EMPTY_LOG_RESOLUTION,
+            resolve_tz_offset,
+        )
+        result = resolve_tz_offset([], self._REC_START)
+        assert result is EMPTY_LOG_RESOLUTION
+        assert result.offset_hours == 0.0
+        assert result.is_reliable is False
+
+    def test_system_step_gets_the_session_date_not_today(self, monkeypatch):
+        """Regression: the system step must ask about the *recording*.
+
+        ``datetime.now().astimezone()`` answers for today, so a January
+        session merged in August picks up the summer offset and the whole
+        chat slides by an hour — silently, because ``system`` counts as
+        reliable.
+        """
+        from sources.game_log import fvtt_chat
+        seen = []
+
+        def _spy(at):
+            seen.append(at)
+            return 1.0
+
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", _spy)
+        winter = datetime(2026, 1, 15, 18, 0, 0, tzinfo=timezone.utc)
+        fvtt_chat.resolve_tz_offset(self._ENTRIES, winter)
+        assert seen == [winter]
+
+    def test_naive_recording_start_treated_as_utc(self, monkeypatch):
+        """Craig always writes UTC; a naive value must not shift anything."""
+        from sources.game_log import fvtt_chat
+        seen = []
+        monkeypatch.setattr(
+            fvtt_chat,
+            "_system_utc_offset_hours",
+            lambda at: seen.append(at) or 2.0,
+        )
+        naive = datetime(2026, 8, 15, 18, 0, 0)
+        fvtt_chat.resolve_tz_offset(self._ENTRIES, naive)
+        assert seen == [naive.replace(tzinfo=timezone.utc)]
+
+    def test_offset_recording_start_normalised_to_utc(self):
+        """``Start time`` with a +02:00 zone must anchor like the same UTC instant.
+
+        Without normalisation ``find_anchor_offset`` strips the tzinfo and
+        reads the wall clock as UTC — two hours of silent drift, the very
+        failure this ladder exists to prevent.
+        """
+        from datetime import timedelta
+        from sources.game_log.fvtt_chat import resolve_tz_offset
+
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 20, 0, 5),
+                "speaker": "GM",
+                "text": "craig-start",
+            }
+        ]
+        as_utc = datetime(2026, 8, 15, 18, 0, 0, tzinfo=timezone.utc)
+        as_offset = datetime(
+            2026, 8, 15, 20, 0, 0, tzinfo=timezone(timedelta(hours=2))
+        )
+        assert resolve_tz_offset(entries, as_utc) == resolve_tz_offset(
+            entries, as_offset
+        )
+        assert resolve_tz_offset(entries, as_offset).source == "anchor"
+        assert resolve_tz_offset(entries, as_offset).offset_hours == 2.0
