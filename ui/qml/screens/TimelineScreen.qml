@@ -252,7 +252,16 @@ Rectangle {
                                     TimelineRuler {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        totalMinutes: sessionMeta.totalMinutes
+                                        // The window, not the audio: on a late
+                                        // start they are different lengths.
+                                        totalMinutes: sessionMeta.windowMinutes > 0
+                                            ? sessionMeta.windowMinutes
+                                            : sessionMeta.totalMinutes
+                                        clockStartMinutes: sessionMeta.windowMinutes > 0
+                                            ? sessionMeta.windowStartClockMinutes
+                                            : -1
+                                        recordingStartPct: sessionMeta.recordingStartPct
+                                        hasTimeBefore: sessionMeta.hasTimeBeforeRecording
                                         segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }
@@ -298,6 +307,7 @@ Rectangle {
                                             fileName:    model.fileName
                                             startPct:    model.startPct
                                             endPct:      model.endPct
+                                            density:     model.density
                                         }
                                     }
 
@@ -373,7 +383,16 @@ Rectangle {
                                     TimelineRuler {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        totalMinutes: sessionMeta.totalMinutes
+                                        // The window, not the audio: on a late
+                                        // start they are different lengths.
+                                        totalMinutes: sessionMeta.windowMinutes > 0
+                                            ? sessionMeta.windowMinutes
+                                            : sessionMeta.totalMinutes
+                                        clockStartMinutes: sessionMeta.windowMinutes > 0
+                                            ? sessionMeta.windowStartClockMinutes
+                                            : -1
+                                        recordingStartPct: sessionMeta.recordingStartPct
+                                        hasTimeBefore: sessionMeta.hasTimeBeforeRecording
                                         segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }

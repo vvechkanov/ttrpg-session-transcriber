@@ -338,3 +338,237 @@ class TestChatSpan:
         chat_path.write_text("", encoding="utf-8")
         info_start = datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc)
         assert chat_span(chat_path, info_start) is None
+
+
+class TestWindowCoversTimeBeforeRecording:
+    """The window starts with the session, not with the recording.
+
+    Anchoring t0 on info_start assumed nothing happens before Record is
+    pressed. When someone presses it late, everything earlier clamped
+    onto 0%: the chat bar started flush with the audio and an encounter
+    that finished before the recording collapsed to zero width — drawn
+    as a one-pixel tick directly under a banner announcing it had no
+    audio.
+    """
+
+    #: A real shape: chat from 18:55, fight 19:11-20:18, Record at 20:42.
+    CHAT_FIRST = datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+    CHAT_LAST = datetime(2026, 8, 15, 21, 31, 2, tzinfo=timezone.utc)
+    REC_START = datetime(2026, 8, 15, 18, 42, 9, tzinfo=timezone.utc)
+    COMBAT = CombatMeta(
+        started_at=datetime(2026, 8, 15, 17, 11, 48, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 8, 15, 18, 18, 35, tzinfo=timezone.utc),
+        label="Бой",
+    )
+
+    def _window(self):
+        return build_window(
+            info_start=self.REC_START,
+            max_track_duration=11879.8,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[self.COMBAT],
+        )
+
+    def test_starts_at_the_earliest_event_not_the_recording(self):
+        window = self._window()
+        assert window is not None
+        assert window.t0 == self.CHAT_FIRST
+        assert window.t0 < self.REC_START
+
+    def test_recording_start_is_kept_separately(self):
+        window = self._window()
+        assert window.recording_start == self.REC_START
+        assert window.covers_time_before_recording
+        # 1h47m of a 5h47m window.
+        assert window.recording_start_pct == pytest.approx(30.8, abs=0.2)
+
+    def test_missed_encounter_keeps_its_width(self):
+        """The fight must be a bar you can see, not a collapsed pixel."""
+        window = self._window()
+        start = window.pct_for(self.COMBAT.started_at)
+        end = window.pct_for(self.COMBAT.ended_at)
+        assert end - start == pytest.approx(19.2, abs=0.3)
+        # And it sits wholly left of the recording — that is the point.
+        assert end < window.recording_start_pct
+
+    def test_chat_no_longer_pretends_to_start_with_the_audio(self):
+        window = self._window()
+        assert window.pct_for(self.CHAT_FIRST) == 0.0
+        assert window.recording_start_pct > 0.0
+
+    def test_no_shading_when_the_recording_covers_everything(self):
+        """Record pressed first — nothing to mark as missing."""
+        rec = datetime(2026, 8, 15, 16, 0, 0, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=rec,
+            max_track_duration=None,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[self.COMBAT],
+        )
+        assert window.t0 == rec
+        assert window.recording_start_pct == 0.0
+        assert window.covers_time_before_recording is False
+
+    def test_recording_start_is_none_without_info_txt(self):
+        window = build_window(
+            info_start=None,
+            max_track_duration=None,
+            chat=(self.CHAT_FIRST, self.CHAT_LAST),
+            combats=[],
+        )
+        assert window.recording_start is None
+        assert window.recording_start_pct == 0.0
+        assert window.covers_time_before_recording is False
+
+
+class TestEventDensity:
+    """Real event positions, replacing the fabricated tick comb.
+
+    SourceLaneRow used to draw 12-18 ticks at positions derived from the
+    parser id's character codes — the same pattern on every session,
+    described in the source as a "content density suggestion". It looked
+    like data. These are the actual moments instead.
+    """
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def test_combat_events_are_parsed(self):
+        meta = parse_combat_file(self.FIXTURE / "combat.json")
+        assert meta is not None
+        assert len(meta.events) == 170
+        assert all(e.tzinfo is not None for e in meta.events)
+        # Every roll belongs inside the encounter it came from.
+        assert min(meta.events) >= meta.started_at
+        assert max(meta.events) <= meta.ended_at
+
+    def test_combat_events_default_to_empty(self):
+        """A dump without chat_messages still parses — just no ticks."""
+        meta = CombatMeta(
+            started_at=datetime(2026, 8, 15, 17, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 8, 15, 18, 0, tzinfo=timezone.utc),
+            label="Бой",
+        )
+        assert meta.events == ()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"rounds": {"1": {}}},
+            {"rounds": "nope"},
+            {"rounds": [{"turns": ["x"]}]},
+            {"rounds": [{"turns": [{"chat_messages": [["a"]]}]}]},
+        ],
+    )
+    def test_malformed_dump_yields_no_events(self, tmp_path, payload):
+        """Wrong types must cost the ticks, not raise out of a parser."""
+        import json
+
+        payload = dict(payload)
+        payload["started_at"] = "2026-08-15T17:00:00Z"
+        payload["ended_at"] = "2026-08-15T18:00:00Z"
+        path = tmp_path / "Бой.txt"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        meta = parse_combat_file(path)
+        assert meta is not None
+        assert meta.events == ()
+
+    def test_chat_events_land_where_the_merger_puts_them(self, pin_system_tz):
+        """Ticks must agree with the offset the merge will actually use."""
+        from core.timeline_window import chat_events
+
+        pin_system_tz(9.0)  # deliberately wrong; the combat anchor wins
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        moments = chat_events(self.FIXTURE / "fvtt-log-fixture.txt", info_start)
+
+        assert len(moments) == 353
+        assert list(moments) == sorted(moments)
+        # First entry is 18:55:09 local at the true +2 → 16:55:09Z.
+        assert moments[0] == datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+
+    def test_chat_events_empty_without_info_start(self):
+        from core.timeline_window import chat_events
+
+        assert chat_events(self.FIXTURE / "fvtt-log-fixture.txt", None) == ()
+
+    def test_chat_events_empty_for_missing_file(self, tmp_path):
+        from core.timeline_window import chat_events
+
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        assert chat_events(tmp_path / "nope.txt", info_start) == ()
+
+
+class TestDisplayOffsetHonesty:
+    """A ruler must not label UTC as if it were the session's clock."""
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def test_none_without_any_anchor(self):
+        """No chat log and no recording time — nothing to say.
+
+        Returning 0.0 here (as it did) is indistinguishable from a real
+        UTC+0 session, and the ruler happily stamped UTC hours onto a
+        session recorded at +2.
+        """
+        from core.timeline_window import display_offset_hours
+
+        assert display_offset_hours(None, None) is None
+
+    def test_resolved_offset_when_the_chat_says_so(self, pin_system_tz):
+        from core.timeline_window import display_offset_hours
+
+        pin_system_tz(9.0)  # wrong on purpose; the combat anchor wins
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        assert (
+            display_offset_hours(self.FIXTURE / "fvtt-log-fixture.txt", info_start)
+            == 2.0
+        )
+
+    def test_none_when_the_offset_was_only_guessed(self, tmp_path, monkeypatch):
+        """A guessed offset must not become a clock label.
+
+        The whole point of TzResolution.is_reliable is that a guess is
+        distinguishable; spending it on wall-clock hours would put a
+        confident time on an uncertain number.
+        """
+        import sources.game_log.fvtt_chat as fvtt
+        from core.timeline_window import display_offset_hours
+
+        monkeypatch.setattr(fvtt, "_system_utc_offset_hours", lambda *_a: None)
+
+        chat = tmp_path / "fvtt-log-x.txt"
+        chat.write_text(
+            "[8/15/2026, 8:00:00 PM] GM\nhi\n---------------------------\n",
+            encoding="utf-8",
+        )
+        info_start = datetime(2026, 8, 15, 18, 0, tzinfo=timezone.utc)
+        assert display_offset_hours(chat, info_start) is None
+
+
+class TestWindowDoesNotRunAway:
+    """A whole-campaign chat export must not stretch the window to weeks."""
+
+    REC = datetime(2026, 8, 15, 18, 42, tzinfo=timezone.utc)
+
+    def test_ancient_chat_is_clipped(self):
+        ancient = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=self.REC,
+            max_track_duration=11879.8,
+            chat=(ancient, datetime(2026, 8, 15, 21, 31, tzinfo=timezone.utc)),
+            combats=[],
+        )
+        assert window is not None
+        assert window.t0 > ancient
+        assert (self.REC - window.t0).total_seconds() == pytest.approx(12 * 3600)
+
+    def test_a_normal_late_start_is_untouched(self):
+        """1h47m early is ordinary and must survive the clip intact."""
+        chat_first = datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=self.REC,
+            max_track_duration=11879.8,
+            chat=(chat_first, datetime(2026, 8, 15, 21, 31, tzinfo=timezone.utc)),
+            combats=[],
+        )
+        assert window.t0 == chat_first

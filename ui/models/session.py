@@ -40,7 +40,7 @@ from core.speaker_map import load_speaker_map_raw, migrate_legacy_speaker_map
 from core.timeline_window import (
     TimelineWindow,
     build_window,
-    chat_span,
+    chat_timeline,
     parse_combat_file,
     parse_info_start,
 )
@@ -87,6 +87,7 @@ class SessionMeta(QObject):
     sessionTitleChanged = Signal()
     campaignTitleChanged = Signal()
     coverageWarningChanged = Signal()
+    timelineWindowChanged = Signal()
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -109,10 +110,68 @@ class SessionMeta(QObject):
         # Заполняется в openSession — до всякого ASR, чтобы поздний
         # старт записи было видно ещё до запуска пайплайна.
         self._coverage_warning = ""
+        # Смещение для показа настенного времени на линейке. Считается
+        # тем же резолвером, что и у мерджера, — иначе линейка называла
+        # бы часы, которых нет в чат-логе рядом. ``None`` — сказать
+        # нечего, и линейка обязана вернуться к времени от начала.
+        self._display_offset_h: float | None = None
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
         return self._total_min
+
+    @Property(float, notify=timelineWindowChanged)
+    def recordingStartPct(self) -> float:
+        """Где на линейке начинается запись, 0..100.
+
+        ``0.0`` когда запись покрывает сессию с самого начала — тогда
+        и подсвечивать нечего.
+        """
+        w = self._timeline_window
+        return w.recording_start_pct if w is not None else 0.0
+
+    @Property(int, notify=timelineWindowChanged)
+    def windowMinutes(self) -> int:
+        """Длина всего окна таймлайна в минутах, не длина записи.
+
+        Линейка размечает окно; запись — лишь его часть, и на сессии с
+        поздним стартом заметно меньшая.
+        """
+        w = self._timeline_window
+        if w is None:
+            return 0
+        return max(0, int((w.t_end - w.t0).total_seconds() // 60))
+
+    @Property(int, notify=timelineWindowChanged)
+    def windowStartClockMinutes(self) -> int:
+        """Начало окна как минуты от полуночи, в зоне самой сессии.
+
+        Линейка подписывает деления настенным временем, поэтому ей
+        нужна точка отсчёта, а не только длина.
+
+        ``-1`` — зона неизвестна или лишь угадана; линейка тогда
+        подписывает время от начала окна. Возвращать здесь ``0``
+        значило бы объявить UTC местным временем.
+        """
+        w = self._timeline_window
+        if w is None or self._display_offset_h is None:
+            return -1
+        local = w.t0 + timedelta(hours=self._display_offset_h)
+        return local.hour * 60 + local.minute
+
+    @Property(bool, notify=timelineWindowChanged)
+    def hasTimeBeforeRecording(self) -> bool:
+        """Есть ли в окне отрезок, который запись не застала."""
+        w = self._timeline_window
+        return w is not None and w.covers_time_before_recording
+
+    def setDisplayOffset(self, offset_hours: float | None) -> None:
+        """Принять офсет для подписей линейки от :class:`SourceListModel`.
+
+        Не ``Slot``: зовёт только Python-склейка, у QML тут дел нет.
+        """
+        self._display_offset_h = offset_hours
+        self.timelineWindowChanged.emit()
 
     @Property(str, notify=coverageWarningChanged)
     def coverageWarning(self) -> str:
@@ -129,6 +188,11 @@ class SessionMeta(QObject):
 
     @Property(float, notify=totalMinutesChanged)
     def segmentSplitPct(self) -> float:
+        # ДОЛГ: доля считается от длительности записи, а линейка теперь
+        # размечает всё окно — на сессии с поздним стартом это разные
+        # величины. Пока не стреляет: ``_seg_split_min`` всегда 0 и
+        # маркер скрыт. Появится настоящий split-discovery — считать
+        # надо будет через ``TimelineWindow.pct_for``.
         if self._total_min <= 0:
             return 0.0
         return (self._seg_split_min / self._total_min) * 100.0
@@ -202,6 +266,9 @@ class SessionMeta(QObject):
         # Drop any stale window from a previous session — SourceListModel
         # rebuilds it from scratch on the sessionOpened signal below.
         self._timeline_window = None
+        # Офсет проставит SourceListModel по сигналу ниже: он всё равно
+        # разбирает чат-лог, и второй разбор ради того же числа лишний.
+        self._display_offset_h = None
         self._coverage_warning = _coverage_warning_for(path)
 
         self.sessionTitleChanged.emit()
@@ -209,6 +276,11 @@ class SessionMeta(QObject):
         self.totalMinutesChanged.emit()
         self.segmentSplitMinutesChanged.emit()
         self.coverageWarningChanged.emit()
+        # Окно только что обнулилось. Без этого сигнала QML продолжает
+        # держать проценты и часы предыдущей сессии до тех пор, пока
+        # SourceListModel не построит новое окно — а он может и не
+        # построить.
+        self.timelineWindowChanged.emit()
         self.sessionOpened.emit(str(path))
 
     def timelineWindow(self) -> TimelineWindow | None:
@@ -233,6 +305,7 @@ class SessionMeta(QObject):
         """
 
         self._timeline_window = window
+        self.timelineWindowChanged.emit()
 
     @Slot(float)
     def setTotalSeconds(self, seconds: float) -> None:
@@ -528,8 +601,18 @@ class TrackListModel(QAbstractListModel):
                 else []
             )
             if window is None or seg.start_ts is None:
+                # Без своего таймштампа сегмент всё же не может начаться
+                # раньше записи — иначе осциллограмма ляжет на зону,
+                # которую линейка подсветила как беззвучную.
+                fallback_start = (
+                    window.recording_start_pct if window is not None else 0.0
+                )
                 payload.append(
-                    {"startPct": 0.0, "endPct": 100.0, "peaks": list(seg_peaks)}
+                    {
+                        "startPct": fallback_start,
+                        "endPct": 100.0,
+                        "peaks": list(seg_peaks),
+                    }
                 )
                 continue
             start_pct = window.pct_for(seg.start_ts)
@@ -1114,6 +1197,11 @@ class SourceEntry:
     file_name: str
     start_pct: float
     end_pct: float
+    #: Позиции реальных событий на линейке, 0..100 — сообщения чата или
+    #: боевые броски. Пусто, если разобрать не удалось: тогда полоса
+    #: ровная. Раньше здесь рисовалась псевдослучайная гребёнка,
+    #: зависящая только от имени парсера, и выглядела она как данные.
+    density: tuple[float, ...] = ()
 
 
 #: SourceListModel also starts empty — populated only after folder drop.
@@ -1126,6 +1214,7 @@ class SourceListModel(QAbstractListModel):
     FileRole     = Qt.ItemDataRole.UserRole + 3
     StartRole    = Qt.ItemDataRole.UserRole + 4
     EndRole      = Qt.ItemDataRole.UserRole + 5
+    DensityRole  = Qt.ItemDataRole.UserRole + 6
 
     _ROLES = {
         ParserIdRole: b"parserId",
@@ -1133,6 +1222,7 @@ class SourceListModel(QAbstractListModel):
         FileRole:     b"fileName",
         StartRole:    b"startPct",
         EndRole:      b"endPct",
+        DensityRole:  b"density",
     }
 
     def __init__(self, parent: Any = None) -> None:
@@ -1157,6 +1247,7 @@ class SourceListModel(QAbstractListModel):
             case SourceListModel.FileRole:     return s.file_name
             case SourceListModel.StartRole:    return s.start_pct
             case SourceListModel.EndRole:      return s.end_pct
+            case SourceListModel.DensityRole:  return list(s.density)
         return None
 
     def roleNames(self) -> dict[int, QByteArray]:
@@ -1194,14 +1285,36 @@ class SourceListModel(QAbstractListModel):
         chat_paths = detect_fvtt_chat_logs(session_dir)
         combat_paths = detect_combat_logs(session_dir)
 
-        info_start = parse_info_start(session_dir / "info.txt")
+        # Same lookup the coverage banner uses, including info.txt
+        # inside craig-* segments. Reading only session_dir/info.txt
+        # here meant a restarted recording produced a banner about a
+        # late start with no matching mark on the ruler.
+        from core.coverage import session_start
 
-        # Chat span is derived from the *first* chat log only. Real
-        # sessions carry at most one fvtt-log-*.txt per export; if
-        # more show up later we'd need a policy for merging spans.
+        info_start = session_start(session_dir)
+
+        # One parse per chat log, reused for the span, the density
+        # ticks, the window and the ruler's clock. The span used to
+        # take its own chat_span() call per row and the ruler offset a
+        # further parse in SessionMeta — three reads of one file.
+        #
+        # Only the first chat log feeds the span: real sessions carry
+        # at most one fvtt-log-*.txt per export, and merging spans
+        # across several would need a policy nobody has needed yet.
+        chat_moments: dict[Path, tuple] = {}
+        display_offset: float | None = None
+        for path in chat_paths:
+            timeline = chat_timeline(path, info_start)
+            if timeline is None or not timeline.moments:
+                continue
+            chat_moments[path] = timeline.moments
+            if display_offset is None:
+                display_offset = timeline.tz_offset
+
         chat_range: tuple | None = None
-        if chat_paths:
-            chat_range = chat_span(chat_paths[0], info_start)
+        if chat_paths and chat_paths[0] in chat_moments:
+            first = chat_moments[chat_paths[0]]
+            chat_range = (first[0], first[-1])
 
         combat_metas: list = []
         for combat_path in combat_paths:
@@ -1220,21 +1333,25 @@ class SourceListModel(QAbstractListModel):
         # consumers (tests, future ruler widgets) can read it.
         if self._session_meta is not None:
             self._session_meta.setTimelineWindow(window)
+            self._session_meta.setDisplayOffset(display_offset)
 
         new_rows: list[SourceEntry] = []
         for path in chat_paths:
-            span = chat_span(path, info_start) if window is not None else None
-            if window is not None and span is not None:
-                start_pct = window.pct_for(span[0])
-                end_pct = window.pct_for(span[1])
+            moments = chat_moments.get(path, ())
+            if window is not None and moments:
+                start_pct = window.pct_for(moments[0])
+                end_pct = window.pct_for(moments[-1])
+                density = tuple(window.pct_for(m) for m in moments)
             else:
                 start_pct, end_pct = 0.0, 100.0
+                density = ()
             new_rows.append(SourceEntry(
                 parser_id="foundry-chat",
                 label="Foundry чат",
                 file_name=path.name,
                 start_pct=start_pct,
                 end_pct=end_pct,
+                density=density,
             ))
 
         # Re-parse each combat file so row order matches ``combat_paths``
@@ -1246,14 +1363,17 @@ class SourceListModel(QAbstractListModel):
             if window is not None and meta is not None:
                 start_pct = window.pct_for(meta.started_at)
                 end_pct = window.pct_for(meta.ended_at)
+                density = tuple(window.pct_for(m) for m in meta.events)
             else:
                 start_pct, end_pct = 0.0, 100.0
+                density = ()
             new_rows.append(SourceEntry(
                 parser_id="combat-log",
                 label="Боевой лог",
                 file_name=path.name,
                 start_pct=start_pct,
                 end_pct=end_pct,
+                density=density,
             ))
 
         self.beginResetModel()

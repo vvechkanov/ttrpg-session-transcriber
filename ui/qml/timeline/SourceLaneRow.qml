@@ -6,8 +6,8 @@ import "ParserBadges.js" as Parsers
 
 // One additional-source lane (chat / combat / notes). Left gutter
 // holds the parser icon + title line + file name; the right column
-// draws a range bar spanning [startPct..endPct] of the timeline with
-// random tick marks to suggest content density.
+// draws a range bar spanning [startPct..endPct] of the timeline,
+// shaded by where events actually occurred.
 Item {
     id: root
 
@@ -17,6 +17,11 @@ Item {
     property string fileName: ""
     property real startPct: 0.0
     property real endPct: 100.0
+
+    // Real event positions on the ruler, 0..100 — chat messages or
+    // combat rolls, straight from the parsed files. Empty means we
+    // could not read them, and the bar simply stays plain.
+    property var density: []
 
     // Dimmed state — used later when ASR is running; unused in the
     // idle slice but the prop is available so TimelineScreen can flip
@@ -129,24 +134,78 @@ Item {
                 border.color = Qt.rgba(_c.r, _c.g, _c.b, 0.27)
             }
 
-            // Random tick marks (content density suggestion). Seeded
-            // so the same source always shows the same pattern.
-            Repeater {
-                model: root.parserId === "combat-log" ? 18 : 12
+            // Where events actually happened. These used to be 12-18
+            // ticks at positions derived from the parser id's character
+            // codes — the same comb on every session, labelled in the
+            // source as a "content density suggestion". It read as data
+            // and was not, so it is gone.
+            //
+            // Painted rather than instantiated: a busy session carries
+            // hundreds of messages, and one item per event is the same
+            // trap the waveform fell into.
+            Canvas {
+                id: densityCanvas
+                anchors.fill: parent
+                anchors.margins: 2
 
-                delegate: Rectangle {
-                    // Pseudo-random position within the range bar,
-                    // derived from index + parserId chars.
-                    readonly property int _seed:
-                        (root.parserId.charCodeAt(0)
-                         + root.parserId.charCodeAt(1) + index * 7919) % 997
+                readonly property color _tint: root.parser.color
 
-                    x: parent.width * (_seed / 997.0)
-                    y: 2
-                    width: 1
-                    height: parent.height - 4
-                    color: root.parser.color
-                    opacity: 0.55
+                // Positions are relative to the bar, so a change of
+                // either edge invalidates the picture just as much as
+                // new data does.
+                Connections {
+                    target: root
+                    function onDensityChanged()  { densityCanvas.requestPaint() }
+                    function onStartPctChanged() { densityCanvas.requestPaint() }
+                    function onEndPctChanged()   { densityCanvas.requestPaint() }
+                }
+                onWidthChanged: requestPaint()
+                onHeightChanged: requestPaint()
+
+                onPaint: {
+                    const ctx = getContext("2d")
+                    ctx.reset()
+
+                    const points = root.density
+                    if (!points || points.length === 0 || width <= 0)
+                        return
+
+                    // The bar covers [startPct..endPct] of the ruler, so
+                    // an event's position has to be re-expressed as a
+                    // fraction of the bar, not of the whole timeline.
+                    const span = root.endPct - root.startPct
+                    if (span <= 0)
+                        return
+
+                    // Bucket per pixel column and let overlap darken the
+                    // column: that is what makes a flurry of rolls look
+                    // different from idle chatter.
+                    const columns = Math.max(1, Math.floor(width))
+                    const counts = new Array(columns).fill(0)
+                    let busiest = 0
+                    for (let i = 0; i < points.length; ++i) {
+                        const frac = (points[i] - root.startPct) / span
+                        if (frac < 0 || frac > 1)
+                            continue
+                        const col = Math.min(columns - 1, Math.floor(frac * columns))
+                        counts[col] += 1
+                        if (counts[col] > busiest)
+                            busiest = counts[col]
+                    }
+                    if (busiest === 0)
+                        return
+
+                    for (let c = 0; c < columns; ++c) {
+                        if (counts[c] === 0)
+                            continue
+                        // Square root keeps a single message visible
+                        // without letting a dense burst wash the rest out.
+                        const weight = Math.sqrt(counts[c] / busiest)
+                        ctx.fillStyle = Qt.rgba(
+                            _tint.r, _tint.g, _tint.b, 0.18 + 0.55 * weight
+                        )
+                        ctx.fillRect(c, 0, 1, height)
+                    }
                 }
             }
         }

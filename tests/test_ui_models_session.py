@@ -788,3 +788,172 @@ def test_marking_listener_excludes_the_track(tmp_path: Path) -> None:
     tracks.updateSpeakerMapRow(1, "Bob", "PC", ["Боб"])
     assert tracks.data(tracks.index(1), TrackListModel.ExcludedRole) is False
     assert tracks.activeCount == 2
+
+
+class TestSourceDensityRole:
+    """The source lanes must carry real event positions to QML."""
+
+    _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def _session(self, tmp_path):
+        import shutil
+
+        session = tmp_path / "late"
+        session.mkdir()
+        shutil.copy(self._FIXTURE / "info.txt", session / "info.txt")
+        shutil.copy(
+            self._FIXTURE / "fvtt-log-fixture.txt",
+            session / "fvtt-log-fixture.txt",
+        )
+        shutil.copy(self._FIXTURE / "combat.json", session / "Бой.txt")
+        return session
+
+    def _rows(self, tmp_path):
+        from ui.models.session import SessionMeta, SourceListModel
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        session = self._session(tmp_path)
+        meta.openSession(str(session))
+        model.loadFromDir(str(session))
+        return model
+
+    def test_chat_row_carries_every_message(self, tmp_path, pin_system_tz):
+        pin_system_tz(2.0)
+        model = self._rows(tmp_path)
+        idx = model.index(0, 0)
+        assert model.data(idx, model.ParserIdRole) == "foundry-chat"
+        density = model.data(idx, model.DensityRole)
+        assert len(density) == 353
+        assert all(0.0 <= p <= 100.0 for p in density)
+
+    def test_combat_row_carries_every_roll(self, tmp_path, pin_system_tz):
+        pin_system_tz(2.0)
+        model = self._rows(tmp_path)
+        idx = model.index(1, 0)
+        assert model.data(idx, model.ParserIdRole) == "combat-log"
+        density = model.data(idx, model.DensityRole)
+        assert len(density) == 170
+
+    def test_density_sits_inside_the_row_span(self, tmp_path, pin_system_tz):
+        """Ticks are drawn relative to the bar, so they must fall in it.
+
+        Only the combat row is informative: the chat row's edges are by
+        construction its first and last message, so containment there
+        is true by definition.
+        """
+        pin_system_tz(2.0)
+        model = self._rows(tmp_path)
+        for row in (1,):
+            idx = model.index(row, 0)
+            start = model.data(idx, model.StartRole)
+            end = model.data(idx, model.EndRole)
+            density = model.data(idx, model.DensityRole)
+            assert density, f"row {row} has no density"
+            assert min(density) >= start - 0.001
+            assert max(density) <= end + 0.001
+
+    def test_density_is_empty_without_a_window(self, tmp_path):
+        """No info.txt → no window → plain bars, not invented ticks."""
+        from ui.models.session import SessionMeta, SourceListModel
+        import shutil
+
+        session = tmp_path / "no-info"
+        session.mkdir()
+        shutil.copy(
+            self._FIXTURE / "fvtt-log-fixture.txt",
+            session / "fvtt-log-fixture.txt",
+        )
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        meta.openSession(str(session))
+        model.loadFromDir(str(session))
+
+        idx = model.index(0, 0)
+        assert model.data(idx, model.DensityRole) == []
+
+
+class TestRulerClock:
+    """The ruler's wall-clock inputs, which nothing pinned before."""
+
+    _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def _open(self, tmp_path, *, with_chat=True, in_segment=False):
+        import shutil
+
+        from ui.models.session import SessionMeta, SourceListModel
+
+        session = tmp_path / "s"
+        session.mkdir()
+        info_dir = session / "craig-1" if in_segment else session
+        info_dir.mkdir(exist_ok=True)
+        shutil.copy(self._FIXTURE / "info.txt", info_dir / "info.txt")
+        shutil.copy(self._FIXTURE / "combat.json", session / "Бой.txt")
+        if with_chat:
+            shutil.copy(
+                self._FIXTURE / "fvtt-log-fixture.txt",
+                session / "fvtt-log-fixture.txt",
+            )
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        meta.openSession(str(session))
+        model.loadFromDir(str(session))
+        return meta
+
+    def test_clock_starts_at_the_first_message(self, tmp_path, pin_system_tz):
+        """Window opens 18:55 local — 1135 minutes past midnight."""
+        pin_system_tz(9.0)  # the combat anchor must win over this
+        meta = self._open(tmp_path)
+        assert meta.windowStartClockMinutes == 18 * 60 + 55
+        assert meta.hasTimeBeforeRecording is True
+        assert meta.recordingStartPct == pytest.approx(30.8, abs=0.3)
+
+    def test_window_minutes_span_the_session_not_the_audio(
+        self, tmp_path, pin_system_tz
+    ):
+        pin_system_tz(2.0)
+        meta = self._open(tmp_path)
+        # 16:55:09Z → 22:42:09Z is 5h47m; the audio is only 3h18m.
+        assert meta.windowMinutes == pytest.approx(347, abs=1)
+        assert meta.windowMinutes > meta.totalMinutes
+
+    def test_recording_inside_a_craig_segment_is_still_found(
+        self, tmp_path, pin_system_tz
+    ):
+        """A restarted recording keeps info.txt in craig-1/.
+
+        The banner already looked there; the ruler did not, so the two
+        disagreed about whether a late start had happened at all.
+        """
+        pin_system_tz(2.0)
+        meta = self._open(tmp_path, in_segment=True)
+        assert meta.hasTimeBeforeRecording is True
+        assert meta.recordingStartPct > 0.0
+
+    def test_clock_is_disabled_when_the_zone_is_unknown(self, tmp_path):
+        """No chat log to resolve against → elapsed labels, not UTC.
+
+        -1 is the ruler's "don't pretend" signal. Returning 0 would have
+        stamped UTC hours onto a session recorded elsewhere.
+        """
+        meta = self._open(tmp_path, with_chat=False)
+        assert meta.windowStartClockMinutes == -1
+
+    def test_window_resets_between_sessions(self, tmp_path):
+        """Opening another folder must not leave last session's clock up."""
+        from ui.models.session import SessionMeta
+
+        meta = self._open(tmp_path)
+        assert meta.windowMinutes > 0
+
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        meta.openSession(str(empty))
+        assert meta.windowMinutes == 0
+        assert meta.recordingStartPct == 0.0
+        assert meta.windowStartClockMinutes == -1
+        assert meta.hasTimeBeforeRecording is False
