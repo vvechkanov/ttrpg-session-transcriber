@@ -150,9 +150,14 @@ Item {
 
                 readonly property color _tint: root.parser.color
 
+                // Positions are relative to the bar, so a change of
+                // either edge invalidates the picture just as much as
+                // new data does.
                 Connections {
                     target: root
-                    function onDensityChanged() { densityCanvas.requestPaint() }
+                    function onDensityChanged()  { densityCanvas.requestPaint() }
+                    function onStartPctChanged() { densityCanvas.requestPaint() }
+                    function onEndPctChanged()   { densityCanvas.requestPaint() }
                 }
                 onWidthChanged: requestPaint()
                 onHeightChanged: requestPaint()

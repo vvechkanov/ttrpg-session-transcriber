@@ -59,7 +59,6 @@ def engine():
     eng = QQmlEngine()
     eng.addImportPath(str(_QML_ROOT))
     yield eng
-    del app
 
 
 #: Components created from QML default to JavaScript ownership, so the
@@ -98,12 +97,17 @@ def test_bars_fit_the_lane(engine):
     item = _make(engine, [0.5] * _REAL_PEAK_COUNT)
     bars = item.property("_barCount")
     pad = item.property("_padX")
-    gap = item.property("_gap")
     min_bar = item.property("_minBarWidth")
 
     pitch = (_LANE_WIDTH - 2 * pad) / bars
     assert pitch >= min_bar, f"pitch {pitch} leaves no room for a bar"
-    assert pad + bars * pitch <= _LANE_WIDTH + 0.001, "bars overflow the lane"
+
+    # The number that used to come out negative, read from the
+    # component rather than recomputed here — a test that redoes the
+    # formula only ever agrees with itself.
+    bar_width = item.property("_barWidth")
+    assert bar_width > 0, f"bar width {bar_width} draws nothing"
+    assert bar_width <= pitch + 0.001, "bars would overlap their neighbours"
 
 
 @pytest.mark.gui
@@ -114,7 +118,7 @@ def test_never_more_bars_than_data(engine):
 
 
 @pytest.mark.gui
-@pytest.mark.parametrize("width", [0.0, 1.0, 4.0, 60.0, 320.0, 2400.0])
+@pytest.mark.parametrize("width", [0.0, 1.0, 4.0, 5.0, 5.5, 60.0, 320.0, 2400.0])
 def test_no_bars_at_degenerate_widths(engine, width):
     """Collapsed and huge lanes must not produce nonsense counts."""
     item = _make(engine, [0.5] * _REAL_PEAK_COUNT, width=width)
@@ -123,6 +127,11 @@ def test_no_bars_at_degenerate_widths(engine, width):
     assert bars <= _REAL_PEAK_COUNT
     if width <= 2 * item.property("_padX"):
         assert bars == 0
+    else:
+        # A sliver of a lane must still not produce a bar wider than
+        # the space it has.
+        bar_width = item.property("_barWidth")
+        assert 0 <= bar_width <= width
 
 
 @pytest.mark.gui

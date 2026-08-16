@@ -11,9 +11,11 @@ The output is a :class:`TimelineWindow` whose :meth:`pct_for` returns a
 Design notes
 ------------
 
-* **Pure stdlib.** No PySide6, no project imports from ``sources/``,
-  ``mergers/`` or ``ui/``. This module lives in ``core/`` but only
-  imports ``datetime``, ``json``, ``re``, ``pathlib``.
+* **No PySide6, no ``ui/``, no ``mergers/``.** Module-level imports are
+  stdlib only. ``sources/`` is reached lazily inside the two functions
+  that resolve the chat log's timezone — they must use the merger's own
+  ladder or the screen would disagree with the output file. Keeping the
+  import lazy holds parsers off the UI startup path.
 * **UTC-only internally.** Callers pass timezone-aware datetimes; the
   parsers normalise to UTC on the way in. Naive datetimes are
   rejected in :meth:`pct_for` (would silently produce wrong percents).
@@ -232,7 +234,7 @@ def _combat_events(data: dict) -> tuple[datetime, ...]:
                 moment = _parse_iso_utc(message.get("timestamp"))
                 if moment is not None:
                     moments.append(moment)
-    return tuple(moments)
+    return tuple(sorted(moments))
 
 
 def _parse_iso_utc(value: object) -> datetime | None:
@@ -255,45 +257,70 @@ def _parse_iso_utc(value: object) -> datetime | None:
     return dt
 
 
-def chat_events(
+@dataclass(frozen=True)
+class ChatTimeline:
+    """Разобранный чат-лог: когда что было и в какой зоне это считалось."""
+
+    #: Моменты всех сообщений в UTC, по возрастанию.
+    moments: tuple[datetime, ...]
+    #: Разрешённый UTC-офсет лога. ``None`` — резолвер лишь угадал
+    #: (ступень ``heuristic``), и опираться на это число, чтобы
+    #: подписывать часы на линейке, нельзя.
+    tz_offset: float | None
+
+
+def chat_timeline(
     chat_log_path: Path, info_start: datetime | None
-) -> tuple[datetime, ...]:
-    """Моменты всех сообщений чата в UTC, по возрастанию.
+) -> ChatTimeline | None:
+    """Разобрать чат-лог один раз и отдать всё, что от него нужно экрану.
 
-    Для плотности на полосе источника. Пустой кортеж — если разобрать
-    не удалось; полоса тогда рисуется ровной, без штрихов.
+    Единственное место, где Timeline читает чат: и позиции штрихов, и
+    границы полосы, и офсет для подписей линейки берутся отсюда. Раньше
+    тем же занимались три функции, каждая со своим разбором файла и
+    своим набором перехватываемых исключений.
 
-    Офсет берётся тем же резолвером, что у мерджера: штрихи обязаны
-    стоять там же, где события реально лягут в ``merged.txt``.
+    ``None`` на любой беде — модуль обещает не бросать, а Timeline-экран
+    должен рисоваться даже на кривой папке.
     """
     if info_start is None:
-        return ()
+        return None
 
     try:
         from core.fvtt_helpers import session_combat_paths
         from sources.game_log.fvtt_chat import parse_fvtt_log, resolve_tz_offset
     except ImportError:
-        return ()
+        return None
 
     try:
         entries = parse_fvtt_log(chat_log_path)
-    except (OSError, UnicodeError, ValueError):
-        return ()
-    if not entries:
-        return ()
+        if not entries:
+            return None
+        combat_paths = session_combat_paths(chat_log_path)
+        resolution = resolve_tz_offset(
+            entries, info_start.astimezone(timezone.utc), combat_paths=combat_paths
+        )
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
 
-    info_utc = info_start.astimezone(timezone.utc)
-    try:
-        offset = resolve_tz_offset(
-            entries, info_utc, combat_paths=session_combat_paths(chat_log_path)
-        ).offset_hours
-    except (TypeError, ValueError):
-        return ()
+    moments = [_local_to_utc(e["datetime"], resolution.offset_hours) for e in entries]
+    return ChatTimeline(
+        moments=tuple(sorted(m for m in moments if m is not None)),
+        # Угаданный офсет годится, чтобы расставить события друг
+        # относительно друга, но не годится, чтобы назвать час.
+        tz_offset=resolution.offset_hours if resolution.is_reliable else None,
+    )
 
-    moments = [
-        _local_to_utc(entry["datetime"], offset) for entry in entries
-    ]
-    return tuple(sorted(m for m in moments if m is not None))
+
+def chat_events(
+    chat_log_path: Path, info_start: datetime | None
+) -> tuple[datetime, ...]:
+    """Моменты всех сообщений чата в UTC, по возрастанию.
+
+    Тонкая обёртка над :func:`chat_timeline`. Пустой кортеж — если
+    разобрать не удалось; полоса тогда рисуется ровной, без штрихов.
+    """
+    timeline = chat_timeline(chat_log_path, info_start)
+    return timeline.moments if timeline is not None else ()
 
 
 def chat_span(
@@ -302,71 +329,19 @@ def chat_span(
 ) -> tuple[datetime, datetime] | None:
     """Return ``(first_ts, last_ts)`` UTC of an FVTT chat log, or ``None``.
 
-    FVTT chat exports carry *local* (browser) timestamps. To anchor
-    them in UTC we need Craig's recording start time — without it we
-    can't resolve the browser's timezone offset. Goes through the same
-    ``resolve_tz_offset`` ladder as
-    :class:`sources.game_log.fvtt_chat.FvttChatSource`, so the strip on
-    the Timeline screen sits where the merger actually put the chat.
-    (It used to call ``guess_tz_offset`` directly and could disagree
-    with the merger by whole hours.)
-
-    Returns ``None`` when:
-        * ``info_start`` is ``None`` (no anchor available);
-        * the file is missing, unreadable, or empty of chat entries;
-        * parsing raises unexpectedly (defensive — ``None`` beats a
-          500-stack-trace in the Timeline screen).
+    Thin wrapper over :func:`chat_timeline`, which does the parsing and
+    resolves the offset through the same ladder as the merger — the
+    strip has to sit where the merge actually puts the chat.
     """
-
-    if info_start is None:
+    timeline = chat_timeline(chat_log_path, info_start)
+    if timeline is None or not timeline.moments:
         return None
-
-    # Local import — keeps the module import graph clean for anyone who
-    # statically inspects ``core.timeline_window``; breaks a potential
-    # circular import if ``sources/`` ever pulls in ``core/`` helpers.
-    try:
-        from core.fvtt_helpers import session_combat_paths
-        from sources.game_log.fvtt_chat import (
-            parse_fvtt_log,
-            resolve_tz_offset,
-        )
-    except ImportError:
-        return None
-
-    try:
-        entries = parse_fvtt_log(chat_log_path)
-    except (OSError, UnicodeError, ValueError):
-        return None
-
-    if not entries:
-        return None
-
-    info_utc = info_start.astimezone(timezone.utc)
-    combat_paths = session_combat_paths(chat_log_path)
-
-    try:
-        tz_offset = resolve_tz_offset(
-            entries, info_utc, combat_paths=combat_paths
-        ).offset_hours
-    except (TypeError, ValueError):
-        return None
-
-    first_local = entries[0]["datetime"]
-    last_local = entries[-1]["datetime"]
-
-    first_utc = _local_to_utc(first_local, tz_offset)
-    last_utc = _local_to_utc(last_local, tz_offset)
-    if first_utc is None or last_utc is None:
-        return None
-
-    if last_utc < first_utc:
-        first_utc, last_utc = last_utc, first_utc
-    return first_utc, last_utc
+    return timeline.moments[0], timeline.moments[-1]
 
 
 def display_offset_hours(
     chat_log_path: Path | None, info_start: datetime | None
-) -> float:
+) -> float | None:
     """На сколько сдвигать UTC, чтобы показать время так, как его видели.
 
     Линейка обязана называть тот же час, что стоит в чат-логе у
@@ -375,30 +350,30 @@ def display_offset_hours(
 
     Без чат-лога брать неоткуда: тогда зона машины, но **на дату
     сессии**, а не на сегодня, иначе зимняя сессия, открытая летом,
-    покажет время на час мимо. Совсем без якорей — ``0.0``.
+    покажет время на час мимо.
+
+    ``None`` — «сказать нечего»: якорей нет или офсет лишь угадан. Это
+    не то же самое, что ``0.0``: раньше обе ситуации возвращали ноль, и
+    линейка молча подписывала UTC как местное время. Получив ``None``,
+    вызывающий обязан откатиться на время от начала, а не выдумывать
+    часы.
     """
     if chat_log_path is not None and info_start is not None:
-        try:
-            from core.fvtt_helpers import session_combat_paths
-            from sources.game_log.fvtt_chat import parse_fvtt_log, resolve_tz_offset
-
-            entries = parse_fvtt_log(chat_log_path)
-            if entries:
-                return resolve_tz_offset(
-                    entries,
-                    info_start.astimezone(timezone.utc),
-                    combat_paths=session_combat_paths(chat_log_path),
-                ).offset_hours
-        except (ImportError, OSError, UnicodeError, TypeError, ValueError):
-            pass
+        timeline = chat_timeline(chat_log_path, info_start)
+        if timeline is not None:
+            # И ``None`` тоже возвращаем как есть. Скатиться отсюда на
+            # зону машины было бы подлогом: резолвер её уже пробовал —
+            # ступень ``system`` стоит выше ``heuristic``, — и раз он
+            # дошёл до догадки, значит, зона недоступна.
+            return timeline.tz_offset
 
     if info_start is None:
-        return 0.0
+        return None
     try:
         offset = info_start.astimezone().utcoffset()
     except (ValueError, OSError):
-        return 0.0
-    return offset.total_seconds() / 3600 if offset is not None else 0.0
+        return None
+    return offset.total_seconds() / 3600 if offset is not None else None
 
 
 def _local_to_utc(local_dt: datetime, tz_offset_hours: float) -> datetime | None:
@@ -422,6 +397,12 @@ def _local_to_utc(local_dt: datetime, tz_offset_hours: float) -> datetime | None
 #: rejected — a 2-minute timeline is more confusing than helpful; the
 #: caller falls back to the legacy 0..100% behaviour instead.
 _MIN_WINDOW_SECONDS = 600.0
+
+
+#: Насколько далеко до старта записи окну позволено уходить влево.
+#: Двенадцать часов с запасом накрывают «пришли за час, расставили
+#: фишки, начали» и при этом отсекают выгруженный целиком лог кампании.
+_MAX_HOURS_BEFORE_RECORDING = 12.0
 
 
 #: Default window length when no chat / combat data is available.
@@ -480,6 +461,18 @@ def build_window(
     # audio. Where the recording sits is kept separately, in
     # ``recording_start``, so the UI can shade the part with no sound.
     t0 = min(candidates_start)
+
+    # Но не бесконечно влево. Кнопка Foundry "Export Chat Log" выгружает
+    # весь лог кампании, а не одну сессию, — тогда самая ранняя запись
+    # окажется недельной давности, вся сессия схлопнется в полоску у
+    # правого края, а линейка получит десятки тысяч минут и столько же
+    # делений. Мерджер от этого защищён (события до записи он и так
+    # выбрасывает), у экрана такой защиты не было.
+    if info_start is not None:
+        earliest_sane = info_start.astimezone(timezone.utc) - timedelta(
+            hours=_MAX_HOURS_BEFORE_RECORDING
+        )
+        t0 = max(t0, earliest_sane)
 
     candidates_end: list[datetime] = []
     if info_start is not None and max_track_duration is not None and max_track_duration > 0:

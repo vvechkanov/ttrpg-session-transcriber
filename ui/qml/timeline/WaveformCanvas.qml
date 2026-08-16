@@ -57,9 +57,19 @@ Canvas {
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
 
+    // Exposed so a test can pin the number that was once negative,
+    // rather than recomputing the formula and agreeing with itself.
+    readonly property real _barWidth: {
+        if (_barCount === 0)
+            return 0
+        const pitch = (width - 2 * _padX) / _barCount
+        return Math.max(0, Math.min(pitch, Math.max(_minBarWidth, pitch - _gap)))
+    }
+
     onPaint: {
         const ctx = getContext("2d")
         ctx.reset()
+        ctx.clearRect(0, 0, width, height)
 
         const bars = _barCount
         if (bars === 0)
@@ -68,7 +78,7 @@ Canvas {
         const values = peaks
         const total = values.length
         const pitch = (width - 2 * _padX) / bars
-        const barW = Math.max(_minBarWidth, pitch - _gap)
+        const barW = _barWidth
         const filledUntil = Math.round(progress * bars)
 
         for (let i = 0; i < bars; ++i) {

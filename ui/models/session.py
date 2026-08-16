@@ -40,9 +40,7 @@ from core.speaker_map import load_speaker_map_raw, migrate_legacy_speaker_map
 from core.timeline_window import (
     TimelineWindow,
     build_window,
-    chat_events,
-    chat_span,
-    display_offset_hours,
+    chat_timeline,
     parse_combat_file,
     parse_info_start,
 )
@@ -72,23 +70,6 @@ def _coverage_warning_for(session_dir: Path) -> str:
         logger.exception("Coverage analysis failed for %s", session_dir)
         return ""
     return report.message if report is not None else ""
-
-
-def _display_offset_for(session_dir: Path) -> float:
-    """Смещение для настенного времени на линейке, или ``0.0``.
-
-    Как и :func:`_coverage_warning_for`, обёрнуто широко: подпись на
-    линейке не стоит того, чтобы из-за неё не открылась сессия.
-    """
-    try:
-        chat_logs = detect_fvtt_chat_logs(session_dir)
-        return display_offset_hours(
-            chat_logs[0] if chat_logs else None,
-            parse_info_start(session_dir / "info.txt"),
-        )
-    except Exception:  # noqa: BLE001 — см. докстринг
-        logger.exception("Display offset failed for %s", session_dir)
-        return 0.0
 
 
 class SessionMeta(QObject):
@@ -131,8 +112,9 @@ class SessionMeta(QObject):
         self._coverage_warning = ""
         # Смещение для показа настенного времени на линейке. Считается
         # тем же резолвером, что и у мерджера, — иначе линейка называла
-        # бы часы, которых нет в чат-логе рядом.
-        self._display_offset_h = 0.0
+        # бы часы, которых нет в чат-логе рядом. ``None`` — сказать
+        # нечего, и линейка обязана вернуться к времени от начала.
+        self._display_offset_h: float | None = None
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
@@ -166,12 +148,30 @@ class SessionMeta(QObject):
 
         Линейка подписывает деления настенным временем, поэтому ей
         нужна точка отсчёта, а не только длина.
+
+        ``-1`` — зона неизвестна или лишь угадана; линейка тогда
+        подписывает время от начала окна. Возвращать здесь ``0``
+        значило бы объявить UTC местным временем.
         """
         w = self._timeline_window
-        if w is None:
-            return 0
+        if w is None or self._display_offset_h is None:
+            return -1
         local = w.t0 + timedelta(hours=self._display_offset_h)
         return local.hour * 60 + local.minute
+
+    @Property(bool, notify=timelineWindowChanged)
+    def hasTimeBeforeRecording(self) -> bool:
+        """Есть ли в окне отрезок, который запись не застала."""
+        w = self._timeline_window
+        return w is not None and w.covers_time_before_recording
+
+    def setDisplayOffset(self, offset_hours: float | None) -> None:
+        """Принять офсет для подписей линейки от :class:`SourceListModel`.
+
+        Не ``Slot``: зовёт только Python-склейка, у QML тут дел нет.
+        """
+        self._display_offset_h = offset_hours
+        self.timelineWindowChanged.emit()
 
     @Property(str, notify=coverageWarningChanged)
     def coverageWarning(self) -> str:
@@ -188,6 +188,11 @@ class SessionMeta(QObject):
 
     @Property(float, notify=totalMinutesChanged)
     def segmentSplitPct(self) -> float:
+        # ДОЛГ: доля считается от длительности записи, а линейка теперь
+        # размечает всё окно — на сессии с поздним стартом это разные
+        # величины. Пока не стреляет: ``_seg_split_min`` всегда 0 и
+        # маркер скрыт. Появится настоящий split-discovery — считать
+        # надо будет через ``TimelineWindow.pct_for``.
         if self._total_min <= 0:
             return 0.0
         return (self._seg_split_min / self._total_min) * 100.0
@@ -261,14 +266,21 @@ class SessionMeta(QObject):
         # Drop any stale window from a previous session — SourceListModel
         # rebuilds it from scratch on the sessionOpened signal below.
         self._timeline_window = None
+        # Офсет проставит SourceListModel по сигналу ниже: он всё равно
+        # разбирает чат-лог, и второй разбор ради того же числа лишний.
+        self._display_offset_h = None
         self._coverage_warning = _coverage_warning_for(path)
-        self._display_offset_h = _display_offset_for(path)
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
         self.totalMinutesChanged.emit()
         self.segmentSplitMinutesChanged.emit()
         self.coverageWarningChanged.emit()
+        # Окно только что обнулилось. Без этого сигнала QML продолжает
+        # держать проценты и часы предыдущей сессии до тех пор, пока
+        # SourceListModel не построит новое окно — а он может и не
+        # построить.
+        self.timelineWindowChanged.emit()
         self.sessionOpened.emit(str(path))
 
     def timelineWindow(self) -> TimelineWindow | None:
@@ -589,8 +601,18 @@ class TrackListModel(QAbstractListModel):
                 else []
             )
             if window is None or seg.start_ts is None:
+                # Без своего таймштампа сегмент всё же не может начаться
+                # раньше записи — иначе осциллограмма ляжет на зону,
+                # которую линейка подсветила как беззвучную.
+                fallback_start = (
+                    window.recording_start_pct if window is not None else 0.0
+                )
                 payload.append(
-                    {"startPct": 0.0, "endPct": 100.0, "peaks": list(seg_peaks)}
+                    {
+                        "startPct": fallback_start,
+                        "endPct": 100.0,
+                        "peaks": list(seg_peaks),
+                    }
                 )
                 continue
             start_pct = window.pct_for(seg.start_ts)
@@ -1263,20 +1285,31 @@ class SourceListModel(QAbstractListModel):
         chat_paths = detect_fvtt_chat_logs(session_dir)
         combat_paths = detect_combat_logs(session_dir)
 
-        info_start = parse_info_start(session_dir / "info.txt")
+        # Same lookup the coverage banner uses, including info.txt
+        # inside craig-* segments. Reading only session_dir/info.txt
+        # here meant a restarted recording produced a banner about a
+        # late start with no matching mark on the ruler.
+        from core.coverage import session_start
 
-        # Chat span is derived from the *first* chat log only. Real
-        # sessions carry at most one fvtt-log-*.txt per export; if
-        # more show up later we'd need a policy for merging spans.
+        info_start = session_start(session_dir)
+
         # One parse per chat log, reused for the span, the density
-        # ticks and the window. The span used to be taken by a separate
-        # chat_span() call per row, which re-read and re-parsed the same
-        # file each time.
+        # ticks, the window and the ruler's clock. The span used to
+        # take its own chat_span() call per row and the ruler offset a
+        # further parse in SessionMeta — three reads of one file.
+        #
+        # Only the first chat log feeds the span: real sessions carry
+        # at most one fvtt-log-*.txt per export, and merging spans
+        # across several would need a policy nobody has needed yet.
         chat_moments: dict[Path, tuple] = {}
+        display_offset: float | None = None
         for path in chat_paths:
-            moments = chat_events(path, info_start)
-            if moments:
-                chat_moments[path] = moments
+            timeline = chat_timeline(path, info_start)
+            if timeline is None or not timeline.moments:
+                continue
+            chat_moments[path] = timeline.moments
+            if display_offset is None:
+                display_offset = timeline.tz_offset
 
         chat_range: tuple | None = None
         if chat_paths and chat_paths[0] in chat_moments:
@@ -1300,6 +1333,7 @@ class SourceListModel(QAbstractListModel):
         # consumers (tests, future ruler widgets) can read it.
         if self._session_meta is not None:
             self._session_meta.setTimelineWindow(window)
+            self._session_meta.setDisplayOffset(display_offset)
 
         new_rows: list[SourceEntry] = []
         for path in chat_paths:

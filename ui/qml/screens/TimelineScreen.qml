@@ -261,6 +261,7 @@ Rectangle {
                                             ? sessionMeta.windowStartClockMinutes
                                             : -1
                                         recordingStartPct: sessionMeta.recordingStartPct
+                                        hasTimeBefore: sessionMeta.hasTimeBeforeRecording
                                         segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }
@@ -391,6 +392,7 @@ Rectangle {
                                             ? sessionMeta.windowStartClockMinutes
                                             : -1
                                         recordingStartPct: sessionMeta.recordingStartPct
+                                        hasTimeBefore: sessionMeta.hasTimeBeforeRecording
                                         segmentSplitPct: sessionMeta.segmentSplitPct
                                     }
                                 }

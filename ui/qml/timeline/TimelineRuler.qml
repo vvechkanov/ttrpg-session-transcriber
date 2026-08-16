@@ -31,8 +31,12 @@ Item {
     readonly property bool _wallClock: clockStartMinutes >= 0
 
     // Where the recording begins, 0..100 of the ruler. Everything left
-    // of it is material with no audio behind it.
+    // of it is material with no audio behind it. ``hasTimeBefore``
+    // is passed separately rather than derived from ``> 0`` so the
+    // "is there anything before the recording" question is answered in
+    // one place — Python — instead of twice here.
     property real recordingStartPct: 0.0
+    property bool hasTimeBefore: false
 
     implicitHeight: 22
 
@@ -45,7 +49,7 @@ Item {
     // that has chat and dice but no sound. Hatch-free, just a wash, so
     // it reads as "outside" without competing with the tick marks.
     Rectangle {
-        visible: root.recordingStartPct > 0
+        visible: root.hasTimeBefore
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         x: 0
@@ -55,7 +59,7 @@ Item {
 
     // The moment Record was pressed.
     Rectangle {
-        visible: root.recordingStartPct > 0
+        visible: root.hasTimeBefore
         x: root.width * (root.recordingStartPct / 100.0)
         y: 0
         width: 1

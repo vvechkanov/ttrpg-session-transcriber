@@ -496,3 +496,79 @@ class TestEventDensity:
 
         info_start = parse_info_start(self.FIXTURE / "info.txt")
         assert chat_events(tmp_path / "nope.txt", info_start) == ()
+
+
+class TestDisplayOffsetHonesty:
+    """A ruler must not label UTC as if it were the session's clock."""
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def test_none_without_any_anchor(self):
+        """No chat log and no recording time — nothing to say.
+
+        Returning 0.0 here (as it did) is indistinguishable from a real
+        UTC+0 session, and the ruler happily stamped UTC hours onto a
+        session recorded at +2.
+        """
+        from core.timeline_window import display_offset_hours
+
+        assert display_offset_hours(None, None) is None
+
+    def test_resolved_offset_when_the_chat_says_so(self, pin_system_tz):
+        from core.timeline_window import display_offset_hours
+
+        pin_system_tz(9.0)  # wrong on purpose; the combat anchor wins
+        info_start = parse_info_start(self.FIXTURE / "info.txt")
+        assert (
+            display_offset_hours(self.FIXTURE / "fvtt-log-fixture.txt", info_start)
+            == 2.0
+        )
+
+    def test_none_when_the_offset_was_only_guessed(self, tmp_path, monkeypatch):
+        """A guessed offset must not become a clock label.
+
+        The whole point of TzResolution.is_reliable is that a guess is
+        distinguishable; spending it on wall-clock hours would put a
+        confident time on an uncertain number.
+        """
+        import sources.game_log.fvtt_chat as fvtt
+        from core.timeline_window import display_offset_hours
+
+        monkeypatch.setattr(fvtt, "_system_utc_offset_hours", lambda *_a: None)
+
+        chat = tmp_path / "fvtt-log-x.txt"
+        chat.write_text(
+            "[8/15/2026, 8:00:00 PM] GM\nhi\n---------------------------\n",
+            encoding="utf-8",
+        )
+        info_start = datetime(2026, 8, 15, 18, 0, tzinfo=timezone.utc)
+        assert display_offset_hours(chat, info_start) is None
+
+
+class TestWindowDoesNotRunAway:
+    """A whole-campaign chat export must not stretch the window to weeks."""
+
+    REC = datetime(2026, 8, 15, 18, 42, tzinfo=timezone.utc)
+
+    def test_ancient_chat_is_clipped(self):
+        ancient = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=self.REC,
+            max_track_duration=11879.8,
+            chat=(ancient, datetime(2026, 8, 15, 21, 31, tzinfo=timezone.utc)),
+            combats=[],
+        )
+        assert window is not None
+        assert window.t0 > ancient
+        assert (self.REC - window.t0).total_seconds() == pytest.approx(12 * 3600)
+
+    def test_a_normal_late_start_is_untouched(self):
+        """1h47m early is ordinary and must survive the clip intact."""
+        chat_first = datetime(2026, 8, 15, 16, 55, 9, tzinfo=timezone.utc)
+        window = build_window(
+            info_start=self.REC,
+            max_track_duration=11879.8,
+            chat=(chat_first, datetime(2026, 8, 15, 21, 31, tzinfo=timezone.utc)),
+            combats=[],
+        )
+        assert window.t0 == chat_first

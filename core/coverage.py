@@ -117,7 +117,7 @@ def analyse_coverage(session_dir: Path) -> CoverageReport | None:
     где всё хорошо, и сессия, которую не удалось прочитать, выглядят
     для вызывающего одинаково.
     """
-    info_start = _session_start(session_dir)
+    info_start = session_start(session_dir)
     if info_start is None:
         return None
 
@@ -141,8 +141,12 @@ def analyse_coverage(session_dir: Path) -> CoverageReport | None:
     )
 
 
-def _session_start(session_dir: Path) -> datetime | None:
+def session_start(session_dir: Path) -> datetime | None:
     """Старт записи Craig в UTC, или ``None``.
+
+    Публичная: тем же вопросом задаётся Timeline-экран, и разойтись им
+    нельзя — иначе баннер сообщит о позднем старте, а линейка его не
+    покажет, потому что "не нашла" ту же запись.
 
     Сперва ``info.txt`` в корне сессии, затем — первый Craig-сегмент.
     В сессиях, где запись перезапускали, ``info.txt`` лежит внутри
@@ -269,4 +273,4 @@ def _ru_duration(seconds: float) -> str:
     return f"{minutes} мин"
 
 
-__all__ = ["CoverageReport", "analyse_coverage"]
+__all__ = ["CoverageReport", "analyse_coverage", "session_start"]
