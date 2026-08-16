@@ -1,9 +1,13 @@
 """list[ScriptEvent] → bytes. Импортирует только domain."""
 
 from renderers.base import Renderer
+from renderers.combat_aware import CombatAwareRenderer
 from renderers.plain_text import PlainTextRenderer
 
-RENDERERS: dict[str, type[Renderer]] = {"plain-text": PlainTextRenderer}
+RENDERERS: dict[str, type[Renderer]] = {
+    "plain-text": PlainTextRenderer,
+    "combat-aware": CombatAwareRenderer,
+}
 
 
 def get_renderer(name: str) -> Renderer:
