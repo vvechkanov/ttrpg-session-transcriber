@@ -11,6 +11,7 @@ folder or picks one via the Empty-screen "Выбрать папку…" button.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,7 +45,7 @@ from core.timeline_window import (
     parse_info_start,
 )
 
-
+logger = logging.getLogger(__name__)
 
 
 def _url_to_path(url_or_path: str) -> Path:
@@ -53,6 +54,22 @@ def _url_to_path(url_or_path: str) -> Path:
     if url_or_path.startswith("file://") or url_or_path.startswith("file:///"):
         return Path(QUrl(url_or_path).toLocalFile())
     return Path(url_or_path)
+
+
+def _coverage_warning_for(session_dir: Path) -> str:
+    """Текст баннера о непокрытых записью логах, или ``""``.
+
+    Обёрнуто в широкий ``except``: открытие сессии не должно падать
+    из-за подсказки. Экран важнее подсказки.
+    """
+    try:
+        from core.coverage import analyse_coverage
+
+        report = analyse_coverage(session_dir)
+    except Exception:  # noqa: BLE001 — см. докстринг
+        logger.exception("Coverage analysis failed for %s", session_dir)
+        return ""
+    return report.message if report is not None else ""
 
 
 class SessionMeta(QObject):
@@ -69,6 +86,7 @@ class SessionMeta(QObject):
     segmentSplitMinutesChanged = Signal()
     sessionTitleChanged = Signal()
     campaignTitleChanged = Signal()
+    coverageWarningChanged = Signal()
 
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
@@ -87,10 +105,23 @@ class SessionMeta(QObject):
         # ``None`` means "no window was built" and source rows should
         # fall back to the legacy 0..100% full-width layout.
         self._timeline_window: TimelineWindow | None = None
+        # Человеческое описание того, что осталось без аудио, или "".
+        # Заполняется в openSession — до всякого ASR, чтобы поздний
+        # старт записи было видно ещё до запуска пайплайна.
+        self._coverage_warning = ""
 
     @Property(int, notify=totalMinutesChanged)
     def totalMinutes(self) -> int:
         return self._total_min
+
+    @Property(str, notify=coverageWarningChanged)
+    def coverageWarning(self) -> str:
+        """Что из игровых логов не попало в запись. ``""`` — всё в порядке.
+
+        См. :mod:`core.coverage`. QML показывает это баннером на экране
+        сессии; пустая строка баннер прячет.
+        """
+        return self._coverage_warning
 
     @Property(int, notify=segmentSplitMinutesChanged)
     def segmentSplitMinutes(self) -> int:
@@ -171,11 +202,13 @@ class SessionMeta(QObject):
         # Drop any stale window from a previous session — SourceListModel
         # rebuilds it from scratch on the sessionOpened signal below.
         self._timeline_window = None
+        self._coverage_warning = _coverage_warning_for(path)
 
         self.sessionTitleChanged.emit()
         self.campaignTitleChanged.emit()
         self.totalMinutesChanged.emit()
         self.segmentSplitMinutesChanged.emit()
+        self.coverageWarningChanged.emit()
         self.sessionOpened.emit(str(path))
 
     def timelineWindow(self) -> TimelineWindow | None:

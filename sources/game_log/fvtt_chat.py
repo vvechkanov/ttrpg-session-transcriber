@@ -12,21 +12,29 @@ Port логики из ``scripts/parse_fvtt_chat.py`` (``parse_fvtt_log``,
 
 ``info.txt`` от Craig содержит ``Start time: <ISO8601>`` в UTC.
 Временные метки чата — в local time браузера, поэтому offset либо
-передаётся вручную, либо определяется по слоёному fallback'у:
+передаётся вручную, либо определяется по слоёному fallback'у.
 
-    1) ``craig-start`` маркер в чате (точный якорь);
-    2) системная таймзона машины, где идёт мердж;
-    3) эвристика min|delta| по первому сообщению.
+Лесенка живёт в одном месте — :func:`resolve_tz_offset`. Это важно:
+раньше её знал только мерджер, а UI и таймлайн звали ``guess_tz_offset``
+напрямую и получали другой ответ на тех же файлах. Все, кому нужен
+offset, обязаны идти через резолвер.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal, Sequence
 
 from domain.annotations import ChatMessage
 from sources.base import Source
+
+logger = logging.getLogger(__name__)
 
 _TS_RE = re.compile(
     r"^\[(\d{1,2}/\d{1,2}/\d{4},\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)\]\s*(.+)$"
@@ -41,13 +49,85 @@ _ANCHOR_MARKER_RE = re.compile(r"^\s*[/\[]?\s*craig[-_ ]?start\b", re.IGNORECASE
 
 # Реальные UTC-офсеты в природе живут в [-12, +14]. Если маркер даёт
 # что-то за пределами — это либо опечатка времени, либо маркер от
-# другой записи, либо мусор. Игнорируем, не доверяем.
+# другой записи, либо мусор. Игнорируем, не доверяем. Эти же границы
+# задают диапазон перебора кандидатов — см. :func:`_offset_candidates`.
 _MAX_REASONABLE_OFFSET_H = 14.0
+_MIN_REASONABLE_OFFSET_H = -12.0
+
+# До чего округлять офсет, вычисленный по маркеру ``craig-start``.
+# Четверть часа — самое мелкое зерно, в которое укладываются реальные
+# зоны (Индия +5:30, Непал +5:45, Чатем +12:45), и одновременно с
+# запасом больше, чем разброс между «нажал Record» и «отправил маркер».
+_ANCHOR_QUANTUM_HOURS = 0.25
 
 # FVTT chat log не размечает ic/ooc: мы ставим "ic" по умолчанию, так как
 # типичный use case — логирование ролевых сообщений. Если позже появится
 # разбор chat flavor'ов и OOC-маркеров, канал можно будет вычислять.
 _DEFAULT_CHANNEL = "ic"
+
+
+#: Ступени лесенки :func:`resolve_tz_offset`, от надёжного к шаткому.
+TzSource = Literal["explicit", "anchor", "combat", "system", "heuristic"]
+
+#: Ступени, чей ответ не является догадкой. Белый список, а не «всё
+#: кроме heuristic»: иначе любая новая ступень автоматически считалась
+#: бы надёжной, и UI поставил бы зелёную галочку на угаданном офсете.
+_RELIABLE_SOURCES: frozenset[str] = frozenset(
+    {"explicit", "anchor", "combat", "system"}
+)
+
+# ── Параметры якоря по боевому дампу ─────────────────────────────────────
+
+#: Шаг перебора кандидатов. Реальные зоны кратны 15 минутам (Непал —
+#: UTC+5:45, Чатем — +12:45), меньший шаг ничего не добавит, а шума
+#: наберёт.
+_COMBAT_STEP_HOURS = 0.25
+
+#: Сколько боевых событий нужно, чтобы вообще пытаться. На трёх бросках
+#: совпадение — случайность, а не сигнал.
+_COMBAT_MIN_EVENTS = 10
+
+#: Какая доля боевых событий должна лечь на сообщения чата. Планка
+#: высокая осознанно: ошибиться зоной хуже, чем скатиться на ступень ниже.
+_COMBAT_MIN_MATCH_RATIO = 0.6
+
+#: Во сколько раз лучший кандидат должен обойти второго. Без этого на
+#: логе с равномерной болтовнёй победит случайный сосед.
+_COMBAT_MIN_MARGIN = 1.5
+
+
+@dataclass(frozen=True)
+class TzResolution:
+    """Чем закончился поиск UTC-офсета для чат-лога.
+
+    Возвращается :func:`resolve_tz_offset`. Помимо самого офсета несёт
+    то, откуда он взялся — UI показывает это пользователю, а тесты по
+    ``source`` проверяют, что сработала именно та ступень лесенки.
+    """
+
+    offset_hours: float
+    #: Какая ступень дала ответ: ``explicit`` (передан руками),
+    #: ``anchor`` (маркер ``craig-start`` в чате), ``system``
+    #: (таймзона машины на дату записи), ``heuristic`` (min|delta| по
+    #: первому сообщению — ненадёжна, см. :func:`guess_tz_offset`).
+    source: TzSource
+
+    @property
+    def is_reliable(self) -> bool:
+        """``False``, если офсет по сути угадан.
+
+        Эвристика структурно ломается, когда запись начали заметно
+        позже начала чата, — а это ровно тот случай, когда человеку
+        и надо посмотреть на результат своими глазами.
+        """
+        return self.source in _RELIABLE_SOURCES
+
+
+#: Ответ для пустого чат-лога. Офсет там ни на что не влияет — сдвигать
+#: нечего, — но помечать его надёжным было бы враньём. Константа общая
+#: с ``core.fvtt_helpers``, чтобы политика пустого лога жила в одном
+#: месте, а не расползлась по слоям.
+EMPTY_LOG_RESOLUTION = TzResolution(offset_hours=0.0, source="heuristic")
 
 
 class FvttChatSource(Source):
@@ -60,18 +140,33 @@ class FvttChatSource(Source):
         chat_log_path: Path,
         info_file_path: Path | None = None,
         tz_offset: float | None = None,
+        combat_paths: Sequence[Path] = (),
     ) -> None:
         self.chat_log_path = chat_log_path
         self.info_file_path = info_file_path
         self.tz_offset = tz_offset
+        #: Боевые дампы этой сессии — сырьё для таймзонного якоря, см.
+        #: :func:`find_combat_offset`. Передаются снаружи: поиск файлов
+        #: живёт в ``core``, а ``sources`` его импортировать не может
+        #: (см. layer rules в ``ARCHITECTURE.md``).
+        self.combat_paths = tuple(combat_paths)
+        #: Результат последнего :meth:`extract` — какой офсет взяли и
+        #: откуда. ``None`` пока extract не вызывали. UI читает это,
+        #: чтобы показать, чем разрешилась таймзона.
+        self.last_resolution: TzResolution | None = None
 
     def extract(self, session_dir: Path) -> list[ChatMessage]:
         """Прочитать chat log и вернуть ``list[ChatMessage]``.
 
         Таймштампы — в секундах от начала записи (Craig ``info.txt``).
         """
+        # Сбрасываем сразу: иначе при раннем возврате останется ответ от
+        # предыдущего extract, и UI покажет офсет от чужого запуска.
+        self.last_resolution = None
+
         entries = parse_fvtt_log(self.chat_log_path)
         if not entries:
+            self.last_resolution = EMPTY_LOG_RESOLUTION
             return []
 
         info_path = self.info_file_path
@@ -87,30 +182,58 @@ class FvttChatSource(Source):
 
         rec_start = parse_info_start_time(info_path)
 
-        tz_offset = self.tz_offset
-        if tz_offset is None:
-            # Step 1: явный якорь в чате — самое надёжное.
-            tz_offset = find_anchor_offset(entries, rec_start)
-        if tz_offset is None:
-            # Step 2: системная таймзона. Работает, пока чат экспортит и
-            # мердж запускает один и тот же человек на одной машине.
-            tz_offset = _system_utc_offset_hours()
-        if tz_offset is None:
-            # Step 3: fallback-эвристика. Промахнётся, если Craig запустили
-            # сильно позже начала FVTT-болтовни — но лучше, чем ничего.
-            tz_offset = guess_tz_offset(entries, rec_start)
+        resolution = resolve_tz_offset(
+            entries,
+            rec_start,
+            explicit=self.tz_offset,
+            combat_paths=self.combat_paths,
+        )
+        self.last_resolution = resolution
+        tz_offset = resolution.offset_hours
 
         messages: list[ChatMessage] = []
+        earliest_at: float | None = None
         for entry in entries:
             entry_utc = entry["datetime"] - timedelta(hours=tz_offset)
             entry_utc = entry_utc.replace(tzinfo=timezone.utc)
             at = (entry_utc - rec_start).total_seconds()
+            if earliest_at is None or at < earliest_at:
+                earliest_at = at
             if at < 0:
                 # Сообщение отправлено до старта записи — отбрасываем
                 continue
             messages.append(_to_chat_message(entry, at))
 
+        dropped = len(entries) - len(messages)
+        if dropped:
+            # Раньше это происходило молча. На сессии, где Craig
+            # запустили с опозданием, так исчезали сотни сообщений и
+            # целые бои — и замечали это в лучшем случае через месяц.
+            logger.warning(
+                "%s: %d of %d chat entries predate the recording and were "
+                "dropped (recording starts %s after the log begins, "
+                "tz offset %+.2fh from %s)",
+                self.chat_log_path.name,
+                dropped,
+                len(entries),
+                _format_duration(-earliest_at if earliest_at is not None else 0.0),
+                tz_offset,
+                resolution.source,
+            )
+
         return messages
+
+
+def _format_duration(seconds: float) -> str:
+    """``6420.0`` → ``"1h47m"``. Для логов.
+
+    Парная функция для UI — ``core.coverage._ru_duration`` (``"1 ч 47 мин"``).
+    Объединять их не надо: аудитории и языки разные, а ``sources`` по
+    слоевым правилам не может импортировать ``core``.
+    """
+    total_minutes = int(round(abs(seconds) / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _to_chat_message(entry: dict, at: float) -> ChatMessage:
@@ -120,6 +243,67 @@ def _to_chat_message(entry: dict, at: float) -> ChatMessage:
         channel=_DEFAULT_CHANNEL,
         author=entry["speaker"],
         text=entry["text"],
+    )
+
+
+# ── Резолвер офсета ──────────────────────────────────────────────────────
+
+
+def resolve_tz_offset(
+    entries: list[dict],
+    recording_start_utc: datetime,
+    *,
+    explicit: float | None = None,
+    combat_paths: Sequence[Path] = (),
+) -> TzResolution:
+    """Определить UTC offset чат-лога. Единственная точка правды.
+
+    Лесенка, от самого надёжного к самому шаткому:
+
+    1. ``explicit`` — офсет передали руками, вопросов нет;
+    2. маркер ``craig-start`` в чате — точный якорь, см.
+       :func:`find_anchor_offset`;
+    3. боевой дамп — те же события в двух системах координат, см.
+       :func:`find_combat_offset`;
+    4. системная таймзона машины — верно, пока чат экспортит и мердж
+       запускает один человек на одной машине (обычный случай);
+    5. :func:`guess_tz_offset` — угадайка, помечается как ненадёжная.
+
+    Пустой ``entries`` даёт :data:`EMPTY_LOG_RESOLUTION`.
+
+    ``recording_start_utc`` нормализуется здесь и только здесь: наивный
+    считается UTC (Craig всегда пишет UTC), aware приводится к UTC.
+    Ниже по течению ``find_anchor_offset`` делает ``replace(tzinfo=None)``
+    и молча предполагает UTC — без нормализации ``info.txt`` с
+    ``+02:00`` вместо ``Z`` развёл бы потребителей на те же два часа,
+    от которых мы уходим.
+    """
+    if explicit is not None:
+        return TzResolution(offset_hours=float(explicit), source="explicit")
+
+    if not entries:
+        return EMPTY_LOG_RESOLUTION
+
+    if recording_start_utc.tzinfo is None:
+        recording_start_utc = recording_start_utc.replace(tzinfo=timezone.utc)
+    else:
+        recording_start_utc = recording_start_utc.astimezone(timezone.utc)
+
+    anchored = find_anchor_offset(entries, recording_start_utc)
+    if anchored is not None:
+        return TzResolution(offset_hours=anchored, source="anchor")
+
+    from_combat = find_combat_offset(entries, combat_paths)
+    if from_combat is not None:
+        return TzResolution(offset_hours=from_combat, source="combat")
+
+    system = _system_utc_offset_hours(recording_start_utc)
+    if system is not None:
+        return TzResolution(offset_hours=system, source="system")
+
+    return TzResolution(
+        offset_hours=guess_tz_offset(entries, recording_start_utc),
+        source="heuristic",
     )
 
 
@@ -172,7 +356,34 @@ def parse_info_start_time(path: Path) -> datetime:
 
 
 def guess_tz_offset(entries: list[dict], recording_start_utc: datetime) -> float:
-    """Port ``guess_tz_offset``: перебирает UTC offset -12..+14 и выбирает лучший.
+    """Последняя ступень лесенки: перебор UTC offset -12..+14, лучший выигрывает.
+
+    Не зовите напрямую — идите через :func:`resolve_tz_offset`, иначе
+    получите ответ, отличный от того, что взял мерджер.
+
+    **Практически недостижима.** Выше стоит системная таймзона, а она
+    отдаёт ``None`` только если ``astimezone()`` бросил исключение — на
+    живых Linux/Windows/macOS этого не бывает. Ступень живёт как
+    страховка на случай экзотической среды.
+
+    **Шаг перебора — целый час, и это осознанно.** Соблазн измельчить
+    сетку до четверти часа (реальные зоны бывают +5:30 и +5:45) здесь
+    вреден: метод меряет расстояние от первого сообщения чата до старта
+    записи, а лид — болтовня до нажатия Record — это шум. Грубая сетка
+    работает как приор «зоны целочасовые» и гасит лид до получаса
+    нацело. С шагом 0.25 шум протекает прямо в ответ: замер на реальных
+    данных Сессии-6 (истина +2) даёт 1.75 при лиде 8-15 минут и 1.5 при
+    лиде 25-29 — то есть в самом типичном диапазоне «расставляем фишки»
+    точный ответ сменяется промахом. Зоны, не кратные часу, ловятся
+    ступенями выше — :func:`find_anchor_offset` и
+    :func:`find_combat_offset`, — где для этого есть настоящие данные, а
+    не догадка.
+
+    Метод структурно ненадёжен: он предполагает, что Record в Craig
+    нажали примерно тогда же, когда началась переписка в Foundry. Если
+    запись начали заметно позже, промах равен целому UTC-офсету —
+    см. ``tests/fixtures/tz_late_start`` (реальная сессия, запись на
+    1 ч 47 мин позже начала чата, эвристика даёт 0 вместо +2).
 
     "Лучший" — тот, при котором первый chat entry оказывается ближе всего
     (по абсолютной величине) к recording_start. Знак delta не важен:
@@ -213,8 +424,13 @@ def find_anchor_offset(
     UTC ``Start time`` из ``info.txt`` — точное соответствие, никаких
     эвристик.
 
-    Возвращает offset в часах (округлённый до ближайшего целого, чтобы
-    погасить секундный jitter между «нажал Record» и «отправил маркер»).
+    Возвращает offset в часах, округлённый до ближайших 15 минут: это
+    гасит jitter между «нажал Record» и «отправил маркер» (секунды,
+    редко минута-другая) и при этом не теряет зоны, не кратные часу.
+    Округление до целого часа, как было раньше, превращало индийские
+    UTC+5:30 в 6.0 — с пометкой «надёжно», потому что ступень ``anchor``
+    стоит выше всех и до перебора дело уже не доходит.
+
     Возвращает ``None`` если маркер не найден или вычисленный offset
     выходит за разумные пределы (±14 часов).
     """
@@ -223,7 +439,8 @@ def find_anchor_offset(
         if not _ANCHOR_MARKER_RE.match(entry["text"]):
             continue
         delta_seconds = (entry["datetime"] - rec_naive).total_seconds()
-        offset_h = float(round(delta_seconds / 3600))
+        quarters = round(delta_seconds / (3600 * _ANCHOR_QUANTUM_HOURS))
+        offset_h = quarters * _ANCHOR_QUANTUM_HOURS
         if abs(offset_h) > _MAX_REASONABLE_OFFSET_H:
             # Маркер сломан / не от этой записи / опечатка — игнорируем.
             return None
@@ -231,15 +448,174 @@ def find_anchor_offset(
     return None
 
 
-def _system_utc_offset_hours() -> float | None:
-    """UTC offset машины, где идёт мердж, в часах.
+def find_combat_offset(
+    entries: list[dict], combat_paths: Sequence[Path]
+) -> float | None:
+    """Вычислить UTC offset, сопоставив чат-лог с боевым дампом.
 
-    Использует ``datetime.now().astimezone().utcoffset()`` — корректно
-    учитывает DST на текущую дату. Возвращает ``None`` только если
-    таймзона недоступна (на нормальных Linux/Win/macOS такого не бывает).
+    Оба файла описывают одни и те же события, но в разных системах
+    координат: ``Бой*.txt`` пишет ``chat_messages[].timestamp`` честным
+    UTC (``toISOString``), а экспорт чата — локальным временем браузера
+    (``toLocaleString``). Значит, между ними ровно искомый офсет, и его
+    можно не угадывать, а измерить.
+
+    Метод: раскладываем и те и другие метки по минутным корзинам и
+    перебираем кандидатов от −14 до +14 часов шагом 15 минут, считая
+    пересечение. Побеждает кандидат с максимальным совпадением.
+
+    В отличие от всех прочих ступеней, эта не зависит ни от машины, где
+    идёт мердж, ни от того, когда нажали Record. Именно поэтому она
+    стоит выше системной таймзоны.
+
+    ``None`` — если данных мало (< :data:`_COMBAT_MIN_EVENTS`), если
+    лучший кандидат покрыл меньше :data:`_COMBAT_MIN_MATCH_RATIO` боевых
+    событий, или если он обошёл второго меньше чем в
+    :data:`_COMBAT_MIN_MARGIN` раза. Лучше уступить следующей ступени,
+    чем уверенно назвать неверную зону.
+
+    Доля считается от **всех** боевых событий, хотя перекрыть их могут
+    только те сообщения, что дожили до ``parse_fvtt_log`` (он режет
+    пустые тела и ``"+"``). Знаменатель тем самым завышен, и ступень
+    иногда откажется там, где могла бы ответить. Это осознанный перекос
+    в сторону молчания: ниже есть другие ступени, а неверная зона тихо
+    портит весь транскрипт.
+    """
+    if not entries or not combat_paths:
+        return None
+
+    combat_minutes = _combat_event_minutes(combat_paths)
+    if len(combat_minutes) < _COMBAT_MIN_EVENTS:
+        return None
+
+    # Чат наивно-локальный: считаем «минуту» от той же эпохи, что и UTC,
+    # тогда разница корзин и есть офсет.
+    chat_minutes = Counter(
+        int(e["datetime"].replace(tzinfo=timezone.utc).timestamp()) // 60
+        for e in entries
+    )
+    combat_counter = Counter(combat_minutes)
+
+    scores: list[tuple[int, float]] = []
+    for offset_hours in _offset_candidates(_COMBAT_STEP_HOURS):
+        shift = int(round(offset_hours * 60))
+        overlap = sum(
+            min(count, chat_minutes.get(minute + shift, 0))
+            for minute, count in combat_counter.items()
+        )
+        scores.append((overlap, offset_hours))
+
+    scores.sort(key=lambda pair: -pair[0])
+    best_score, best_offset = scores[0]
+    runner_up = scores[1][0]
+
+    if best_score < _COMBAT_MIN_MATCH_RATIO * len(combat_minutes):
+        logger.debug(
+            "combat tz anchor declined: best %+.2fh covered %d of %d events "
+            "(under the %.0f%% floor)",
+            best_offset,
+            best_score,
+            len(combat_minutes),
+            _COMBAT_MIN_MATCH_RATIO * 100,
+        )
+        return None
+    if best_score < _COMBAT_MIN_MARGIN * runner_up:
+        # Ничья тоже попадает сюда: при равных счётах ни один кандидат
+        # не заслужил ответа, и уступить следующей ступени честнее, чем
+        # выбрать по порядку сортировки.
+        logger.debug(
+            "combat tz anchor declined: best %+.2fh scored %d, runner-up %d "
+            "— too close to call",
+            best_offset,
+            best_score,
+            runner_up,
+        )
+        return None
+
+    logger.debug(
+        "combat tz anchor: %+.2fh, %d of %d events matched (runner-up %d)",
+        best_offset,
+        best_score,
+        len(combat_minutes),
+        runner_up,
+    )
+    return best_offset
+
+
+def _offset_candidates(step_hours: float) -> list[float]:
+    """Правдоподобные UTC-офсеты от −12 до +14 с шагом ``step_hours``.
+
+    Границы — реальный диапазон зон на планете, тот же, что стережёт
+    :data:`_MAX_REASONABLE_OFFSET_H` в :func:`find_anchor_offset`.
+    """
+    steps = int(round((_MAX_REASONABLE_OFFSET_H - _MIN_REASONABLE_OFFSET_H) / step_hours))
+    return [_MIN_REASONABLE_OFFSET_H + i * step_hours for i in range(steps + 1)]
+
+
+def _combat_event_minutes(combat_paths: Sequence[Path]) -> list[int]:
+    """Минутные корзины всех ``chat_messages[].timestamp`` из боёв (UTC).
+
+    Битые и нечитаемые файлы пропускаются молча: якорь — вещь
+    опциональная, и падать из-за него незачем, ниже есть другие ступени.
+
+    «Битый» здесь означает не только неразбираемый JSON, но и любой
+    неожиданный тип на любом уровне. Проверка ``isinstance`` на каждом
+    шаге, а не ``or []``: последнее гасит ``None``, но пропускает
+    ``{"rounds": {"1": ...}}`` — во что превращается массив у части
+    экспортёров — и роняет ``AttributeError`` наружу. А наружу здесь
+    нельзя: ``MergerWorker._parse_chat`` ловит только ``FileNotFoundError``,
+    так что один кривой дамп утащил бы за собой весь мердж чата.
+    """
+    minutes: list[int] = []
+    for path in combat_paths:
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for round_data in _as_list(data.get("rounds")):
+            if not isinstance(round_data, dict):
+                continue
+            for turn in _as_list(round_data.get("turns")):
+                if not isinstance(turn, dict):
+                    continue
+                for message in _as_list(turn.get("chat_messages")):
+                    if not isinstance(message, dict):
+                        continue
+                    stamp = message.get("timestamp")
+                    if not isinstance(stamp, str):
+                        continue
+                    try:
+                        moment = datetime.fromisoformat(
+                            stamp.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        continue
+                    if moment.tzinfo is None:
+                        moment = moment.replace(tzinfo=timezone.utc)
+                    minutes.append(int(moment.timestamp()) // 60)
+    return minutes
+
+
+def _as_list(value: object) -> list:
+    """``value``, если это список, иначе пустой список."""
+    return value if isinstance(value, list) else []
+
+
+def _system_utc_offset_hours(at: datetime) -> float | None:
+    """UTC offset машины, где идёт мердж, **на момент записи сессии**.
+
+    ``at`` — время старта записи (aware). Офсет спрашивается именно на
+    эту дату, а не на «сейчас»: иначе январскую сессию, смердженную в
+    августе, унесёт на час — ``datetime.now()`` в Праге вернёт +2, тогда
+    как в момент игры было +1. Промах тихий, потому что ступень
+    ``system`` считается надёжной и никто не подсвечивает результат.
+
+    Возвращает ``None`` только если таймзона недоступна (на нормальных
+    Linux/Win/macOS такого не бывает).
     """
     try:
-        offset = datetime.now().astimezone().utcoffset()
+        offset = at.astimezone().utcoffset()
     except Exception:
         return None
     if offset is None:

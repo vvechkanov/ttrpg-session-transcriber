@@ -25,6 +25,35 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 # ---------------------------------------------------------------------------
+# Timezone fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def pin_system_tz(monkeypatch):
+    """Pin the ``system`` step of the fvtt timezone ladder.
+
+    ``resolve_tz_offset`` consults the machine's timezone, so any test
+    touching it encodes whatever zone the developer happens to sit in
+    unless the step is pinned. Pass ``None`` to simulate a machine with
+    no usable zone, which pushes the ladder down to the heuristic.
+
+    The stub swallows its argument: the real function takes the session's
+    recording start (it must ask for the offset *on that date*, not
+    today's — DST moves it).
+    """
+
+    def _pin(offset_hours):
+        import sources.game_log.fvtt_chat as fvtt
+
+        monkeypatch.setattr(
+            fvtt, "_system_utc_offset_hours", lambda *_args: offset_hours
+        )
+
+    return _pin
+
+
+# ---------------------------------------------------------------------------
 # Audio fixtures
 # ---------------------------------------------------------------------------
 

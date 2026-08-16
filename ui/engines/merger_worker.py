@@ -151,7 +151,14 @@ class MergerWorker(QObject):
         from sources.game_log.fvtt_chat import FvttChatSource
 
         try:
-            src = FvttChatSource(chat_log_path=self._chat_log_path)
+            # Combat dumps double as the chat log's timezone anchor —
+            # the same events in UTC and in browser-local time. The
+            # worker already has them; not passing them would leave the
+            # merge on a weaker rung than the rest of the app.
+            src = FvttChatSource(
+                chat_log_path=self._chat_log_path,
+                combat_paths=self._combat_log_paths,
+            )
             return src.extract(self._session_dir)
         except FileNotFoundError:
             # No info.txt — chat can't be time-aligned. Surface as

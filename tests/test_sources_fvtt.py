@@ -7,6 +7,8 @@ The info.txt anchor (recording start time) is generated dynamically
 via tmp_path to align timestamps deterministically.
 """
 
+import json
+
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,7 +263,7 @@ class TestExtractFallbackOrder:
         """Якорь в чате имеет приоритет над системной tz."""
         from sources.game_log import fvtt_chat
         # Системная tz возвращает UTC+5, маркер должен дать +2 и победить.
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 5.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 5.0)
         info = self._write_info(tmp_path, "2026-04-25T18:00:00Z")
         chat = self._write_chat(
             tmp_path,
@@ -281,7 +283,7 @@ class TestExtractFallbackOrder:
         """Без маркера — берём системную tz, не эвристику."""
         from sources.game_log import fvtt_chat
         # Системная tz +2, эвристика на этих данных дала бы 0 (Session 7).
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 2.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 2.0)
         info = self._write_info(tmp_path, "2026-04-25T18:09:01Z")
         chat = self._write_chat(
             tmp_path,
@@ -302,7 +304,7 @@ class TestExtractFallbackOrder:
     def test_heuristic_used_when_system_tz_unavailable(self, tmp_path, monkeypatch):
         """Если системная tz недоступна — катимся в эвристику."""
         from sources.game_log import fvtt_chat
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: None)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: None)
         info = self._write_info(tmp_path, "2026-04-18T16:15:16Z")
         chat = self._write_chat(
             tmp_path,
@@ -320,7 +322,7 @@ class TestExtractFallbackOrder:
         """Явный tz_offset в конструкторе побеждает все автодетекты."""
         from sources.game_log import fvtt_chat
         # Системная tz и маркер оба сказали бы +2, но мы передаём +5 явно.
-        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda: 2.0)
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", lambda *_a: 2.0)
         info = self._write_info(tmp_path, "2026-04-25T18:00:00Z")
         chat = self._write_chat(
             tmp_path,
@@ -340,8 +342,385 @@ class TestExtractFallbackOrder:
 class TestSystemUtcOffsetHours:
     def test_returns_float_or_none(self):
         from sources.game_log.fvtt_chat import _system_utc_offset_hours
-        result = _system_utc_offset_hours()
+        from datetime import datetime, timezone
+        at = datetime(2026, 8, 15, 18, 42, 9, tzinfo=timezone.utc)
+        result = _system_utc_offset_hours(at)
         # На любом нормальном CI должен вернуть float, не None.
         assert result is None or isinstance(result, float)
         if result is not None:
             assert -14.0 <= result <= 14.0
+
+
+class TestResolveTzOffset:
+    """Direct tests for the ladder itself.
+
+    The steps are covered end-to-end through FvttChatSource above; these
+    pin the resolver's own contract — what it returns, and what it feeds
+    the steps below it.
+    """
+
+    _ENTRIES = [{"datetime": datetime(2026, 8, 15, 20, 0, 0), "speaker": "P1", "text": "hi"}]
+    _REC_START = datetime(2026, 8, 15, 18, 0, 0, tzinfo=timezone.utc)
+
+    def test_explicit_zero_is_honoured(self):
+        """``explicit=0.0`` must not be mistaken for "not supplied".
+
+        UTC+0 is a real timezone; ``if explicit:`` would silently drop it
+        through to autodetection.
+        """
+        from sources.game_log.fvtt_chat import resolve_tz_offset
+        result = resolve_tz_offset(self._ENTRIES, self._REC_START, explicit=0.0)
+        assert result.offset_hours == 0.0
+        assert result.source == "explicit"
+        assert result.is_reliable is True
+
+    def test_empty_entries_short_circuit(self):
+        from sources.game_log.fvtt_chat import (
+            EMPTY_LOG_RESOLUTION,
+            resolve_tz_offset,
+        )
+        result = resolve_tz_offset([], self._REC_START)
+        assert result is EMPTY_LOG_RESOLUTION
+        assert result.offset_hours == 0.0
+        assert result.is_reliable is False
+
+    def test_system_step_gets_the_session_date_not_today(self, monkeypatch):
+        """Regression: the system step must ask about the *recording*.
+
+        ``datetime.now().astimezone()`` answers for today, so a January
+        session merged in August picks up the summer offset and the whole
+        chat slides by an hour — silently, because ``system`` counts as
+        reliable.
+        """
+        from sources.game_log import fvtt_chat
+        seen = []
+
+        def _spy(at):
+            seen.append(at)
+            return 1.0
+
+        monkeypatch.setattr(fvtt_chat, "_system_utc_offset_hours", _spy)
+        winter = datetime(2026, 1, 15, 18, 0, 0, tzinfo=timezone.utc)
+        fvtt_chat.resolve_tz_offset(self._ENTRIES, winter)
+        assert seen == [winter]
+
+    def test_naive_recording_start_treated_as_utc(self, monkeypatch):
+        """Craig always writes UTC; a naive value must not shift anything."""
+        from sources.game_log import fvtt_chat
+        seen = []
+        monkeypatch.setattr(
+            fvtt_chat,
+            "_system_utc_offset_hours",
+            lambda at: seen.append(at) or 2.0,
+        )
+        naive = datetime(2026, 8, 15, 18, 0, 0)
+        fvtt_chat.resolve_tz_offset(self._ENTRIES, naive)
+        assert seen == [naive.replace(tzinfo=timezone.utc)]
+
+    def test_offset_recording_start_normalised_to_utc(self):
+        """``Start time`` with a +02:00 zone must anchor like the same UTC instant.
+
+        Without normalisation ``find_anchor_offset`` strips the tzinfo and
+        reads the wall clock as UTC — two hours of silent drift, the very
+        failure this ladder exists to prevent.
+        """
+        from datetime import timedelta
+        from sources.game_log.fvtt_chat import resolve_tz_offset
+
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 20, 0, 5),
+                "speaker": "GM",
+                "text": "craig-start",
+            }
+        ]
+        as_utc = datetime(2026, 8, 15, 18, 0, 0, tzinfo=timezone.utc)
+        as_offset = datetime(
+            2026, 8, 15, 20, 0, 0, tzinfo=timezone(timedelta(hours=2))
+        )
+        assert resolve_tz_offset(entries, as_utc) == resolve_tz_offset(
+            entries, as_offset
+        )
+        assert resolve_tz_offset(entries, as_offset).source == "anchor"
+        assert resolve_tz_offset(entries, as_offset).offset_hours == 2.0
+
+
+class TestFindCombatOffset:
+    """The combat dump as a timezone anchor.
+
+    Бой*.txt writes chat_messages[].timestamp in real UTC while the chat
+    export writes browser-local time. The same events in two coordinate
+    systems is a free measurement of the offset between them.
+    """
+
+    FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tz_late_start"
+
+    def _entries(self):
+        from sources.game_log.fvtt_chat import parse_fvtt_log
+        return parse_fvtt_log(self.FIXTURE / "fvtt-log-fixture.txt")
+
+    def test_measures_the_real_session(self):
+        from sources.game_log.fvtt_chat import find_combat_offset
+        assert find_combat_offset(
+            self._entries(), [self.FIXTURE / "combat.json"]
+        ) == 2.0
+
+    def test_beats_a_wrong_machine_timezone(self, monkeypatch):
+        """This is the rung's whole purpose.
+
+        The system step is right only while the log is exported and
+        merged on the same machine. Open the session elsewhere and it
+        confidently answers with the wrong zone — the anchor does not
+        care where it runs.
+        """
+        from sources.game_log import fvtt_chat
+
+        monkeypatch.setattr(
+            fvtt_chat, "_system_utc_offset_hours", lambda *_a: 9.0
+        )
+        rec_start = fvtt_chat.parse_info_start_time(self.FIXTURE / "info.txt")
+        result = fvtt_chat.resolve_tz_offset(
+            self._entries(),
+            rec_start,
+            combat_paths=[self.FIXTURE / "combat.json"],
+        )
+        assert result.source == "combat"
+        assert result.offset_hours == 2.0
+        assert result.is_reliable is True
+
+    def test_marker_still_outranks_the_dump(self, monkeypatch):
+        """An explicit craig-start marker is exact; the anchor is measured."""
+        from sources.game_log import fvtt_chat
+
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 21, 42, 9),
+                "speaker": "GM",
+                "text": "craig-start",
+            }
+        ] + self._entries()
+        rec_start = fvtt_chat.parse_info_start_time(self.FIXTURE / "info.txt")
+        result = fvtt_chat.resolve_tz_offset(
+            entries, rec_start, combat_paths=[self.FIXTURE / "combat.json"]
+        )
+        assert result.source == "anchor"
+        assert result.offset_hours == 3.0
+
+    def test_none_without_combat_files(self):
+        from sources.game_log.fvtt_chat import find_combat_offset
+        assert find_combat_offset(self._entries(), []) is None
+
+    def test_none_for_unreadable_file(self, tmp_path):
+        """A broken dump must fall through to the next rung, not explode."""
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        junk = tmp_path / "Бой.txt"
+        junk.write_text("{not json", encoding="utf-8")
+        missing = tmp_path / "nope.txt"
+        assert find_combat_offset(self._entries(), [junk, missing]) is None
+
+    def test_none_when_too_few_events(self, tmp_path):
+        """Three dice rolls lining up is coincidence, not a measurement."""
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        dump = tmp_path / "Бой.txt"
+        dump.write_text(
+            json.dumps({
+                "rounds": [{
+                    "turns": [{
+                        "chat_messages": [
+                            {"timestamp": f"2026-08-15T17:{m:02d}:00Z"}
+                            for m in range(3)
+                        ]
+                    }]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 19, m, 0),
+                "speaker": "P1",
+                "text": "x",
+            }
+            for m in range(3)
+        ]
+        assert find_combat_offset(entries, [dump]) is None
+
+    def test_none_when_no_candidate_stands_out(self, tmp_path):
+        """Chat spread evenly across the day matches every offset equally.
+
+        Without the margin check the sort order would hand the tie to
+        whichever candidate came first, and the resolver would pass that
+        off as a measurement.
+        """
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        dump = tmp_path / "Бой.txt"
+        dump.write_text(
+            json.dumps({
+                "rounds": [{
+                    "turns": [{
+                        "chat_messages": [
+                            {"timestamp": f"2026-08-15T{h:02d}:00:00Z"}
+                            for h in range(0, 20)
+                        ]
+                    }]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        # One chat entry on every whole hour — every candidate offset
+        # scores about the same.
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, h, 0, 0),
+                "speaker": "P1",
+                "text": "x",
+            }
+            for h in range(0, 24)
+        ]
+        assert find_combat_offset(entries, [dump]) is None
+
+    def test_resolves_a_quarter_hour_zone(self, tmp_path):
+        """Nepal is UTC+5:45. Whole-hour candidates would miss it."""
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        stamps = [f"2026-08-15T12:{m:02d}:00Z" for m in range(0, 40, 2)]
+        dump = tmp_path / "Бой.txt"
+        dump.write_text(
+            json.dumps({
+                "rounds": [{
+                    "turns": [
+                        {"chat_messages": [{"timestamp": s} for s in stamps]}
+                    ]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        # Same instants written in UTC+5:45 local time: 12:00Z → 17:45.
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 17, 45 + m)
+                if 45 + m < 60
+                else datetime(2026, 8, 15, 18, 45 + m - 60),
+                "speaker": "P1",
+                "text": "x",
+            }
+            for m in range(0, 40, 2)
+        ]
+        assert find_combat_offset(entries, [dump]) == 5.75
+
+    def test_none_when_coverage_is_too_thin(self, tmp_path):
+        """A single clear peak is not enough — it has to cover the fight.
+
+        Here the winner is unambiguous (nothing else scores at all) so
+        the margin check passes, but it accounts for a fifth of the
+        encounter. Combat and chat that barely overlap mean the two
+        files are not describing the same evening.
+        """
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        # Irregular spacing on purpose: an evenly spaced fight lines up
+        # with itself under several shifts, and then the margin check
+        # fires first and this test proves nothing about the ratio.
+        offsets_min = [0, 1, 2, 3, 5, 8, 13, 21, 22, 23, 25, 30, 31, 33, 34, 40]
+        dump = tmp_path / "Бой.txt"
+        dump.write_text(
+            json.dumps({
+                "rounds": [{
+                    "turns": [{
+                        "chat_messages": [
+                            {"timestamp": f"2026-08-15T12:{m:02d}:00Z"}
+                            for m in offsets_min
+                        ]
+                    }]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        # Chat covers only the first five of sixteen events, at +2h.
+        entries = [
+            {
+                "datetime": datetime(2026, 8, 15, 14, m),
+                "speaker": "P1",
+                "text": "x",
+            }
+            for m in offsets_min[:5]
+        ]
+        assert find_combat_offset(entries, [dump]) is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"rounds": {"1": {"turns": []}}},           # array became an object
+            {"rounds": "abc"},
+            {"rounds": 5},
+            {"rounds": [{"turns": ["x"]}]},
+            {"rounds": [{"turns": [{"chat_messages": [["a"]]}]}]},
+            {"rounds": [{"turns": [{"chat_messages": {"a": 1}}]}]},
+            {"rounds": [None]},
+            [],                                          # not an object at all
+        ],
+        ids=[
+            "rounds-as-object", "rounds-as-string", "rounds-as-int",
+            "turns-of-strings", "messages-of-lists", "messages-as-object",
+            "null-round", "top-level-array",
+        ],
+    )
+    def test_structurally_broken_dump_is_skipped(self, tmp_path, payload):
+        """Wrong types anywhere must not escape as an exception.
+
+        MergerWorker._parse_chat catches only FileNotFoundError, so
+        anything thrown here takes the whole chat merge down with it —
+        a malformed combat file must cost the anchor, not the session.
+        """
+        from sources.game_log.fvtt_chat import find_combat_offset
+
+        dump = tmp_path / "Бой.txt"
+        dump.write_text(json.dumps(payload), encoding="utf-8")
+        assert find_combat_offset(self._entries(), [dump]) is None
+
+
+class TestAnchorQuantisation:
+    """The craig-start marker must not be rounded to a whole hour.
+
+    This is the reachable rung — it outranks everything below, so a zone
+    it cannot express is a zone the product cannot express.
+    """
+
+    def _resolve(self, marker_local, rec_start):
+        from sources.game_log.fvtt_chat import find_anchor_offset
+        entries = [
+            {"datetime": marker_local, "speaker": "GM", "text": "craig-start"}
+        ]
+        return find_anchor_offset(entries, rec_start)
+
+    def test_half_hour_zone_survives(self):
+        """India is UTC+5:30 — whole-hour rounding turned it into +6."""
+        rec = datetime(2026, 4, 25, 18, 9, 1, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 25, 23, 39, 5)  # +5:30, 4s of jitter
+        assert self._resolve(marker, rec) == 5.5
+
+    def test_quarter_hour_zone_survives(self):
+        """Nepal is UTC+5:45."""
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 25, 23, 45, 3)
+        assert self._resolve(marker, rec) == 5.75
+
+    def test_marker_jitter_is_still_absorbed(self):
+        """Sending the marker a few minutes late must not move the answer.
+
+        The quantum is 15 minutes, so anything under 7.5 rounds home.
+        """
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        for late_minutes in (0, 1, 4, 7):
+            marker = datetime(2026, 4, 25, 20, late_minutes, 0)
+            assert self._resolve(marker, rec) == 2.0, (
+                f"marker {late_minutes} min late moved the offset"
+            )
+
+    def test_absurd_marker_still_rejected(self):
+        rec = datetime(2026, 4, 25, 18, 0, 0, tzinfo=timezone.utc)
+        marker = datetime(2026, 4, 27, 5, 0, 0)  # ~35 hours out
+        assert self._resolve(marker, rec) is None

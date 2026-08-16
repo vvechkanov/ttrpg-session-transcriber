@@ -203,9 +203,12 @@ def chat_span(
 
     FVTT chat exports carry *local* (browser) timestamps. To anchor
     them in UTC we need Craig's recording start time — without it we
-    can't guess the browser's timezone offset. Uses the same parsing
-    helpers as :class:`sources.game_log.fvtt_chat.FvttChatSource` so
-    timestamps are consistent between this module and the merger.
+    can't resolve the browser's timezone offset. Goes through the same
+    ``resolve_tz_offset`` ladder as
+    :class:`sources.game_log.fvtt_chat.FvttChatSource`, so the strip on
+    the Timeline screen sits where the merger actually put the chat.
+    (It used to call ``guess_tz_offset`` directly and could disagree
+    with the merger by whole hours.)
 
     Returns ``None`` when:
         * ``info_start`` is ``None`` (no anchor available);
@@ -221,9 +224,10 @@ def chat_span(
     # statically inspects ``core.timeline_window``; breaks a potential
     # circular import if ``sources/`` ever pulls in ``core/`` helpers.
     try:
+        from core.fvtt_helpers import session_combat_paths
         from sources.game_log.fvtt_chat import (
-            guess_tz_offset,
             parse_fvtt_log,
+            resolve_tz_offset,
         )
     except ImportError:
         return None
@@ -237,8 +241,12 @@ def chat_span(
         return None
 
     info_utc = info_start.astimezone(timezone.utc)
+    combat_paths = session_combat_paths(chat_log_path)
+
     try:
-        tz_offset = guess_tz_offset(entries, info_utc)
+        tz_offset = resolve_tz_offset(
+            entries, info_utc, combat_paths=combat_paths
+        ).offset_hours
     except (TypeError, ValueError):
         return None
 
