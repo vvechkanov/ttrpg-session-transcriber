@@ -137,16 +137,33 @@ def _is_module_missing(output: str) -> bool:
     return "No module named" in output
 
 
-def main() -> int:
-    # The payload is read and discarded: the `if` filter in settings.json
-    # already restricts this hook to `git commit`, so there is nothing
-    # here worth re-deciding.
-    try:
-        sys.stdin.read()
-    except Exception:  # noqa: BLE001 — a hook must never die on its input
-        pass
+def _stages_its_own_files(command: str) -> bool:
+    """True when the command about to run will change the index itself.
 
-    conflicted = _staged_but_dirty()
+    A PreToolUse hook fires before the command executes, so for
+    ``git add … && git commit`` the index is still untouched when the gate
+    looks at it. Any conclusion drawn from the index would then describe a
+    state that is about to be replaced.
+    """
+    normalised = " ".join(command.split())
+    if "git add" in normalised:
+        return True
+    return any(flag in normalised for flag in ("commit -a", "commit --all"))
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:  # noqa: BLE001 — a hook must never die on its input
+        payload = {}
+
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    # When the command stages files itself, the index the gate can see is not
+    # the index that will be committed, so its two index-derived observations
+    # are withheld rather than reported as fact.
+    index_is_final = not _stages_its_own_files(command)
+
+    conflicted = _staged_but_dirty() if index_is_final else []
     if conflicted:
         listing = "\n".join(f"  - {path}" for path in conflicted)
         _deny(
@@ -197,7 +214,7 @@ def main() -> int:
     if skipped:
         listing = "\n".join(f"  - {item}" for item in skipped)
         note += f"\n\nНе проверено (инструмента нет):\n{listing}"
-    dirty = _dirty_elsewhere()
+    dirty = _dirty_elsewhere() if index_is_final else []
     if dirty:
         listing = "\n".join(f"  - {path}" for path in dirty)
         note += (
