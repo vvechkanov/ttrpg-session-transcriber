@@ -7,9 +7,14 @@
 ## Commands
 
 ```bash
-venv/Scripts/python.exe -m pytest -q -m "not slow and not requires_asr"
-venv/Scripts/python.exe -m ruff check --select F821 .
+python -m pytest -q -m "not slow and not requires_asr"
+python -m ruff check --select F821 .
 ```
+
+Интерпретатор проекта — `venv/Scripts/python.exe` на Windows и
+`venv/bin/python` на Linux и macOS. Команды выше записаны от активированного
+окружения, чтобы работать одинаково на машине разработчика, в CI и в облачном
+агенте.
 
 Тесты с маркерами `slow` / `requires_asr` требуют GPU и весов моделей — в CI
 не гоняются.
@@ -74,8 +79,11 @@ venv/Scripts/python.exe -m ruff check --select F821 .
 
 ### Границы слоёв
 
-`sources` импортирует только `domain`. `renderers` импортирует только `domain`.
-`core → sources` разрешён. `domain` не импортирует ничего из проекта.
+`sources`, `mergers` и `renderers` импортируют только `domain` — и никогда
+друг друга. `core` может импортировать все четыре. `ui → core`. `domain` не
+импортирует ничего из проекта. Полный список — в
+[ARCHITECTURE.md](ARCHITECTURE.md), секция «Dependency rules».
+
 Флагуй нарушения, включая ленивые импорты внутри функций, обходящие правило.
 
 ### Чего не флагать
