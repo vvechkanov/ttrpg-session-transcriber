@@ -599,10 +599,16 @@ def main() -> int:
     # pass, which is the exact failure this gate exists to prevent.
     try:
         plan = _plan(command)
-        if not plan.commits:
+        if not plan.commits and "commit" not in command:
             # Not a commit at all. The hook may be registered for every Bash
             # call, and running the suite on `git status` would deny the very
             # commands someone runs to diagnose a failing test.
+            #
+            # The word test is deliberately cruder than the parse: a line the
+            # parser failed to recognise as a commit — ``GIT_AUTHOR_DATE=…
+            # git commit``, ``env … git commit``, a wrapper — still gets
+            # checked. Standing aside is the one outcome from which the gate
+            # cannot recover, so it needs more than a parser's say-so.
             return 0
         shapes = [_commit_shape(argv) for argv in plan.commits]
         if any(shape.selects_paths for shape in shapes):

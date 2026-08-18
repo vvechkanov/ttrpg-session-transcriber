@@ -450,6 +450,27 @@ def test_a_command_without_a_commit_is_left_alone(repo, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GIT_AUTHOR_DATE=2026-01-01 git commit -m x",
+        "env GIT_EDITOR=true git commit -m x",
+    ],
+)
+def test_a_commit_the_parser_did_not_recognise_is_still_checked(
+    repo, monkeypatch, capsys, command
+):
+    """An environment assignment in front of `git` makes the first token
+    something other than `git`, so the parser sees no commit. Standing aside
+    is the one outcome the gate cannot recover from, so it takes more than the
+    parser's say-so: the word `commit` in the line is enough to keep it in."""
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    assert _is_deny(_decide(monkeypatch, capsys, command))
+
+
 def test_an_unreadable_command_is_not_read_as_staging_everything(
     repo, monkeypatch, capsys
 ):
