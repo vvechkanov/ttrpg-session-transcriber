@@ -20,32 +20,62 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ARCHITECTURE = PROJECT_ROOT / "ARCHITECTURE.md"
 
-#: Top-level directories of this repository. A backticked token starting with
-#: one of these is a claim *about this tree*, and so has to be true.
-#:
-#: Anything else in backticks is left alone on purpose: `src/` appears in
-#: ADR-10 as the layout that was rejected, `session_dir/_cache/` is a runtime
-#: directory under the user's session folder, `%LOCALAPPDATA%/models/` is a
-#: Windows location, and `if/else` is not a path at all. Checking those would
-#: force the document to stop naming anything it does not ship.
-REPO_ROOTS = frozenset(
-    {"core", "domain", "sources", "mergers", "renderers", "ui", "launcher",
-     "scripts", "tests", "docs", "prompts", "licenses", "skill", ".github"}
-)
+def _repository_entries() -> frozenset[str]:
+    """Top-level names in the working tree, read rather than listed.
+
+    A hand-maintained whitelist would quietly stop checking the day someone
+    adds a directory — the guard would still pass while the thing it guards
+    rotted. Reading the tree means a new top-level package is covered the
+    moment it exists.
+    """
+    return frozenset(entry.name for entry in PROJECT_ROOT.iterdir() if entry.name != ".git")
 
 
 def _claimed_paths(text: str) -> list[tuple[int, str]]:
-    """Every backticked token that points at a path inside this repository."""
+    """Every backticked token that points at something inside this repository.
+
+    A token counts as a claim when its first segment names a real top-level
+    entry — so `build.spec` and `core/pipeline.py` are both checked, while
+    `src/` (the layout ADR-10 rejected), `session_dir/_cache/` (created at
+    runtime under the user's session folder), `%LOCALAPPDATA%/models/` and
+    `merged.txt` are not. Without that rule the document could not name
+    anything it does not itself ship.
+
+    Fenced blocks are read too, because the layer diagrams live there and
+    that is exactly where a stale path survived longest: `ui/gui.py` sat in
+    the §3 diagram for months while every prose mention of it was corrected.
+    Inside a fence only slashed tokens count — a bare ``cli.py`` in a box has
+    no directory to check it against.
+
+    A path may be marked as not-yet-existing by appending ``(planned)``:
+
+        | 6 | `sources/emotion/` (planned) | … |
+
+    Without that escape a roadmap cannot name the file it plans to add, and
+    the test would quietly delete the plan instead of checking the document.
+    """
+    entries = _repository_entries()
     claims: list[tuple[int, str]] = []
+    in_fence = False
     for line_number, line in enumerate(text.splitlines(), start=1):
-        for match in re.finditer(r"`([^`\n]+)`", line):
-            token = match.group(1).strip()
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            candidates = [
+                token for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line) if "/" in token
+            ]
+        else:
+            candidates = [match.group(1) for match in re.finditer(r"`([^`\n]+)`", line)]
+        for token in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
-            token = token.split("::")[0].strip()
-            if not token or " " in token or "/" not in token:
+            token = token.split("::")[0].strip().rstrip(".,;:)").strip()
+            if not token or " " in token:
                 continue
-            if token.split("/")[0] not in REPO_ROOTS:
+            if token.split("/")[0] not in entries:
+                continue
+            if f"`{token}` (planned)" in line or f"{token} (planned)" in line:
                 continue
             claims.append((line_number, token))
     return claims
@@ -93,8 +123,50 @@ def test_the_extractor_finds_a_broken_reference():
     assert _claimed_paths("the `src/` layout was rejected") == []
 
 
+def test_a_planned_path_may_be_named_without_existing_yet():
+    """Otherwise the roadmap cannot name the file it plans to add, and the
+    only way to green the test is to delete the plan — which is how the P5
+    and P6 rows lost their file lists in the first place."""
+    assert _claimed_paths("| 6 | `sources/emotion/` (planned) | … |") == []
+    assert _claimed_paths("| 6 | `sources/emotion/` | … |") == [(1, "sources/emotion/")]
+
+
+def test_paths_inside_fenced_blocks_are_checked():
+    """The layer diagrams live in fences, and that is where `ui/gui.py`
+    survived every prose correction for months."""
+    fenced = "```\n│  ui/gui.py, core/nope.py  │\n```"
+
+    assert sorted(token for _, token in _claimed_paths(fenced)) == [
+        "core/nope.py",
+        "ui/gui.py",
+    ]
+
+
+def test_a_root_level_file_is_checked_too():
+    """`build.spec` has no slash in it, and a rule keyed on slashes would let
+    the document point at a root-level file that is not there."""
+    assert _claimed_paths("built by `build.spec`") == [(1, "build.spec")]
+    assert _claimed_paths("writes `merged.txt`") == []
+
+
+def test_repository_roots_are_read_from_disk_not_listed():
+    """The whole point of deriving them: a directory added tomorrow is covered
+    without anyone remembering to update this file."""
+    entries = _repository_entries()
+
+    assert {"core", "ui", "tests", "docs", "build.spec"} <= entries
+    assert ".git" not in entries
+
+
 def test_the_extractor_reads_the_real_document():
-    """And that it is pointed at a document with paths in it at all."""
+    """And that it is pointed at a document with paths in it at all.
+
+    The floor sits just under the real count rather than at a token value: a
+    guard that passes after two thirds of the references vanish is not
+    guarding much. Raise it when the document grows; a drop means either the
+    extractor broke or the document lost its references — both worth failing
+    over.
+    """
     claims = _claimed_paths(ARCHITECTURE.read_text(encoding="utf-8"))
 
-    assert len(claims) >= 20, f"suspiciously few paths extracted: {len(claims)}"
+    assert len(claims) >= 80, f"suspiciously few paths extracted: {len(claims)}"
