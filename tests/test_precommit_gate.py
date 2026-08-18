@@ -57,15 +57,23 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _shape(command: str):
+    """The shape of the single ``git commit`` in *command*."""
+    plan = gate._plan(command)
+    assert plan.commits, f"command should contain a commit: {command!r}"
+    return gate._commit_shape(plan.commits[0])
+
+
 def _selects_paths(command: str) -> bool:
     """Whether any ``git commit`` in *command* names the paths it records."""
     plan = gate._plan(command)
     assert plan.commits, f"command should contain a commit: {command!r}"
-    return any(gate._commit_selects_paths(argv) for argv in plan.commits)
+    return any(gate._commit_shape(argv).selects_paths for argv in plan.commits)
 
 
 def _restaged(command: str) -> set[str] | None:
-    return gate._restaged_paths(gate._plan(command))
+    plan = gate._plan(command)
+    return gate._restaged_paths(plan, [gate._commit_shape(a) for a in plan.commits])
 
 
 def _decide(monkeypatch, capsys, command: str) -> dict:
@@ -333,9 +341,9 @@ def test_an_attached_message_is_not_read_as_a_cluster_of_flags(command):
     `a` and calls the commit `-a`, or an `o` and calls it `--only` — either
     way the gate drops the checks on a commit that stages nothing of the
     kind."""
-    plan = gate._plan(command)
-    assert gate._commit_stages_everything(plan.commits[0]) is False
-    assert _selects_paths(command) is False
+    shape = _shape(command)
+    assert shape.stages_everything is False
+    assert shape.selects_paths is False
 
 
 def test_an_unquoted_comment_is_not_a_pathspec():
@@ -368,6 +376,65 @@ def test_a_command_that_rewrites_files_before_committing_credits_nothing():
 )
 def test_harmless_commands_before_the_add_do_not_cost_the_credit(prefix):
     assert _restaged(f"{prefix}git add a.py && git commit -m x") == {"a.py"}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C . commit -m x",
+        "git -c user.name=x commit -m y",
+        "git --git-dir=.git commit -m z",
+    ],
+)
+def test_git_global_options_do_not_hide_the_subcommand(command):
+    """``git [-C <path>] … <command>``. Reading ``-C`` as the subcommand made
+    the gate stand aside from a commit entirely — the worst outcome available,
+    since it skips every check without saying so."""
+    assert gate._plan(command).commits, f"should be seen as a commit: {command!r}"
+
+
+@pytest.mark.parametrize("flag", ["-i", "--include"])
+def test_include_commits_the_index_too_so_it_still_needs_checking(flag):
+    """``--include`` adds the named paths *to* the index and commits the lot;
+    ``--only`` commits the paths *instead of* it. Treating them alike drops
+    the checks on every other half-staged file."""
+    shape = _shape(f"git commit {flag} a.py -m x")
+
+    assert shape.selects_paths is False
+    assert _restaged(f"git commit {flag} a.py -m x") == {"a.py"}
+
+
+@pytest.mark.parametrize("command", ["git commit -p -m x", "git commit --interactive"])
+def test_interactive_commit_settles_nothing_in_advance(command):
+    """A human picks hunks after the gate has run, so a whole-file fix in the
+    working tree can pass the checks while the chosen snapshot stays broken."""
+    assert _shape(command).uncreditable is True
+    assert _restaged(command) == set()
+
+
+def test_interactive_commit_overrides_an_earlier_add(repo, monkeypatch, capsys):
+    """``git add a.py && git commit -p`` — the add makes a.py whole, but the
+    commit then records only the hunks a human picks, so the add settles
+    nothing after all."""
+    assert _restaged("git add a.py && git commit -p -m x") == set()
+
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    assert _is_deny(_decide(monkeypatch, capsys, "git add a.py && git commit -p -m x"))
+
+
+def test_a_later_no_all_cancels_the_earlier_dash_a():
+    """``-a, --[no-]all`` — git applies the last one."""
+    assert _shape("git commit -a --no-all -m x").stages_everything is False
+    assert _shape("git commit --no-all -a -m x").stages_everything is True
+
+
+def test_add_refresh_stages_nothing():
+    """``--refresh`` is documented as "don't add, only refresh the index", so
+    the staged content stays exactly as it was."""
+    assert _restaged("git add --refresh a.py && git commit -m x") == set()
 
 
 def test_a_command_without_a_commit_is_left_alone(repo, monkeypatch, capsys):

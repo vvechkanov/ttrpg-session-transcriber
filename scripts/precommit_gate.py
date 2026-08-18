@@ -221,9 +221,19 @@ _COMMIT_VALUE_LETTERS = "mFCct"
 
 #: ``git add`` options after which the resulting index cannot be predicted
 #: from the command line: the user picks hunks, or nothing is staged at all.
+#: ``--refresh`` is here because ``git add -h`` reads "don't add, only refresh
+#: the index" — the staged content stays exactly as it was.
 _ADD_UNCREDITABLE = frozenset(
     {"-p", "--patch", "-i", "--interactive", "-e", "--edit", "-n", "--dry-run",
-     "--pathspec-from-file"}
+     "--refresh", "--pathspec-from-file"}
+)
+
+#: ``git`` global options that take a value and sit *before* the subcommand
+#: (``git [-C <path>] [-c <name>=<value>] … <command>``). Missing them makes
+#: ``git -C . commit`` look like a subcommand named ``-C``.
+_GIT_GLOBAL_VALUE_FLAGS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+     "--super-prefix", "--config-env"}
 )
 
 #: Commands that may run before the commit without invalidating what the
@@ -253,6 +263,23 @@ class _Plan(NamedTuple):
     inert: bool
     adds: list[list[str]]
     commits: list[list[str]]
+
+
+class _CommitShape(NamedTuple):
+    """What one ``git commit`` invocation will record.
+
+    ``selects_paths`` — ``--only``/``--``/a bare pathspec: the named paths are
+    the commit, and the index says nothing about it.
+    ``stages_everything`` — ``-a``, not cancelled by a later ``--no-all``.
+    ``uncreditable`` — ``-p``/``--interactive``: a human picks hunks after the
+    gate has run, so what gets recorded cannot be known here.
+    ``paths`` — the pathspecs named on the commit itself.
+    """
+
+    selects_paths: bool
+    stages_everything: bool
+    uncreditable: bool
+    paths: set[str]
 
 
 def _split_segments(command: str) -> list[str] | None:
@@ -341,6 +368,26 @@ def _tokenise(segment: str) -> list[str] | None:
     return tokens
 
 
+def _split_subcommand(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """Split ``git [global options] <subcommand> [args]`` into its two halves.
+
+    ``git -C . commit -m x`` is a commit. Reading ``-C`` as the subcommand
+    makes it look like something else entirely, and the gate then stands
+    aside from a commit it was meant to check.
+    """
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _GIT_GLOBAL_VALUE_FLAGS:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, tokens[index + 1 :]
+    return None
+
+
 def _plan(command: str) -> _Plan:
     """Read a shell command line into the parts the gate reasons about.
 
@@ -367,10 +414,14 @@ def _plan(command: str) -> _Plan:
             continue
         if tokens[0] == "cd":
             continue
-        if tokens[0] != "git" or len(tokens) < 2:
+        if tokens[0] != "git":
             inert = False
             continue
-        subcommand, argv = tokens[1], tokens[2:]
+        split = _split_subcommand(tokens)
+        if split is None:
+            inert = False
+            continue
+        subcommand, argv = split
         if subcommand == "commit":
             commits.append(argv)
         elif subcommand == "add":
@@ -388,62 +439,75 @@ def _normalise(pathspec: str) -> str:
     return path.rstrip("/")
 
 
-def _commit_selects_paths(argv: list[str]) -> bool:
-    """True when ``git commit`` names the paths it is going to record.
+def _commit_shape(argv: list[str]) -> _CommitShape:
+    """Read one ``git commit`` argument list.
 
-    ``git commit -- a.py``, ``git commit --only a.py`` and the bare
-    ``git commit a.py`` all commit *those paths* and leave the rest of the
-    index untouched (``git commit -h``, ``--only``). Nothing the gate reads
-    off the index describes such a commit, so it reports nothing about it.
+    Flags are taken in order, because git takes the last one: ``-a --no-all``
+    stages nothing extra. A short cluster stops at the first letter that
+    swallows a value, since ``-mdata`` is the message ``data`` and not the
+    flags ``d``, ``a``, ``t``.
+
+    ``--only`` and ``--include`` differ in exactly the way that matters here.
+    ``--only`` commits the named paths *instead of* the index, so the index
+    describes nothing. ``--include`` commits the named paths *as well as*
+    the index (``git commit -h``: "add specified files to index for commit"),
+    so every other half-staged file still needs checking.
     """
+    selects_paths = False
+    includes = False
+    stages_everything = False
+    uncreditable = False
+    paths: set[str] = set()
     expecting_value = False
+    after_separator = False
+
     for token in argv:
         if expecting_value:
             expecting_value = False
             continue
-        if token in ("--", "--only"):
-            return True
+        if after_separator:
+            paths.add(_normalise(token))
+            continue
+        if token == "--":
+            after_separator = True
+            selects_paths = True
+            continue
+        if token == "--only":
+            selects_paths = True
+            continue
+        if token == "--include":
+            includes = True
+            continue
+        if token in ("--patch", "--interactive"):
+            uncreditable = True
+            continue
+        if token in ("--all", "--no-all"):
+            stages_everything = token == "--all"
+            continue
         if token.startswith("--"):
             expecting_value = token in _COMMIT_VALUE_FLAGS
             continue
         if token.startswith("-") and len(token) > 1:
-            expecting_value = _cluster_takes_next_word(token, stop_at="o")
-            if expecting_value is None:
-                return True
+            for index, letter in enumerate(token[1:], start=1):
+                if letter == "o":
+                    selects_paths = True
+                elif letter == "i":
+                    includes = True
+                elif letter == "p":
+                    uncreditable = True
+                elif letter == "a":
+                    stages_everything = True
+                if letter in _COMMIT_VALUE_LETTERS:
+                    expecting_value = index == len(token) - 1
+                    break
             continue
-        return True  # a bare argument is a pathspec
-    return False
+        paths.add(_normalise(token))
+        selects_paths = True
 
-
-def _cluster_takes_next_word(token: str, stop_at: str) -> bool | None:
-    """Walk a short-option cluster such as ``-am``.
-
-    ``None`` means *stop_at* was found before any value-taking letter.
-    Otherwise True when the cluster ends on a letter that takes the next word
-    as its value. Scanning stops at the first value-taking letter, because
-    ``-mdata`` is the message ``data`` — not the flags ``d``, ``a``, ``t``.
-    """
-    for index, letter in enumerate(token[1:], start=1):
-        if letter == stop_at:
-            return None
-        if letter in _COMMIT_VALUE_LETTERS:
-            return index == len(token) - 1
-    return False
-
-
-def _commit_stages_everything(argv: list[str]) -> bool:
-    """True for ``git commit -a`` — it stages every tracked modification."""
-    for token in argv:
-        if token == "--":
-            break
-        if token == "--all":
-            return True
-        if token.startswith("--"):
-            continue
-        if token.startswith("-") and len(token) > 1:
-            if _cluster_takes_next_word(token, stop_at="a") is None:
-                return True
-    return False
+    if includes:
+        # The index is still part of the commit, so it still has to be sound.
+        selects_paths = False
+    return _CommitShape(selects_paths, stages_everything, uncreditable, paths)
 
 
 def _add_scope(argv: list[str]) -> set[str] | None:
@@ -474,7 +538,7 @@ def _add_scope(argv: list[str]) -> set[str] | None:
     return paths or None
 
 
-def _restaged_paths(plan: _Plan) -> set[str] | None:
+def _restaged_paths(plan: _Plan, shapes: list[_CommitShape]) -> set[str] | None:
     """Paths the command is about to move into the index before committing.
 
     A PreToolUse hook fires before the command runs, so for
@@ -487,13 +551,18 @@ def _restaged_paths(plan: _Plan) -> set[str] | None:
     rewritten — ``git add .``, ``git commit -a`` — and no per-path conclusion
     holds.
     """
-    if any(_commit_stages_everything(argv) for argv in plan.commits):
+    if any(shape.uncreditable for shape in shapes):
+        # ``git commit -p``: the snapshot is chosen by hand after the gate
+        # has run, so nothing may be credited in advance.
+        return set()
+    if any(shape.stages_everything for shape in shapes):
         return None
     if not plan.inert:
         # Something between here and the commit can rewrite the files the
         # checks are about to read, so no staging may be credited in advance.
         return set()
-    paths: set[str] = set()
+    # ``git commit --include a.py`` stages a.py the way ``git add`` would.
+    paths: set[str] = {path for shape in shapes for path in shape.paths}
     for argv in plan.adds:
         if any(token in _ADD_UNCREDITABLE for token in argv):
             # ``git add -p`` stages the hunks a human picks; the index it
@@ -535,11 +604,12 @@ def main() -> int:
             # call, and running the suite on `git status` would deny the very
             # commands someone runs to diagnose a failing test.
             return 0
-        if any(_commit_selects_paths(argv) for argv in plan.commits):
+        shapes = [_commit_shape(argv) for argv in plan.commits]
+        if any(shape.selects_paths for shape in shapes):
             restaged: set[str] | None = None
             selects_paths = True
         else:
-            restaged = _restaged_paths(plan)
+            restaged = _restaged_paths(plan, shapes)
             selects_paths = False
     except _Unreadable:
         restaged, selects_paths = set(), False
