@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,19 +48,39 @@ OUTPUT_FILE_NAMES = frozenset(
 #: What "looks like a file" means for a token with no directory in it.
 FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
 
+#: Extensions that make a dotted token a filename rather than a symbol.
+#: `README.md` and `core.pipeline.run` are both dotted words; only the vocabulary
+#: of file types tells them apart, and it has to be a fixed list rather than
+#: "extensions currently in the tree" — otherwise deleting the last `.spec`
+#: file would stop `build.spec` being checked.
+#:
+#: The limit is real and worth naming: an invented extension (`README.mdx`)
+#: reads as a symbol and is skipped. Slashed paths and Markdown links carry no
+#: such ambiguity and are checked unconditionally, which is where the bulk of
+#: the document's references live.
+FILE_SUFFIXES = frozenset(
+    {".md", ".py", ".qml", ".js", ".json", ".txt", ".toml", ".ini", ".cfg",
+     ".spec", ".yml", ".yaml", ".ps1", ".bat", ".sh", ".exe", ".zip"}
+)
 
-def _repository_suffixes() -> frozenset[str]:
-    """File extensions that actually occur in this tree.
+#: Directories whose contents are not this repository: virtualenvs, caches and
+#: build output. Without pruning them a stale reference could stay green
+#: because some dependency happens to ship a file of the same name.
+NOT_THE_REPOSITORY = frozenset(
+    {".git", "venv", ".venv", "__pycache__", "node_modules", "build", "dist",
+     ".pytest_cache", ".ruff_cache", ".mypy_cache", "tools", ".eggs"}
+)
 
-    This is what separates `README.md` from `core.pipeline.run`: both are
-    dotted words, but only one of them ends in something this repository
-    stores. Derived rather than listed, for the same reason as the roots.
-    """
-    return frozenset(
-        path.suffix
-        for path in PROJECT_ROOT.rglob("*")
-        if path.is_file() and path.suffix and ".git" not in path.parts
-    )
+#: A relative Markdown link target: `[text](docs/adr/thing.md)`, not `[t](http…)`
+#: and not `[t](#anchor)`.
+MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
+
+
+def _repository_files():
+    """Every file in the tree that is actually part of this repository."""
+    for path in PROJECT_ROOT.rglob("*"):
+        if NOT_THE_REPOSITORY.isdisjoint(path.parts) and path.is_file():
+            yield path
 
 
 def _exists(token: str) -> bool:
@@ -67,11 +88,17 @@ def _exists(token: str) -> bool:
 
     A token with a directory in it is resolved from the repository root. A
     bare filename cannot be — `Main.qml` lives under `ui/qml/` — so it counts
-    as present when a file of that name exists anywhere.
+    as present when a file of that name exists anywhere the repository owns.
     """
-    if "/" in token:
-        return (PROJECT_ROOT / token.rstrip("/")).exists()
-    return any(path.name == token for path in PROJECT_ROOT.rglob(token))
+    cleaned = token.split("#")[0].rstrip("/")
+    if not cleaned:
+        return True
+    candidate = PROJECT_ROOT / cleaned
+    if candidate.exists():
+        return NOT_THE_REPOSITORY.isdisjoint(candidate.parts)
+    if "/" in cleaned:
+        return False
+    return any(path.name == cleaned for path in _repository_files())
 
 
 def _repository_entries() -> frozenset[str]:
@@ -101,7 +128,6 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
     Without that escape a roadmap cannot name the file it plans to add, and
     the test would quietly delete the plan instead of checking the document.
     """
-    suffixes = _repository_suffixes()
     claims: list[tuple[int, str]] = []
     in_fence = False
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -114,6 +140,7 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
             ]
         else:
             candidates = [match.group(1) for match in re.finditer(r"`([^`\n]+)`", line)]
+            candidates += MARKDOWN_LINK.findall(line)
         for token in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
@@ -128,7 +155,7 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
             if "/" not in token:
                 if token in OUTPUT_FILE_NAMES or not FILE_TOKEN.match(token):
                     continue  # an output file, or a bare word — not a repo path
-                if pathlib.PurePath(token).suffix not in suffixes:
+                if pathlib.PurePath(token).suffix not in FILE_SUFFIXES:
                     continue  # `core.pipeline.run` is a symbol, not a file
             if f"`{token}` (planned)" in line or f"{token} (planned)" in line:
                 continue
@@ -205,6 +232,33 @@ def test_a_bare_filename_is_checked_wherever_it_lives():
     assert _claimed_paths("the shell is `Main.qml`") == [(1, "Main.qml")]
     assert _exists("Main.qml"), "lives under ui/qml/, still counts as present"
     assert not _exists("no_such_document.md")
+
+
+def test_a_markdown_link_destination_is_a_claim():
+    """`[ADR](docs/adr/gone.md)` names a path just as much as a backticked one,
+    and renaming the target would otherwise leave the guard green."""
+    assert _claimed_paths("see [ADR](docs/adr/gone.md)") == [(1, "docs/adr/gone.md")]
+    assert _claimed_paths("see [ADR](docs/adr/ADR-017-ui-toolkit-pyside6.md)") == [
+        (1, "docs/adr/ADR-017-ui-toolkit-pyside6.md")
+    ]
+    assert _claimed_paths("see [site](https://example.com/a.md)") == []
+    assert _claimed_paths("see [section](#anchor)") == []
+
+
+def test_existence_ignores_anything_outside_the_repository(tmp_path, monkeypatch):
+    """With the prescribed in-tree `venv/`, a dependency shipping a file of the
+    same name would otherwise keep a dead reference looking alive. Exercised
+    against a real tree so the pruning is proved, not asserted."""
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "pipeline.py").write_text("", encoding="utf-8")
+    (tmp_path / "venv" / "lib").mkdir(parents=True)
+    (tmp_path / "venv" / "lib" / "impostor.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _exists("core/pipeline.py")
+    assert _exists("core/")
+    assert not _exists("venv/lib/impostor.py"), "path inside a pruned directory"
+    assert not _exists("impostor.py"), "bare name found only inside venv/"
 
 
 def test_a_dotted_symbol_is_not_a_filename():
