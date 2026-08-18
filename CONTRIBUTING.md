@@ -24,6 +24,24 @@ source venv/bin/activate
 pip install -e .[dev]
 ```
 
+#### Linux: system libraries for Qt
+
+`pip` installs PySide6's Python bindings but not the system libraries Qt links
+against. Without them `import PySide6.QtGui` fails with
+`ImportError: libEGL.so.1: cannot open shared object file`, which stops pytest
+during startup — before a single test runs — because `pytest-qt` imports Qt
+from its plugin hook. The test suite runs headless (`tests/conftest.py` sets
+`QT_QPA_PLATFORM=offscreen`), but the offscreen platform plugin still needs
+these:
+
+```bash
+sudo apt-get install -y libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 ffmpeg
+```
+
+This is the same list `.github/workflows/ci.yml` installs on its Ubuntu
+runners; keep the two in sync. `ffmpeg` is there for
+`tests/test_core_peaks.py`, which synthesises a sine-wave FLAC.
+
 ### Run the GUI
 
 ```bash
