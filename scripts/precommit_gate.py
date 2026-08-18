@@ -22,8 +22,14 @@ Working out *which* file that applies to means reading the command the hook
 fired on: ``git add b.py && git commit`` is about to make b.py whole but
 leaves any other half-staged file exactly as broken, and
 ``git commit -- a.py`` records the paths it names rather than the index at
-all. Where the command cannot be read confidently, the gate withholds the
-index-derived observations instead of guessing at them.
+all. That reading is a shell parse, not a token scan — a command block is
+several commands, and ``;``, a newline and a redirection all end one.
+
+Where the command cannot be parsed the gate falls back to the index as it
+stands, and so may refuse a commit it had no business refusing. That is the
+deliberate direction: a needless refusal is visible and costs one command to
+undo, while the opposite default costs a silent pass — the exact failure the
+gate exists to prevent.
 
 On Linux the fast suite needs the system Qt libraries listed in
 CONTRIBUTING.md; without them pytest cannot start and the gate denies every
@@ -36,6 +42,7 @@ tests do not answer, plus anything that weakens the guarantee it just gave.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -178,8 +185,13 @@ def _is_module_missing(output: str, module: str) -> bool:
     return False
 
 
-#: Shell operators that end one command and begin the next.
-_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&"})
+#: Shell operators that end one command and begin the next. Longest first —
+#: ``&&`` must be recognised before ``&``. A newline is one of them: a command
+#: block is several commands, not one long line.
+_SHELL_SEPARATORS = ("&&", "||", ";", "|", "&", "\n")
+
+#: Redirections, which belong to the shell and not to git's argument list.
+_REDIRECTION = re.compile(r"^\d*(?:>>|>&|>|<<<|<<|<)")
 
 #: ``git commit`` options that consume the following argument, so that
 #: argument is a value and not a pathspec.
@@ -202,30 +214,116 @@ _ADD_STAGES_EVERYTHING = frozenset({"-A", "--all", "-u", "--update", "--pathspec
 _GLOB_CHARS = "*?["
 
 
-def _argv_after(command: str, *prefix: str) -> list[str] | None:
-    """Arguments of the first ``prefix`` invocation in a shell command line.
+class _Unreadable(Exception):
+    """The command line could not be parsed, so nothing may be inferred from it."""
 
-    ``None`` when the command does not contain that invocation, or cannot be
-    tokenised at all.
+
+def _split_segments(command: str) -> list[str] | None:
+    """Split a shell command line into the simple commands it is made of.
+
+    Quote-aware, because an operator inside quotes is text: the ``&&`` in
+    ``git commit -m "a && b"`` separates nothing. ``None`` means the line
+    could not be scanned — an unbalanced quote, a heredoc — and a
+    half-understood command line must not be passed off as understood.
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return None
-    width = len(prefix)
-    for start in range(len(tokens) - width + 1):
-        if tuple(tokens[start : start + width]) != prefix:
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    position = 0
+    while position < len(command):
+        char = command[position]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and quote == '"' and position + 1 < len(command):
+                current.append(command[position + 1])
+                position += 2
+                continue
+            if char == quote:
+                quote = None
+            position += 1
             continue
-        argv: list[str] = []
-        for token in tokens[start + width :]:
-            if token in _SHELL_SEPARATORS:
-                break
-            argv.append(token)
-        return argv
-    return None
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            position += 1
+            continue
+        if char == "\\" and position + 1 < len(command):
+            # An escaped character, including the ``\`` + newline that
+            # continues one command onto the next line.
+            current.append(char)
+            current.append(command[position + 1])
+            position += 2
+            continue
+        separator = next(
+            (sep for sep in _SHELL_SEPARATORS if command.startswith(sep, position)),
+            None,
+        )
+        if separator is not None:
+            segments.append("".join(current))
+            current = []
+            position += len(separator)
+            continue
+        current.append(char)
+        position += 1
+    if quote is not None:
+        return None
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments if segment.strip()]
 
 
-def _commit_selects_paths(command: str) -> bool:
+def _dequote(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    return token
+
+
+def _invocations(command: str, subcommand: str) -> list[list[str]] | None:
+    """Arguments of every ``git <subcommand>`` in a shell command line.
+
+    ``None`` when the line cannot be read confidently — callers must treat
+    that as "unknown", never as "there are none".
+    """
+    segments = _split_segments(command)
+    if segments is None:
+        return None
+    found: list[list[str]] = []
+    for segment in segments:
+        # posix=False keeps backslashes intact, so a Windows pathspec such as
+        # ``scripts\gate.py`` survives tokenising; the quotes it leaves on
+        # tokens come off in _dequote.
+        lexer = shlex.shlex(segment, posix=False)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        try:
+            raw = list(lexer)
+        except ValueError:
+            return None
+        tokens: list[str] = []
+        skip_next = False
+        for token in raw:
+            if skip_next:
+                skip_next = False
+                continue
+            redirection = _REDIRECTION.match(token)
+            if redirection:
+                # ``2>&1`` carries its target; a bare ``>`` takes the next word.
+                skip_next = redirection.end() == len(token)
+                continue
+            tokens.append(_dequote(token))
+        if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == subcommand:
+            found.append(tokens[2:])
+    return found
+
+
+def _normalise(pathspec: str) -> str:
+    """A pathspec in the shape ``git diff --name-only`` reports paths."""
+    path = pathspec.replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def _commit_selects_paths(argv: list[str]) -> bool:
     """True when ``git commit`` names the paths it is going to record.
 
     ``git commit -- a.py``, ``git commit --only a.py`` and the bare
@@ -233,15 +331,12 @@ def _commit_selects_paths(command: str) -> bool:
     index untouched (``git commit -h``, ``--only``). Nothing the gate reads
     off the index describes such a commit, so it reports nothing about it.
     """
-    argv = _argv_after(command, "git", "commit")
-    if argv is None:
-        return False
     expecting_value = False
     for token in argv:
         if expecting_value:
             expecting_value = False
             continue
-        if token in ("--", "--only", "-o"):
+        if token in ("--", "--only"):
             return True
         if token.startswith("--"):
             expecting_value = token in _COMMIT_VALUE_FLAGS
@@ -255,11 +350,8 @@ def _commit_selects_paths(command: str) -> bool:
     return False
 
 
-def _commit_stages_everything(command: str) -> bool:
+def _commit_stages_everything(argv: list[str]) -> bool:
     """True for ``git commit -a`` — it stages every tracked modification."""
-    argv = _argv_after(command, "git", "commit")
-    if argv is None:
-        return False
     for token in argv:
         if token == "--":
             break
@@ -270,8 +362,20 @@ def _commit_stages_everything(command: str) -> bool:
     return False
 
 
+def _add_stages_everything(argv: list[str]) -> bool:
+    """True when a ``git add`` reaches beyond the paths spelled out in it."""
+    for token in argv:
+        if token in _ADD_STAGES_EVERYTHING:
+            return True
+        if token.startswith("-"):
+            continue
+        if token == "." or token.startswith(":") or any(c in token for c in _GLOB_CHARS):
+            return True
+    return False
+
+
 def _restaged_paths(command: str) -> set[str] | None:
-    """Paths a ``git add`` in *command* is about to move into the index.
+    """Paths the command is about to move into the index before committing.
 
     A PreToolUse hook fires before the command runs, so for
     ``git add … && git commit`` the index the gate can see is not yet the
@@ -279,26 +383,33 @@ def _restaged_paths(command: str) -> set[str] | None:
     actually names. Everything else keeps whatever split state it already has.
 
     An empty set means the command stages nothing, so the index is already
-    final. ``None`` means the whole index is about to be rewritten (``git add
-    .``, ``-A``, a glob, ``git commit -a``) or the command cannot be read
-    confidently — in both cases the gate withholds its index-derived
-    observations rather than inventing them.
+    final. ``None`` means the whole index is about to be rewritten — ``git add
+    .``, ``-A``, a glob, ``git commit -a`` — and no per-path conclusion holds.
+
+    Unreadable command lines are *not* handled here: they raise
+    :class:`_Unreadable`, because "I could not parse this" and "this stages
+    everything" must not collapse into the same answer.
     """
-    if _commit_stages_everything(command):
+    adds = _invocations(command, "add")
+    commits = _invocations(command, "commit")
+    if adds is None or commits is None:
+        raise _Unreadable
+    if any(_commit_stages_everything(argv) for argv in commits):
         return None
-    argv = _argv_after(command, "git", "add")
-    if argv is None:
-        return set()
     paths: set[str] = set()
-    for token in argv:
-        if token in _ADD_STAGES_EVERYTHING:
+    for argv in adds:
+        if _add_stages_everything(argv):
             return None
-        if token.startswith("-"):
-            continue
-        if token == "." or token.startswith(":") or any(c in token for c in _GLOB_CHARS):
-            return None
-        paths.add(token.rstrip("/"))
-    return paths or None
+        skip_next = False
+        for token in argv:
+            if skip_next:
+                skip_next = False
+                continue
+            if token.startswith("-"):
+                skip_next = token == "--chmod"
+                continue
+            paths.add(_normalise(token))
+    return paths
 
 
 def _covered_by(path: str, pathspecs: set[str]) -> bool:
@@ -318,16 +429,30 @@ def main() -> int:
     # commit will actually contain. A path-selecting commit maps onto nothing
     # the index says; a ``git add`` in the same line settles the paths it
     # names and leaves every other half-staged file just as broken.
-    if _commit_selects_paths(command):
+    #
+    # When the command cannot be parsed the gate reports the index as it
+    # stands. That can cost a needless refusal, which the developer sees and
+    # can undo in one command — while the opposite default costs a silent
+    # pass, which is the exact failure this gate exists to prevent.
+    try:
+        commits = _invocations(command, "commit")
+        if commits is None:
+            raise _Unreadable
+        if any(_commit_selects_paths(argv) for argv in commits):
+            restaged: set[str] | None = None
+            selects_paths = True
+        else:
+            restaged = _restaged_paths(command)
+            selects_paths = False
+    except _Unreadable:
+        restaged, selects_paths = set(), False
+
+    if selects_paths or restaged is None:
         conflicted: list[str] = []
         dirty: list[str] = []
     else:
-        restaged = _restaged_paths(command)
-        if restaged is None:
-            conflicted, dirty = [], []
-        else:
-            conflicted = [p for p in _staged_but_dirty() if not _covered_by(p, restaged)]
-            dirty = [p for p in _dirty_elsewhere() if not _covered_by(p, restaged)]
+        conflicted = [p for p in _staged_but_dirty() if not _covered_by(p, restaged)]
+        dirty = [p for p in _dirty_elsewhere() if not _covered_by(p, restaged)]
 
     if conflicted:
         listing = "\n".join(f"  - {path}" for path in conflicted)

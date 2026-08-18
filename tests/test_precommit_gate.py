@@ -36,9 +36,15 @@ gate = _load_gate()
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """A throwaway git repo the gate's git helpers read instead of this one."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "gate@test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "gate"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    for key, value in (
+        ("user.email", "gate@test"),
+        ("user.name", "gate"),
+        # Never sign: a developer with commit.gpgsign on globally would
+        # otherwise have every test in this file fail on a key prompt.
+        ("commit.gpgsign", "false"),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=tmp_path, check=True)
     (tmp_path / "a.py").write_text("v1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("v1\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
@@ -48,7 +54,14 @@ def repo(tmp_path, monkeypatch):
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True)
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _selects_paths(command: str) -> bool:
+    """Whether any ``git commit`` in *command* names the paths it records."""
+    invocations = gate._invocations(command, "commit")
+    assert invocations is not None, f"command should be readable: {command!r}"
+    return any(gate._commit_selects_paths(argv) for argv in invocations)
 
 
 def _decide(monkeypatch, capsys, command: str) -> dict:
@@ -111,12 +124,17 @@ def test_untracked_files_count_as_working_tree_the_commit_will_not_carry(repo):
         "git commit --only a.py",
         "git commit -o a.py",
         "git commit a.py",
+        # No pathspec spelled out, but --only/-o still means "the paths, not
+        # the index" — and these reach the flag branches that a bare pathspec
+        # would otherwise mask.
+        "git commit --only",
+        "git commit -o",
     ],
 )
 def test_path_selecting_commits_do_not_describe_the_index(command):
     """``git commit -- a.py`` records that path and leaves the rest of the
     index alone, so no index-derived conclusion maps onto the commit."""
-    assert gate._commit_selects_paths(command) is True
+    assert _selects_paths(command) is True
 
 
 @pytest.mark.parametrize(
@@ -126,10 +144,31 @@ def test_path_selecting_commits_do_not_describe_the_index(command):
         'git commit -m "a.py fixes"',
         'git commit -am "msg"',
         "git commit --no-verify",
+        'git commit -m "fix -- broken"',
+        'git commit --author "A <a@b.c>" -m msg',
     ],
 )
 def test_ordinary_commits_do_describe_the_index(command):
-    assert gate._commit_selects_paths(command) is False
+    assert _selects_paths(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git commit -m "x" && git push',
+        'git commit -m "x"; git log --oneline -1',
+        'git commit -m "x"\ngit push',
+        'git commit -m "x" 2>&1',
+        'git commit -m "x" >/dev/null',
+        'git commit -m "a && b"',
+    ],
+)
+def test_what_follows_the_commit_is_not_a_pathspec(command):
+    """The regression a naive tokeniser reintroduces: `shlex` knows nothing
+    about `;`, newlines or redirections, so everything after the commit
+    looked like a pathspec — and the gate switched itself off silently on the
+    multi-line command blocks that are the common case."""
+    assert _selects_paths(command) is False
 
 
 def test_path_selecting_commit_is_not_denied_over_an_unrelated_file(
@@ -206,3 +245,87 @@ def test_plain_commit_still_denies_a_half_staged_file(repo, monkeypatch, capsys)
 
     assert _is_deny(decision)
     assert "a.py" in decision["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git commit -m "x"; git log',
+        'git commit -m "x"\ngit push',
+        'git commit -m "x" 2>&1',
+    ],
+)
+def test_a_half_staged_file_is_still_caught_past_a_shell_operator(
+    repo, monkeypatch, capsys, command
+):
+    """A command block must not be able to silence the gate."""
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    assert _is_deny(_decide(monkeypatch, capsys, command))
+
+
+def test_every_git_add_in_the_line_counts_not_just_the_first(repo, monkeypatch, capsys):
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "m.py").write_text("v1\n", encoding="utf-8")
+    _git(repo, "add", "pkg/m.py")
+    _git(repo, "commit", "-qm", "add pkg")
+    for path in ("a.py", "pkg/m.py"):
+        (repo / path).write_text("staged\n", encoding="utf-8")
+        _git(repo, "add", path)
+        (repo / path).write_text("worktree\n", encoding="utf-8")
+
+    command = 'git add a.py && git add pkg/m.py && git commit -m "x"'
+    assert not _is_deny(_decide(monkeypatch, capsys, command))
+
+
+@pytest.mark.parametrize("spelling", ["./a.py", r"a.py"])
+def test_pathspecs_are_matched_in_the_shape_git_reports_them(
+    repo, monkeypatch, capsys, spelling
+):
+    """``./a.py`` and a backslash-separated Windows path both name the file
+    git calls ``a.py``; missing that denies a perfectly good commit."""
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    command = f'git add {spelling} && git commit -m "x"'
+    assert not _is_deny(_decide(monkeypatch, capsys, command))
+
+
+def test_windows_style_pathspec_normalises_to_forward_slashes():
+    assert gate._restaged_paths(r"git add scripts\gate.py && git commit") == {
+        "scripts/gate.py"
+    }
+
+
+def test_commit_dash_a_stages_everything_so_nothing_stays_conflicted(
+    repo, monkeypatch, capsys
+):
+    """``git commit -a`` restages every tracked change, so a half-staged
+    tracked file is about to become whole."""
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    assert not _is_deny(_decide(monkeypatch, capsys, 'git commit -am "x"'))
+
+
+def test_add_all_flag_reaches_past_the_paths_named_beside_it():
+    """``git add -A a.py`` stages the whole tree, not just a.py."""
+    assert gate._restaged_paths("git add -A a.py && git commit") is None
+
+
+def test_an_unreadable_command_is_not_read_as_staging_everything(
+    repo, monkeypatch, capsys
+):
+    """An unbalanced quote means the gate does not know what will be staged.
+    It must then report the index as it stands — a needless refusal is
+    visible and recoverable, a silent pass is the failure it exists to
+    prevent."""
+    (repo / "a.py").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+
+    assert _is_deny(_decide(monkeypatch, capsys, 'git add a.py && git commit -m "unmatched'))
