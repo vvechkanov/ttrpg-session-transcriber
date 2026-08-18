@@ -59,9 +59,13 @@ def _git(repo: Path, *args: str) -> None:
 
 def _selects_paths(command: str) -> bool:
     """Whether any ``git commit`` in *command* names the paths it records."""
-    invocations = gate._invocations(command, "commit")
-    assert invocations is not None, f"command should be readable: {command!r}"
-    return any(gate._commit_selects_paths(argv) for argv in invocations)
+    plan = gate._plan(command)
+    assert plan.commits, f"command should contain a commit: {command!r}"
+    return any(gate._commit_selects_paths(argv) for argv in plan.commits)
+
+
+def _restaged(command: str) -> set[str] | None:
+    return gate._restaged_paths(gate._plan(command))
 
 
 def _decide(monkeypatch, capsys, command: str) -> dict:
@@ -295,9 +299,7 @@ def test_pathspecs_are_matched_in_the_shape_git_reports_them(
 
 
 def test_windows_style_pathspec_normalises_to_forward_slashes():
-    assert gate._restaged_paths(r"git add scripts\gate.py && git commit") == {
-        "scripts/gate.py"
-    }
+    assert _restaged(r"git add scripts\gate.py && git commit") == {"scripts/gate.py"}
 
 
 def test_commit_dash_a_stages_everything_so_nothing_stays_conflicted(
@@ -312,9 +314,73 @@ def test_commit_dash_a_stages_everything_so_nothing_stays_conflicted(
     assert not _is_deny(_decide(monkeypatch, capsys, 'git commit -am "x"'))
 
 
-def test_add_all_flag_reaches_past_the_paths_named_beside_it():
-    """``git add -A a.py`` stages the whole tree, not just a.py."""
-    assert gate._restaged_paths("git add -A a.py && git commit") is None
+@pytest.mark.parametrize("flag", ["-A", "-u", "--all", "--update"])
+def test_a_widening_flag_still_obeys_the_pathspec_beside_it(flag):
+    """``-A`` and ``-u`` widen *what kinds of change* are staged, not *where*
+    (``git add [<options>] [--] <pathspec>...``). Reading them as "the whole
+    tree" would clear the conflict on every other half-staged file."""
+    assert _restaged(f"git add {flag} b.py && git commit") == {"b.py"}
+
+
+@pytest.mark.parametrize("flag", ["-A", "-u", "--all", "--update"])
+def test_a_widening_flag_without_a_pathspec_does_mean_everything(flag):
+    assert _restaged(f"git add {flag} && git commit") is None
+
+
+@pytest.mark.parametrize("command", ["git commit -mdata", "git commit -mhello"])
+def test_an_attached_message_is_not_read_as_a_cluster_of_flags(command):
+    """`-mdata` is the message `data`. Scanning it letter by letter finds an
+    `a` and calls the commit `-a`, or an `o` and calls it `--only` — either
+    way the gate drops the checks on a commit that stages nothing of the
+    kind."""
+    plan = gate._plan(command)
+    assert gate._commit_stages_everything(plan.commits[0]) is False
+    assert _selects_paths(command) is False
+
+
+def test_an_unquoted_comment_is_not_a_pathspec():
+    """`git commit -m x  # note` — the tail is a shell comment, and reading
+    it as a pathspec switches the gate off."""
+    assert _selects_paths("git commit -m x # ordinary note") is False
+
+
+def test_interactive_add_settles_nothing_in_advance():
+    """`git add -p` stages the hunks a human picks, so the index it leaves
+    cannot be read off the command line."""
+    assert _restaged("git add -p a.py && git commit -m x") == set()
+
+
+def test_an_add_after_the_commit_does_not_count():
+    """`git commit -m x; git add a.py` commits the old index first."""
+    assert _restaged("git commit -m x; git add a.py") == set()
+
+
+def test_a_command_that_rewrites_files_before_committing_credits_nothing():
+    """The checks run before the whole line. If something writes a.py after
+    they finish, they measured code that no longer exists — crediting the
+    later `git add` would hide exactly that."""
+    command = "printf 'broken(\\n' > a.py && git add a.py && git commit -m x"
+    assert _restaged(command) == set()
+
+
+@pytest.mark.parametrize(
+    "prefix", ["cd /repo && ", "git status && ", "git diff --stat && "]
+)
+def test_harmless_commands_before_the_add_do_not_cost_the_credit(prefix):
+    assert _restaged(f"{prefix}git add a.py && git commit -m x") == {"a.py"}
+
+
+def test_a_command_without_a_commit_is_left_alone(repo, monkeypatch, capsys):
+    """The hook may be registered for every Bash call. Running the suite on
+    `git status` would deny the very commands someone runs to diagnose a
+    failing test."""
+    monkeypatch.setattr(gate, "CHECKS", [])
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": "git status"}}))
+    )
+
+    assert gate.main() == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_an_unreadable_command_is_not_read_as_staging_everything(

@@ -25,11 +25,21 @@ leaves any other half-staged file exactly as broken, and
 all. That reading is a shell parse, not a token scan — a command block is
 several commands, and ``;``, a newline and a redirection all end one.
 
+Order matters too. Only a ``git add`` that runs before the commit settles
+anything, and only when nothing between here and the commit can rewrite the
+files being checked: the hook fires before the whole line, so a command that
+writes ``a.py`` after ruff and pytest have read it leaves their result
+describing code that no longer exists.
+
 Where the command cannot be parsed the gate falls back to the index as it
 stands, and so may refuse a commit it had no business refusing. That is the
 deliberate direction: a needless refusal is visible and costs one command to
 undo, while the opposite default costs a silent pass — the exact failure the
 gate exists to prevent.
+
+A command line with no ``git commit`` in it is left alone entirely, so that a
+hook registered for every Bash call does not answer ``git status`` with a
+full test run.
 
 On Linux the fast suite needs the system Qt libraries listed in
 CONTRIBUTING.md; without them pytest cannot start and the gate denies every
@@ -47,6 +57,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -203,12 +214,24 @@ _COMMIT_VALUE_FLAGS = frozenset(
     }
 )
 
-#: The same options in short-cluster form (``-am "msg"`` ends in ``m``).
+#: The same options in short-cluster form (``-am "msg"`` ends in ``m``). Such
+#: a letter swallows the rest of the cluster, so ``-mdata`` is a message and
+#: not the flags ``d``, ``a``, ``t``, ``a``.
 _COMMIT_VALUE_LETTERS = "mFCct"
 
-#: ``git add`` options that stage more than the paths spelled out next to
-#: them, so the resulting index cannot be predicted path by path.
-_ADD_STAGES_EVERYTHING = frozenset({"-A", "--all", "-u", "--update", "--pathspec-from-file"})
+#: ``git add`` options after which the resulting index cannot be predicted
+#: from the command line: the user picks hunks, or nothing is staged at all.
+_ADD_UNCREDITABLE = frozenset(
+    {"-p", "--patch", "-i", "--interactive", "-e", "--edit", "-n", "--dry-run",
+     "--pathspec-from-file"}
+)
+
+#: Commands that may run before the commit without invalidating what the
+#: checks just measured. ``git add`` is handled separately; anything outside
+#: this set can rewrite the very files ruff and pytest were pointed at.
+_INERT_BEFORE_COMMIT = frozenset(
+    {"status", "diff", "log", "rev-parse", "branch", "fetch", "remote", "config"}
+)
 
 #: A pathspec containing any of these is a pattern, not a plain path.
 _GLOB_CHARS = "*?["
@@ -216,6 +239,20 @@ _GLOB_CHARS = "*?["
 
 class _Unreadable(Exception):
     """The command line could not be parsed, so nothing may be inferred from it."""
+
+
+class _Plan(NamedTuple):
+    """What a command line is about to do, as far as it can be read.
+
+    ``inert`` is False when something other than ``git add`` runs before the
+    commit: a redirection into a source file, a formatter, a script. The
+    checks run *before* the whole line, so anything that rewrites files
+    afterwards makes their result describe code that no longer exists.
+    """
+
+    inert: bool
+    adds: list[list[str]]
+    commits: list[list[str]]
 
 
 def _split_segments(command: str) -> list[str] | None:
@@ -277,42 +314,70 @@ def _dequote(token: str) -> str:
     return token
 
 
-def _invocations(command: str, subcommand: str) -> list[list[str]] | None:
-    """Arguments of every ``git <subcommand>`` in a shell command line.
+def _tokenise(segment: str) -> list[str] | None:
+    """The words of one simple command, without its shell decorations."""
+    # posix=False keeps backslashes intact, so a Windows pathspec such as
+    # ``scripts\gate.py`` survives tokenising; the quotes it leaves on tokens
+    # come off in _dequote. The default commenters are kept, so the tail of
+    # ``git commit -m x  # note`` is a comment and not three pathspecs.
+    lexer = shlex.shlex(segment, posix=False)
+    lexer.whitespace_split = True
+    try:
+        raw = list(lexer)
+    except ValueError:
+        return None
+    tokens: list[str] = []
+    skip_next = False
+    for token in raw:
+        if skip_next:
+            skip_next = False
+            continue
+        redirection = _REDIRECTION.match(token)
+        if redirection:
+            # ``2>&1`` carries its target; a bare ``>`` takes the next word.
+            skip_next = redirection.end() == len(token)
+            continue
+        tokens.append(_dequote(token))
+    return tokens
 
-    ``None`` when the line cannot be read confidently — callers must treat
-    that as "unknown", never as "there are none".
+
+def _plan(command: str) -> _Plan:
+    """Read a shell command line into the parts the gate reasons about.
+
+    Order matters: only a ``git add`` that runs *before* the commit settles
+    anything, and only if nothing between here and the commit can rewrite
+    the files the checks are about to read.
+
+    Raises :class:`_Unreadable` when the line cannot be scanned at all.
     """
     segments = _split_segments(command)
     if segments is None:
-        return None
-    found: list[list[str]] = []
+        raise _Unreadable
+    adds: list[list[str]] = []
+    commits: list[list[str]] = []
+    inert = True
     for segment in segments:
-        # posix=False keeps backslashes intact, so a Windows pathspec such as
-        # ``scripts\gate.py`` survives tokenising; the quotes it leaves on
-        # tokens come off in _dequote.
-        lexer = shlex.shlex(segment, posix=False)
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        try:
-            raw = list(lexer)
-        except ValueError:
-            return None
-        tokens: list[str] = []
-        skip_next = False
-        for token in raw:
-            if skip_next:
-                skip_next = False
-                continue
-            redirection = _REDIRECTION.match(token)
-            if redirection:
-                # ``2>&1`` carries its target; a bare ``>`` takes the next word.
-                skip_next = redirection.end() == len(token)
-                continue
-            tokens.append(_dequote(token))
-        if len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == subcommand:
-            found.append(tokens[2:])
-    return found
+        tokens = _tokenise(segment)
+        if tokens is None:
+            raise _Unreadable
+        if not tokens:
+            continue
+        if commits:
+            # Everything past the commit is somebody else's business.
+            continue
+        if tokens[0] == "cd":
+            continue
+        if tokens[0] != "git" or len(tokens) < 2:
+            inert = False
+            continue
+        subcommand, argv = tokens[1], tokens[2:]
+        if subcommand == "commit":
+            commits.append(argv)
+        elif subcommand == "add":
+            adds.append(argv)
+        elif subcommand not in _INERT_BEFORE_COMMIT:
+            inert = False
+    return _Plan(inert=inert, adds=adds, commits=commits)
 
 
 def _normalise(pathspec: str) -> str:
@@ -342,11 +407,27 @@ def _commit_selects_paths(argv: list[str]) -> bool:
             expecting_value = token in _COMMIT_VALUE_FLAGS
             continue
         if token.startswith("-") and len(token) > 1:
-            if "o" in token[1:]:
+            expecting_value = _cluster_takes_next_word(token, stop_at="o")
+            if expecting_value is None:
                 return True
-            expecting_value = token[-1] in _COMMIT_VALUE_LETTERS
             continue
         return True  # a bare argument is a pathspec
+    return False
+
+
+def _cluster_takes_next_word(token: str, stop_at: str) -> bool | None:
+    """Walk a short-option cluster such as ``-am``.
+
+    ``None`` means *stop_at* was found before any value-taking letter.
+    Otherwise True when the cluster ends on a letter that takes the next word
+    as its value. Scanning stops at the first value-taking letter, because
+    ``-mdata`` is the message ``data`` — not the flags ``d``, ``a``, ``t``.
+    """
+    for index, letter in enumerate(token[1:], start=1):
+        if letter == stop_at:
+            return None
+        if letter in _COMMIT_VALUE_LETTERS:
+            return index == len(token) - 1
     return False
 
 
@@ -357,24 +438,43 @@ def _commit_stages_everything(argv: list[str]) -> bool:
             break
         if token == "--all":
             return True
-        if not token.startswith("--") and token.startswith("-") and "a" in token[1:]:
-            return True
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") and len(token) > 1:
+            if _cluster_takes_next_word(token, stop_at="a") is None:
+                return True
     return False
 
 
-def _add_stages_everything(argv: list[str]) -> bool:
-    """True when a ``git add`` reaches beyond the paths spelled out in it."""
+def _add_scope(argv: list[str]) -> set[str] | None:
+    """The pathspecs one ``git add`` will stage, or ``None`` for the lot.
+
+    ``-A`` and ``-u`` widen *what kinds of change* are staged, not *where*:
+    ``git add -u b.py`` still touches only b.py (``git add -h``:
+    ``git add [<options>] [--] <pathspec>...``). So a pathspec, when given,
+    is the scope regardless of the flags beside it.
+    """
+    paths: set[str] = set()
+    skip_next = False
+    after_separator = False
     for token in argv:
-        if token in _ADD_STAGES_EVERYTHING:
-            return True
-        if token.startswith("-"):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            after_separator = True
+            continue
+        if not after_separator and token.startswith("-"):
+            skip_next = token == "--chmod"
             continue
         if token == "." or token.startswith(":") or any(c in token for c in _GLOB_CHARS):
-            return True
-    return False
+            return None
+        paths.add(_normalise(token))
+    # No pathspec at all: whatever the flags mean, they mean it everywhere.
+    return paths or None
 
 
-def _restaged_paths(command: str) -> set[str] | None:
+def _restaged_paths(plan: _Plan) -> set[str] | None:
     """Paths the command is about to move into the index before committing.
 
     A PreToolUse hook fires before the command runs, so for
@@ -382,33 +482,27 @@ def _restaged_paths(command: str) -> set[str] | None:
     index that will be committed — but only for the paths that ``git add``
     actually names. Everything else keeps whatever split state it already has.
 
-    An empty set means the command stages nothing, so the index is already
-    final. ``None`` means the whole index is about to be rewritten — ``git add
-    .``, ``-A``, a glob, ``git commit -a`` — and no per-path conclusion holds.
-
-    Unreadable command lines are *not* handled here: they raise
-    :class:`_Unreadable`, because "I could not parse this" and "this stages
-    everything" must not collapse into the same answer.
+    An empty set means nothing is settled in advance, so the index as it
+    stands is what gets judged. ``None`` means the whole index is about to be
+    rewritten — ``git add .``, ``git commit -a`` — and no per-path conclusion
+    holds.
     """
-    adds = _invocations(command, "add")
-    commits = _invocations(command, "commit")
-    if adds is None or commits is None:
-        raise _Unreadable
-    if any(_commit_stages_everything(argv) for argv in commits):
+    if any(_commit_stages_everything(argv) for argv in plan.commits):
         return None
+    if not plan.inert:
+        # Something between here and the commit can rewrite the files the
+        # checks are about to read, so no staging may be credited in advance.
+        return set()
     paths: set[str] = set()
-    for argv in adds:
-        if _add_stages_everything(argv):
+    for argv in plan.adds:
+        if any(token in _ADD_UNCREDITABLE for token in argv):
+            # ``git add -p`` stages the hunks a human picks; the index it
+            # leaves cannot be read off the command line.
+            return set()
+        scope = _add_scope(argv)
+        if scope is None:
             return None
-        skip_next = False
-        for token in argv:
-            if skip_next:
-                skip_next = False
-                continue
-            if token.startswith("-"):
-                skip_next = token == "--chmod"
-                continue
-            paths.add(_normalise(token))
+        paths |= scope
     return paths
 
 
@@ -435,14 +529,17 @@ def main() -> int:
     # can undo in one command — while the opposite default costs a silent
     # pass, which is the exact failure this gate exists to prevent.
     try:
-        commits = _invocations(command, "commit")
-        if commits is None:
-            raise _Unreadable
-        if any(_commit_selects_paths(argv) for argv in commits):
+        plan = _plan(command)
+        if not plan.commits:
+            # Not a commit at all. The hook may be registered for every Bash
+            # call, and running the suite on `git status` would deny the very
+            # commands someone runs to diagnose a failing test.
+            return 0
+        if any(_commit_selects_paths(argv) for argv in plan.commits):
             restaged: set[str] | None = None
             selects_paths = True
         else:
-            restaged = _restaged_paths(command)
+            restaged = _restaged_paths(plan)
             selects_paths = False
     except _Unreadable:
         restaged, selects_paths = set(), False
