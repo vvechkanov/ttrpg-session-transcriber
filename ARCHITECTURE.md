@@ -151,8 +151,15 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 | Подслой | Что там | Правило |
 |---|---|---|
 | `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
-| `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают, про QML не знают ничего и разговаривают только сигналами. `PipelineController` — исключение: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую. То есть `engines → models` — существующее направление зависимости |
+| `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают, про QML не знают ничего и разговаривают только сигналами. `PipelineController` — исключение: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
 | `ui/qml` | сам шелл: `Main.qml`, `Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
+
+**Зависимость между `ui/models` и `ui/engines` — в обе стороны, и это стоит
+знать до того, как двигать импорты.** `PipelineController` из `engines` держит
+ссылки на модели и зовёт их методы; в обратную сторону `ModelRegistry` из
+`models` сам создаёт `InstallWorker` из `engines` и поднимает ему поток.
+Цикла на уровне модулей нет только потому, что одна из сторон импортирует тип
+отложенно. Считать эту границу однонаправленной нельзя.
 
 **Потоки.** Воркеры устроены по идиоме Qt `QObject + moveToThread(QThread)`, а не
 наследованием от `QThread`. Каждый воркер — `QObject` с `Slot`-ом, который зовут
@@ -417,7 +424,7 @@ Optional поля (`confidence`, `no_speech_prob`, слова) добавляю�
 ## 6. Pipeline flow
 
 ```
-ui/cli.py собирает params → core.pipeline.run(params)
+ui/cli.py собирает params → core.pipeline.run(session_dir, params)
        │
        ▼
 ┌──────────────────── core.pipeline.run ───────────────────┐

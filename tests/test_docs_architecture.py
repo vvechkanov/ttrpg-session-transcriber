@@ -42,7 +42,7 @@ NOT_REPOSITORY_PATHS = {
 #: whitelisting extensions instead would stop checking `README.md` the day it
 #: were renamed, which is the same rot in a different spot.
 OUTPUT_FILE_NAMES = frozenset(
-    {"merged.txt", "speaker_map.json", "__init__.py", "settings.ini", "uninstall.exe"}
+    {"merged.txt", "speaker_map.json", "settings.ini", "uninstall.exe"}
 )
 
 #: What "looks like a file" means for a token with no directory in it.
