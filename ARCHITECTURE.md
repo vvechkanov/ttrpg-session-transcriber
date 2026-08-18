@@ -123,7 +123,9 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 > Список составлен чтением импортов и может быть неполон, пока его не
 > проверяет машина. Причина в §4.1: GUI не зовёт `core.pipeline.run`, а
 > воспроизводит его шаги у себя, и вместе с шагами утащил зависимости.
-> Пока `import-linter` из §7.1 процесса не включён, это не ловится машиной.
+> Машина этого не ловит: `import-linter` числится в `docs/process.md`, §7.1,
+> как работа впереди, а не как действующий гейт, и конфигурации для него в
+> дереве нет.
 > Записано здесь, чтобы расхождение было видно, а не считалось соблюдённым.
 
 ---
@@ -307,6 +309,7 @@ class SpeechEvent:
     text: str
     emotion: str | None = None           # проецируется из EmotionTag merger-ом
     parallel_group: int | None = None    # одинаковый id у overlapping SpeechEvent
+    wall_clock: datetime | None = None   # см. ниже
 
 @dataclass
 class ChatEvent:
@@ -314,16 +317,25 @@ class ChatEvent:
     channel: Literal["ic", "ooc"]
     author: str
     text: str
+    wall_clock: datetime | None = None
 
 @dataclass
 class GameEvent:
     at: float
     actor: str
-    action: Literal["roll", "damage", "spell"]
+    action: str                          # открытое множество, не Literal:
+                                         # roll, damage, spell, encounter_start,
+                                         # encounter_end, round_start, turn_start
     detail: str
+    wall_clock: datetime | None = None
 
 ScriptEvent = SpeechEvent | ChatEvent | GameEvent
 ```
+
+`wall_clock` — то, как абсолютное время доезжает до рендерера. `Renderer.render`
+получает только `list[ScriptEvent]` и `Timeline.recording_start` не видит, поэтому
+мерджер раскладывает его по событиям заранее. Без этого поля рендерер, желающий
+напечатать «19:11», взять этот час неоткуда.
 
 Это **discriminated union** в смысле PEP 604 — mypy проверяет exhaustiveness в `match` statement. Для Kotlin разработчика это sealed hierarchy: добавление нового варианта требует обновить все `match` блоки, компилятор (mypy) подсвечивает пропущенные места.
 
@@ -498,7 +510,7 @@ PipelineStage = Literal[
 6. Заменил старый merge-скрипт на `mergers/script_merger.py` — реализует `Merger` ABC и выдаёт `list[ScriptEvent]`.
 7. Завёл `renderers/plain_text.py`, дающий байтовый вывод, эквивалентный прежнему.
 8. Завёл `core/pipeline.py`, `core/discovery.py`, `core/gpu_check.py`; `Timeline` при этом уехал в `domain/` (ADR-12).
-9. Разделил CLI и GUI: `ui/cli.py` и QML-приложение (`ui/app_qml.py`). `core.pipeline.run` зовёт только CLI; как устроен путь GUI — §4.1.
+9. Разделил CLI и GUI: `ui/cli.py` и отдельный tkinter-шелл. QML пришёл позже, в Приоритете 5 — не смешивать эти две миграции. `core.pipeline.run` зовёт только CLI; как устроен путь GUI сегодня — §4.1.
 10. Три legacy-скрипта из `scripts/` — запускалка, мерджер и парсер чата — удалены. Их имена намеренно не перечислены: документ описывает то, что есть, а не то, чего нет; в истории git они на месте.
 
 План предполагал сверку с legacy байт-в-байт, но она **не была проведена**: снимок вывода до перестройки в репозиторий не попал. Вместо неё в `tests/fixtures/e2e_p2/` лежит baseline, снятый с уже нового пайплайна, а тест сверяет с ним пересечение по токенам с порогом 90%. То есть это защита от регрессий нового пайплайна, а не доказательство эквивалентности старому.
@@ -508,7 +520,7 @@ PipelineStage = Literal[
 | Приоритет | Слой | Действие | Статус |
 |---|---|---|---|
 | 3 | `tests/` | Pytest skeleton, fixtures, CI, ruff. Не меняет слои, добавляет инфраструктуру. | сделано |
-| 4 | `sources/speech/` | Добавить backend GigaAM-v3 RNNT. Новый файл в уже готовом слое, контракт `Source` не меняется. | сделано как `sources/speech/gigaam.py` (GigaAM-v3 поверх sherpa-onnx), а не отдельным `sherpa_onnx.py` |
+| 4 | `sources/speech/` | Добавить backend GigaAM-v3 RNNT. Новый файл в уже готовом слое, контракт `Source` не меняется. | сделано как `sources/speech/gigaam.py` (GigaAM-v3 поверх sherpa-onnx), а не отдельным файлом с именем движка |
 | 5 | `ui/` | Миграция tkinter → PySide6. | сделано, вылилось в QML — см. `docs/adr/ADR-017-ui-toolkit-pyside6.md`, поправка от 2026-04-20 |
 | 6 | `mergers/`, `sources/emotion/` (planned) | `LocalLLMMerger` и/или emotion source. Всё additive. | не начато |
 
@@ -524,7 +536,7 @@ ADR-стиль: каждое решение + контекст + последс�
 
 **Decision:** Разделение извлечения, комбинирования и форматирования на три независимых стадии со strategy pattern на каждой. Источники возвращают raw annotations, merger комбинирует Timeline в плоский `list[ScriptEvent]`, renderer превращает в файл.
 
-**Context:** Текущий `wisper_launcher.py` смешивает все три ответственности. Добавить новый формат вывода (markdown), новый источник (эмоции) или новую стратегию merge (LLM) нельзя без трогания соседей.
+**Context:** Тогдашняя запускалка из `scripts/` (§2) смешивала все три ответственности. Добавить новый формат вывода (markdown), новый источник (эмоции) или новую стратегию merge (LLM) нельзя без трогания соседей.
 
 **Consequences:**
 - (+) Независимая эволюция слоёв: новый ASR backend не трогает рендереры; новый формат вывода не трогает sources.

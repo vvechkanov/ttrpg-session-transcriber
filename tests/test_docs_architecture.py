@@ -12,6 +12,7 @@ test.
 
 from __future__ import annotations
 
+import pathlib
 import re
 from pathlib import Path
 
@@ -35,9 +36,42 @@ NOT_REPOSITORY_PATHS = {
     "bzikst": "a HuggingFace model id, not a file",
 }
 
-#: Extensions that mean "a file in this repository" when a token has no slash.
-#: `merged.txt` and `speaker_map.json` are outputs and stay out of it.
-ROOT_FILE_SUFFIXES = (".spec", ".toml", ".ini", ".cfg")
+#: Slash-less tokens that name a file the pipeline *writes*, not one this
+#: repository contains. Everything else with a file extension is a claim —
+#: whitelisting extensions instead would stop checking `README.md` the day it
+#: were renamed, which is the same rot in a different spot.
+OUTPUT_FILE_NAMES = frozenset(
+    {"merged.txt", "speaker_map.json", "__init__.py", "settings.ini", "uninstall.exe"}
+)
+
+#: What "looks like a file" means for a token with no directory in it.
+FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
+
+
+def _repository_suffixes() -> frozenset[str]:
+    """File extensions that actually occur in this tree.
+
+    This is what separates `README.md` from `core.pipeline.run`: both are
+    dotted words, but only one of them ends in something this repository
+    stores. Derived rather than listed, for the same reason as the roots.
+    """
+    return frozenset(
+        path.suffix
+        for path in PROJECT_ROOT.rglob("*")
+        if path.is_file() and path.suffix and ".git" not in path.parts
+    )
+
+
+def _exists(token: str) -> bool:
+    """Whether the document's path points at something in the tree.
+
+    A token with a directory in it is resolved from the repository root. A
+    bare filename cannot be — `Main.qml` lives under `ui/qml/` — so it counts
+    as present when a file of that name exists anywhere.
+    """
+    if "/" in token:
+        return (PROJECT_ROOT / token.rstrip("/")).exists()
+    return any(path.name == token for path in PROJECT_ROOT.rglob(token))
 
 
 def _repository_entries() -> frozenset[str]:
@@ -67,6 +101,7 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
     Without that escape a roadmap cannot name the file it plans to add, and
     the test would quietly delete the plan instead of checking the document.
     """
+    suffixes = _repository_suffixes()
     claims: list[tuple[int, str]] = []
     in_fence = False
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -90,8 +125,11 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
             head = token.split("/")[0]
             if head in NOT_REPOSITORY_PATHS:
                 continue
-            if "/" not in token and not token.endswith(ROOT_FILE_SUFFIXES):
-                continue  # a bare word or an output file, not a repo path
+            if "/" not in token:
+                if token in OUTPUT_FILE_NAMES or not FILE_TOKEN.match(token):
+                    continue  # an output file, or a bare word — not a repo path
+                if pathlib.PurePath(token).suffix not in suffixes:
+                    continue  # `core.pipeline.run` is a symbol, not a file
             if f"`{token}` (planned)" in line or f"{token} (planned)" in line:
                 continue
             claims.append((line_number, token))
@@ -111,7 +149,7 @@ def test_every_path_architecture_names_exists():
         {
             f"{ARCHITECTURE.name}:{line} -> {token}"
             for line, token in _claimed_paths(text)
-            if not (PROJECT_ROOT / token.rstrip("/")).exists()
+            if not _exists(token)
         }
     )
 
@@ -157,6 +195,24 @@ def test_paths_inside_fenced_blocks_are_checked():
         "core/nope.py",
         "ui/gui.py",
     ]
+
+
+def test_a_bare_filename_is_checked_wherever_it_lives():
+    """`README.md` and `Main.qml` are named without a directory. Keying on a
+    list of "config-ish" extensions would stop checking a Markdown document
+    the day it were renamed — the same rot, one spot over."""
+    assert _claimed_paths("see `README.md`") == [(1, "README.md")]
+    assert _claimed_paths("the shell is `Main.qml`") == [(1, "Main.qml")]
+    assert _exists("Main.qml"), "lives under ui/qml/, still counts as present"
+    assert not _exists("no_such_document.md")
+
+
+def test_a_dotted_symbol_is_not_a_filename():
+    """`core.pipeline.run` and `README.md` are both dotted words; only one of
+    them ends in something this tree stores."""
+    assert _claimed_paths("call `core.pipeline.run`") == []
+    assert _claimed_paths("read `sys.argv`") == []
+    assert _claimed_paths("implement `Renderer.render`") == []
 
 
 def test_a_root_level_file_is_checked_too():
