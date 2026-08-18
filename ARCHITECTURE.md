@@ -66,7 +66,7 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 ```
 ┌────────────────────────────────────────────────────────────┐
 │  ui/                                                        │
-│  cli.py, app_qml.py, models/, engines/, qml/   — см. §4.1   │
+│  cli.py, app_qml.py, models, engines, qml      — см. §4.1   │
 │  argparse, QML-шелл, сбор params, progress display          │
 └───────────────────────┬─────────────────────────────────────┘
                         │ imports
@@ -81,8 +81,8 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 ┌──────────┐    ┌──────────┐      ┌──────────┐   ┌──────────┐
 │ sources/ │    │ mergers/ │      │renderers/│   │ domain/  │
 │          │    │          │      │          │   │          │
-│ speech/  │    │script_   │      │plain_    │   │annotat-  │
-│ game_log/│    │merger.py │      │text.py   │   │ions.py   │
+│ speech   │    │script_   │      │plain_    │   │annotat-  │
+│ game_log │    │merger.py │      │text.py   │   │ions.py   │
 │ base.py  │    │base.py   │      │base.py   │   │events.py │
 │          │    │          │      │          │   │timeline. │
 │          │    │          │      │          │   │py        │
@@ -116,8 +116,12 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 
 > **Правило `ui` → `core` сейчас нарушено, и это не описка в списке.**
 > `ui/engines/merger_worker.py` импортирует `mergers`, `renderers` и
-> `domain` напрямую, минуя `core`; `ui/engines/asr_worker.py` —
-> `domain.annotations`. Причина в §4.1: GUI не зовёт `core.pipeline.run`, а
+> `domain` напрямую, минуя `core`, и дополнительно тянет `sources.game_log`
+> ленивыми импортами внутри `_parse_chat()` и `_parse_combat_dumps()` —
+> такие рёбра легко не заметить глазами. `ui/engines/asr_worker.py` и
+> `ui/engines/pipeline_controller.py` импортируют `domain.annotations`.
+> Список составлен чтением импортов и может быть неполон, пока его не
+> проверяет машина. Причина в §4.1: GUI не зовёт `core.pipeline.run`, а
 > воспроизводит его шаги у себя, и вместе с шагами утащил зависимости.
 > Пока `import-linter` из §7.1 процесса не включён, это не ловится машиной.
 > Записано здесь, чтобы расхождение было видно, а не считалось соблюдённым.
@@ -137,7 +141,7 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 
 ### 4.1 Внутри `ui/`: три подслоя
 
-У `sources/` деление тоже есть (`speech/`, `game_log/`), но там это просто вид
+У `sources/` деление тоже есть (`sources/speech/`, `sources/game_log/`), но там это просто вид
 источника. В `ui/` подслои отличаются ролью и потоком, в котором живут, поэтому
 им нужен отдельный разбор. Таблица выше говорит, чего слой не делает; здесь —
 как он устроен внутри.
@@ -146,15 +150,18 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 |---|---|---|
 | `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
 | `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают, про QML не знают ничего и разговаривают только сигналами. `PipelineController` — исключение: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую. То есть `engines → models` — существующее направление зависимости |
-| `ui/qml` | сам шелл: `Main.qml`, `Theme.qml`, плюс `screens/`, `controls/`, `timeline/`, `drawers/`, `popovers/` | Разметка и анимация. Никакой доменной логики |
+| `ui/qml` | сам шелл: `Main.qml`, `Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
 
 **Потоки.** Воркеры устроены по идиоме Qt `QObject + moveToThread(QThread)`, а не
 наследованием от `QThread`. Каждый воркер — `QObject` с `Slot`-ом, который зовут
 из своего потока, и набором `Signal`-ов наружу.
 
-Отмена есть у `AsrWorker` и `MergerWorker`, и у неё два канала: внешний
-`QThread.requestInterruption()` и собственный слот `cancel()`. Воркер проверяет
+Отмена устроена в трёх вариантах, и это тоже стоит смотреть, а не
+предполагать. У `AsrWorker` и `MergerWorker` два канала: внешний
+`QThread.requestInterruption()` и собственный слот `cancel()`; воркер проверяет
 оба между единицами работы, поэтому прерывание не рвёт файл на середине записи.
+У `PeaksWorker` канал один — слот `cancel()` со своим флагом; им пользуется
+`ui/app_qml.py`, когда выбранная папка сменилась и старый расчёт уже не нужен.
 У `InstallWorker` отмены нет ни в каком виде — а он единственный, кто качает и
 распаковывает файлы; прервать установку бэкенда сейчас нечем.
 
@@ -204,10 +211,16 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 Runtime собирается **папочным** дистрибутивом, а не одним файлом: это условие
 LGPL — пользователь должен иметь возможность подменить Qt-библиотеки.
 
-Тяжёлый ML-стек (torch, faster-whisper, gigaam, sherpa-onnx) не входит **ни в
-один** из них — и не значится в зависимостях `pyproject.toml`. Его доставляет
-во время работы `core/backend_installers.py`. Поэтому bootstrap остаётся
-маленьким, а пользователь скачивает веса только того бэкенда, который выбрал.
+Тяжёлый ML-стек не входит **ни в один** из них и не значится в зависимостях
+`pyproject.toml`. `core/backend_installers.py` доставляет во время работы
+ровно два бандла: GigaAM-v3 RNNT поверх sherpa-onnx и faster-whisper
+large-v3-ru. Поэтому bootstrap остаётся маленьким, а пользователь скачивает
+веса только того бэкенда, который выбрал.
+
+`torch` не ставит ни один из них. Источник `sources/speech/whisperx.py`,
+которому он нужен, остаётся в дереве, но его установка не автоматизирована
+нигде — и по решению из TASKS.md (C2) WhisperX вообще подлежит удалению из
+master.
 
 Здесь же — всё, что осталось в проекте от tkinter: окно установщика
 (`launcher/installer_ui.py`), окно удаления (`launcher/uninstaller_ui.py`) и
@@ -431,9 +444,12 @@ ui/ отображает результат пользователю
 ```
 
 **Стадии — это контракт.** `core/pipeline.py::PipelineStage` перечисляет их
-исчерпывающе. Это канал прогресса для **CLI** (`on_stage: StageCallback`);
-у GUI свои — `core.asr.transcribe_one_track(on_progress=…)` для дорожек и
-`InstallProgress` из `sources/base.py` для установки бэкендов:
+исчерпывающе. Это API `core` для прогресса (`on_stage: StageCallback`) —
+и сейчас его **никто не использует**: `ui/cli.py` зовёт `run` и `run_batch`
+без колбэка, так что все стадии уходят в `_noop_stage`, а у GUI свои каналы
+(`core.asr.transcribe_one_track(on_progress=…)` для дорожек и `InstallProgress`
+из `sources/base.py` для установки бэкендов). То есть контракт есть,
+потребителя у него нет:
 
 ```python
 PipelineStage = Literal[
@@ -450,7 +466,7 @@ PipelineStage = Literal[
 **Этот путь — не тот, которым идёт GUI.** См. §4.1: QML-шелл не вызывает
 `core.pipeline.run` и воспроизводит часть этих шагов сам.
 
-**Где живёт Timeline:** только внутри одной итерации `pipeline.run`. Не сериализуется, не покидает process memory. Собирается между стадиями `"combat"` и `"merge"`, потребляется мерджером, после этого GC.
+**Где живёт Timeline:** внутри одной итерации того, кто его собрал. Не сериализуется, не покидает process memory. На пути CLI это `pipeline.run` — сборка между стадиями `"combat"` и `"merge"`, потребление мерджером, дальше GC. На пути GUI свой экземпляр строит `MergerWorker.run()` (§4.1), поэтому работа, связанная с Timeline, должна доезжать до обоих мест.
 
 **Где применялся бы DiskCached декоратор** (напоминание из §5.4a: это заготовка, `core/pipeline.py` её не импортирует)**:** оборачивает дорогие sources (speech — 10-30 мин wall clock) и дорогие мерджеры (LLM merger — 30-60 сек локально, $ + latency у API). Дешёвые компоненты (chat/game log sources, детерминированный `ScriptMerger`) не оборачиваются. Кэш живёт в `session_dir/_cache/sources/` и `session_dir/_cache/mergers/` соответственно. Рендереры не кэшируются — их вывод и так записывается пользователю в итоговый файл.
 

@@ -20,26 +20,39 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ARCHITECTURE = PROJECT_ROOT / "ARCHITECTURE.md"
 
-def _repository_entries() -> frozenset[str]:
-    """Top-level names in the working tree, read rather than listed.
+#: First segments that are deliberately *not* paths in this tree. Everything
+#: else that looks like a path gets checked — including a misspelling like
+#: ``sorces/`` and a package that used to exist and was deleted, which is the
+#: whole class of rot this file guards against.
+#:
+#: Keyed on the first segment, with a reason each, because an unexplained
+#: exclusion here is how a guard quietly stops guarding.
+NOT_REPOSITORY_PATHS = {
+    "src": "ADR-10 names it as the layout that was rejected",
+    "session_dir": "created at runtime under the user's session folder",
+    "_cache": "same, written next to the session",
+    "if": "`if/else` is prose, not a path",
+    "bzikst": "a HuggingFace model id, not a file",
+}
 
-    A hand-maintained whitelist would quietly stop checking the day someone
-    adds a directory — the guard would still pass while the thing it guards
-    rotted. Reading the tree means a new top-level package is covered the
-    moment it exists.
-    """
+#: Extensions that mean "a file in this repository" when a token has no slash.
+#: `merged.txt` and `speaker_map.json` are outputs and stay out of it.
+ROOT_FILE_SUFFIXES = (".spec", ".toml", ".ini", ".cfg")
+
+
+def _repository_entries() -> frozenset[str]:
+    """Top-level names in the working tree, read rather than listed."""
     return frozenset(entry.name for entry in PROJECT_ROOT.iterdir() if entry.name != ".git")
 
 
 def _claimed_paths(text: str) -> list[tuple[int, str]]:
     """Every backticked token that points at something inside this repository.
 
-    A token counts as a claim when its first segment names a real top-level
-    entry — so `build.spec` and `core/pipeline.py` are both checked, while
-    `src/` (the layout ADR-10 rejected), `session_dir/_cache/` (created at
-    runtime under the user's session folder), `%LOCALAPPDATA%/models/` and
-    `merged.txt` are not. Without that rule the document could not name
-    anything it does not itself ship.
+    Anything shaped like a path is a claim unless it is explicitly excused in
+    :data:`NOT_REPOSITORY_PATHS` or carries a shell/URL marker. Keying on
+    "first segment exists in the tree" instead would be exactly backwards: a
+    typo (`sorces/base.py`) or a package deleted whole (`old_pkg/thing.py`)
+    would stop being checked at the moment it became wrong.
 
     Fenced blocks are read too, because the layer diagrams live there and
     that is exactly where a stale path survived longest: `ui/gui.py` sat in
@@ -54,7 +67,6 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
     Without that escape a roadmap cannot name the file it plans to add, and
     the test would quietly delete the plan instead of checking the document.
     """
-    entries = _repository_entries()
     claims: list[tuple[int, str]] = []
     in_fence = False
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -73,8 +85,13 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
             if not token or " " in token:
                 continue
-            if token.split("/")[0] not in entries:
+            if any(char in token for char in "%<>{}|*"):
+                continue  # an environment variable, a placeholder, a glob
+            head = token.split("/")[0]
+            if head in NOT_REPOSITORY_PATHS:
                 continue
+            if "/" not in token and not token.endswith(ROOT_FILE_SUFFIXES):
+                continue  # a bare word or an output file, not a repo path
             if f"`{token}` (planned)" in line or f"{token} (planned)" in line:
                 continue
             claims.append((line_number, token))
@@ -156,6 +173,22 @@ def test_repository_roots_are_read_from_disk_not_listed():
 
     assert {"core", "ui", "tests", "docs", "build.spec"} <= entries
     assert ".git" not in entries
+
+
+def test_a_misspelled_or_deleted_package_is_still_a_claim():
+    """The rule that matters. Keying on "the first segment exists" would stop
+    checking a path at the exact moment it became wrong — a typo, or a package
+    deleted whole, would read as "not one of ours" and be waved through."""
+    assert _claimed_paths("see `sorces/base.py`") == [(1, "sorces/base.py")]
+    assert _claimed_paths("see `old_package/thing.py`") == [(1, "old_package/thing.py")]
+
+
+def test_the_excusals_are_the_only_way_out():
+    """Each entry in NOT_REPOSITORY_PATHS carries a reason, so an exclusion
+    cannot be added silently."""
+    assert all(reason for reason in NOT_REPOSITORY_PATHS.values())
+    assert _claimed_paths("`%LOCALAPPDATA%/models/` on Windows") == []
+    assert _claimed_paths("`session_dir/_cache/{sources|mergers}/x.json`") == []
 
 
 def test_the_extractor_reads_the_real_document():
