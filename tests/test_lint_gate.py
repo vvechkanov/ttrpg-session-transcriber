@@ -28,11 +28,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+PROCESS = PROJECT_ROOT / "docs" / "process.md"
 
-#: The rule the process document (`docs/process.md` §7.1) names as the gate in
-#: force today. It is already green, so wiring it into CI blocks nothing
-#: retroactively — which is the whole reason it is the one that goes in first.
-GATE_RULE = "F821"
+#: How `docs/process.md` §7.1 writes the gate it declares blocking.
+DOCUMENTED_GATE = re.compile(r"`ruff check --select (\w+) \.`")
+
+
+def _documented_gate() -> str:
+    """The rule the process document calls the gate — read, not restated.
+
+    Hard-coding `F821` here would have made this file its own authority: the
+    day §7.1 declares a different rule, a test that carries its own copy of
+    the answer keeps passing while CI stays on the old one. The document is
+    where the decision lives, so the document is what gets read.
+    """
+    named = set(DOCUMENTED_GATE.findall(PROCESS.read_text(encoding="utf-8")))
+
+    assert len(named) == 1, f"docs/process.md §7.1 names {named or 'no'} ruff gate"
+    return named.pop()
 
 
 def _ruff_config() -> dict:
@@ -62,11 +75,19 @@ def test_the_configured_line_length_is_the_one_contributing_promises():
     assert _ruff_config().get("line-length") == int(promised.group(1))
 
 
-#: Ways a command reports success no matter what it found. A step carrying one
-#: of these runs, prints, and fails at nothing — the workflow's own report-only
-#: step uses `--exit-zero` for exactly that reason, which is what makes the
-#: distinction easy to lose sight of.
-NEUTRALIZED = ("--exit-zero", "|| true", "|| :", "; true", "set +e")
+#: Shell syntax that decides the exit status of a line by something other than
+#: the command at its head: `||`, `;`, `&&`, a pipeline, a redirect, a
+#: subshell. Listing the *neutralizers* instead — `|| true`, `; true` — was the
+#: previous attempt, and it lost: `|| echo lint-failed` is not on any such
+#: list and still hands the line `echo`'s exit status. So the rule is inverted.
+#: A gate has to be a plain command, and anything with a joint in it is not
+#: counted as one, however it ends up behaving.
+SHELL_PLUMBING = ("|", "&", ";", ">", "<", "$(", "`", "(", ")")
+
+#: The one flag that neutralises ruff without any shell syntax at all — and the
+#: workflow's own report-only step uses it, which is what makes it easy to
+#: forget it is there.
+SELF_NEUTRALIZING = ("--exit-zero",)
 
 
 def _blocking_steps(workflow: str) -> list[str]:
@@ -78,12 +99,16 @@ def _blocking_steps(workflow: str) -> list[str]:
     `ruff check` was satisfied by the explanatory comment above the job.
     Matching any non-comment line was satisfied by a `name:`. Reading the
     parsed steps caught a `continue-on-error: true` and an `if: false` — but
-    still counted a command that had been handed `--exit-zero`, which fails
-    at nothing while looking exactly like a gate.
+    still counted a command handed `--exit-zero`; blacklisting *that* still
+    counted `|| echo lint-failed`, which is not on any list of tricks and
+    hands the line `echo`'s exit status all the same.
 
-    So a command counts only when nothing between it and a red build has been
-    switched off: no `continue-on-error`, no `if` on the step or its job, and
-    no shell-level neutralizer inside the command itself.
+    Chasing that list is unwinnable, so the rule is inverted: a command counts
+    only if it is *plainly* a command — no shell plumbing to decide its exit
+    status for it, no `--exit-zero`, no `continue-on-error`, and no `if` on
+    the step or its job. Anything more elaborate is not counted, which at
+    worst under-reports; the tests here ask whether a gate exists, so the
+    conservative direction is the safe one.
     """
     workflow = yaml.safe_load(workflow)
     commands = []
@@ -98,24 +123,34 @@ def _blocking_steps(workflow: str) -> list[str]:
                 stripped
                 for line in run.splitlines()
                 if (stripped := line.strip())
-                and not any(marker in stripped for marker in NEUTRALIZED)
+                and not any(joint in stripped for joint in SHELL_PLUMBING)
+                and not any(flag in stripped for flag in SELF_NEUTRALIZING)
             )
     return commands
 
 
 def test_ci_blocks_on_the_gate_the_process_calls_a_gate():
-    """`docs/process.md` §7.1 lists `ruff check --select F821 .` as a blocking
-    check. It was blocking nothing: ruff appeared nowhere in `.github/` except
-    as an unchecked box in the PR template, which is an honour system, not a
-    gate. "Runs somewhere in CI" is not the claim — "fails the build" is."""
+    """`docs/process.md` §7.1 lists a ruff rule as a blocking check. It was
+    blocking nothing: ruff appeared nowhere in `.github/` except as an
+    unchecked box in the PR template, which is an honour system, not a gate.
+    "Runs somewhere in CI" is not the claim — "fails the build" is, and the
+    rule it has to run is whichever one the document currently names."""
+    rule = _documented_gate()
     blocking = _blocking_steps(CI_WORKFLOW.read_text(encoding="utf-8"))
 
     gate = [line for line in blocking if line.startswith("ruff check")]
 
     assert gate, "no blocking step in ci.yml runs ruff"
-    assert any(f"--select {GATE_RULE}" in line for line in gate), (
-        f"ci.yml runs ruff but nothing blocking runs the {GATE_RULE} gate: {gate}"
+    assert any(f"--select {rule}" in line for line in gate), (
+        f"docs/process.md calls {rule} the gate; nothing blocking in ci.yml runs it: {gate}"
     )
+
+
+def test_the_gate_is_read_from_the_document_not_restated():
+    """The guard on `_documented_gate`: if the regex ever stops matching, the
+    test above would be asserting against whatever it happened to return."""
+    assert _documented_gate() in PROCESS.read_text(encoding="utf-8")
+    assert DOCUMENTED_GATE.findall("| `ruff check --select F401 .` | CI |") == ["F401"]
 
 
 def test_a_step_that_cannot_fail_is_not_a_gate():
@@ -134,7 +169,9 @@ def test_a_step_that_cannot_fail_is_not_a_gate():
     # The command can neutralise itself without the workflow saying a word —
     # and the report-only step in this very file does exactly that.
     assert _blocking_steps(gate.replace("F821 .", "F821 . --exit-zero")) == []
-    assert _blocking_steps(gate.replace("F821 .", "F821 . || true")) == []
+    # Shapes a list of known tricks would have to grow to cover, one by one.
+    for tail in ("|| true", "|| echo lint-failed", "; echo done", "| tee out.txt", "&& true"):
+        assert _blocking_steps(gate.replace("F821 .", f"F821 . {tail}")) == [], tail
 
 
 def _commands(markdown: str) -> list[str]:
