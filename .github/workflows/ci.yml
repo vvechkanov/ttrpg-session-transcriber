@@ -89,6 +89,48 @@ jobs:
           pytest tests -m "not slow and not requires_asr" -v
 
   # ────────────────────────────────────────────────────────────────────
+  # Ruff gate. docs/process.md §7.1 has listed `ruff check --select F821`
+  # as a blocking check for months while ruff ran nowhere in CI — the
+  # only mention of it under .github/ was an unchecked box in the PR
+  # template, which is an honour system rather than a gate. The rule
+  # this runs is already green on master, so the job blocks nothing
+  # retroactively; widening the set is a separate, ordered piece of work.
+  #
+  # F821 earns its place on evidence: a fallback path called a `logger`
+  # the module never imported, the NameError was swallowed by a broad
+  # except, and merged.txt silently did not get written — a lost
+  # transcript from a linting error ruff finds in half a second.
+  # ────────────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          # Same dev extra CONTRIBUTING.md tells contributors to install,
+          # so CI and a local checkout run the same linter.
+          pip install ruff
+
+      - name: Ruff gate — undefined names
+        run: ruff check --select F821 .
+
+      # Not a gate: the wider set still has findings, and turning it
+      # blocking here would forbid every commit until they are fixed.
+      # Printing the count keeps the number visible while that work is
+      # scheduled, and `continue-on-error` keeps it from failing the job.
+      - name: Ruff, full configured set (report only)
+        continue-on-error: true
+        run: ruff check .
+
+  # ────────────────────────────────────────────────────────────────────
   # Static build.spec check — parse-only, no PyInstaller run. The real
   # build happens in release.yml on tag push. This catches spec drifts
   # early (e.g. typoed hiddenimports).

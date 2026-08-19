@@ -43,11 +43,14 @@ ruff check .
 ruff format .
 ```
 
-If you have `pre-commit` installed, the same checks run automatically before each commit:
+Settings live in `pyproject.toml` under `[tool.ruff]`, so a local run and CI
+apply the same rules.
 
-```bash
-pre-commit install
-```
+CI runs `ruff check --select F821 .` as a blocking check and reports the wider
+set without blocking. There is no `pre-commit` setup in this repository — an
+earlier version of this file said `pre-commit install` would run these checks
+for you, and it never could: no `.pre-commit-config.yaml` was ever committed.
+Run the two commands above before pushing.
 
 ## How to contribute
 
