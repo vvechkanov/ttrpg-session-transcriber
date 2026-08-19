@@ -26,32 +26,36 @@
 
 ---
 
-## 2. Current state (brief)
+## 2. Состояние ДО перестройки (историческая справка)
 
-Сейчас проект — слабо структурированный монолит с двумя изолированными утилитами:
+> Раздел описывает то, что было **до** Приоритета 2, и оставлен ради ADR
+> ниже: без него непонятно, от чего они отталкивались. Ничего из
+> перечисленного здесь в дереве больше нет. Как устроен проект сегодня — §3,
+> §4 и §6.
 
-```
-scripts/wisper_launcher.py    (1003 строки — монолит)
-├── argparse CLI
-├── tkinter GUI
-├── subprocess вызов whisperx
-├── pipeline orchestration (discover → transcribe → merge → chunk)
-├── GPU pre-flight check
-└── chat log integration coordination
+Тогда проект был слабо структурированным монолитом из трёх скриптов в
+`scripts/`: запускалка на 1003 строки, движко-независимый мерджер и парсер
+фаундривского чата. Имена файлов здесь намеренно не названы — документ
+описывает то, что есть; за именами есть история git.
 
-scripts/merge_whisperx.py     (168 строк — engine-agnostic by design)
-scripts/parse_fvtt_chat.py    (изолирован, чистые функции)
-```
+Запускалка совмещала пять ответственностей: argparse CLI, tkinter GUI,
+subprocess-вызов whisperx, оркестрацию пайплайна и GPU pre-flight.
 
-**Что работает:**
-- `merge_whisperx.py` не привязан к WhisperX — читает только `start`/`end`/`text` per segment, speaker берёт из `speaker_map.json`. Любой backend с canonical JSON работает без изменений мерджера.
-- `parse_fvtt_chat.py` — pure functions, без I/O в pipeline.
+**Что в том состоянии было хорошо** (и что перестройка обязана была
+сохранить):
+- Мерджер не был привязан к WhisperX: читал только `start`/`end`/`text` на
+  сегмент, говорящего брал из `speaker_map.json`. Любой backend с canonical
+  JSON работал без его изменений.
+- Парсер чата был набором чистых функций, без I/O в пайплайне.
 
-**Что плохо:**
-- В `wisper_launcher.py` смешаны 5 разных ответственностей. Любое изменение GUI рискует сломать CLI и наоборот.
-- Транскрипция жёстко прибита к `whisperx` CLI subprocess. Нельзя добавить альтернативный backend без `if/else` в оркестраторе.
-- Мерджер умеет только объединять речевые сегменты одного говорящего по gap. Нет способа добавить chat / game log / emotion как равноправные элементы скрипта.
-- Нет тестов — любой рефакторинг страшный.
+**Что было плохо** (и ради чего затевался Приоритет 2):
+- Пять ответственностей в одном файле: любое изменение GUI рисковало сломать
+  CLI и наоборот.
+- Транскрипция была прибита к `whisperx` через subprocess. Добавить второй
+  backend можно было только через `if`/`else` в оркестраторе.
+- Мерджер умел лишь склеивать речевые сегменты одного говорящего по паузе.
+  Добавить chat, game log или эмоции как равноправные элементы было некуда.
+- Тестов не было вовсе.
 
 ---
 
@@ -62,13 +66,13 @@ scripts/parse_fvtt_chat.py    (изолирован, чистые функции
 ```
 ┌────────────────────────────────────────────────────────────┐
 │  ui/                                                        │
-│  cli.py, gui.py                                             │
-│  argparse, tkinter widgets, сбор params, progress display   │
+│  cli.py, app_qml.py, models, engines, qml      — см. §4.1   │
+│  argparse, QML-шелл, сбор params, progress display          │
 └───────────────────────┬─────────────────────────────────────┘
                         │ imports
 ┌───────────────────────▼─────────────────────────────────────┐
 │  core/                                                       │
-│  pipeline.py, discovery.py, gpu_check.py, cache.py           │
+│  pipeline.py, discovery.py, gpu_check.py, asr.py, …          │
 │  orchestration: discover → extract → assemble timeline →     │
 │  merge → render                                              │
 └──┬─────────────────┬──────────────────┬────────────┬────────┘
@@ -77,8 +81,8 @@ scripts/parse_fvtt_chat.py    (изолирован, чистые функции
 ┌──────────┐    ┌──────────┐      ┌──────────┐   ┌──────────┐
 │ sources/ │    │ mergers/ │      │renderers/│   │ domain/  │
 │          │    │          │      │          │   │          │
-│ speech/  │    │script_   │      │plain_    │   │annotat-  │
-│ game_log/│    │merger.py │      │text.py   │   │ions.py   │
+│ speech   │    │script_   │      │plain_    │   │annotat-  │
+│ game_log │    │merger.py │      │text.py   │   │ions.py   │
 │ base.py  │    │base.py   │      │base.py   │   │events.py │
 │          │    │          │      │          │   │timeline. │
 │          │    │          │      │          │   │py        │
@@ -110,18 +114,153 @@ scripts/parse_fvtt_chat.py    (изолирован, чистые функции
 
 В Python нет enforced module boundaries (в отличие от gradle modules в Kotlin) — эти правила держатся **дисциплиной + ревью + линтером** (ruff import-rules в Приоритете 3).
 
+> **Правило `ui` → `core` сейчас нарушено, и это не описка в списке.**
+> `ui/engines/merger_worker.py` импортирует `mergers`, `renderers` и
+> `domain` напрямую, минуя `core`, и дополнительно тянет `sources.game_log`
+> ленивыми импортами внутри `_parse_chat()` и `_parse_combat_dumps()` —
+> такие рёбра легко не заметить глазами. `ui/engines/asr_worker.py` и
+> `ui/engines/pipeline_controller.py` импортируют `domain.annotations`.
+> Список составлен чтением импортов и может быть неполон, пока его не
+> проверяет машина. Причина в §4.1: GUI не зовёт `core.pipeline.run`, а
+> воспроизводит его шаги у себя, и вместе с шагами утащил зависимости.
+> Машина этого не ловит: `import-linter` числится в `docs/process.md`, §7.1,
+> как работа впереди, а не как действующий гейт, и конфигурации для него в
+> дереве нет.
+> Записано здесь, чтобы расхождение было видно, а не считалось соблюдённым.
+
 ---
 
 ## 4. Layer responsibilities
 
 | Слой | Делает | НЕ делает |
 |---|---|---|
-| `ui` | argparse parsing, tkinter widgets, сбор params в dict, запуск worker thread, отображение прогресса/ошибок | ASR, merge logic, file I/O транскриптов, subprocess вызовы |
+| `ui` | argparse parsing, QML-шелл, сбор params, запуск воркеров на отдельных потоках, отображение прогресса/ошибок | ASR, subprocess вызовы. **Оговорка:** `MergerWorker` из `ui/engines` сам зовёт мерджер, рендерер и пишет итоговый файл — см. §4.1 |
 | `core` | file discovery, GPU pre-flight, оркестрация pipeline, сборка `Timeline` (тип из `domain/`) в памяти, выбор конкретных Source/Merger/Renderer через registry, disk cache decorators | сама транскрипция, сам merge алгоритм, сам рендеринг текста, определение `Timeline` (он в `domain/`) |
 | `sources` | извлечение аннотаций из входных данных (аудио, FVTT chat, будущие игровые логи), возврат `list[Annotation]` | pipeline orchestration, merge, форматирование вывода |
 | `mergers` | комбинирование `Timeline` в плоскую упорядоченную `list[ScriptEvent]` — разрешение overlaps, проекция эмоций на речь, интерливинг chat/game event-ов | извлечение данных, форматирование вывода |
 | `renderers` | форматирование `list[ScriptEvent]` в итоговый формат (plain text, markdown, html, obsidian) | решения что с чем объединять, обращение к sources / mergers |
 | `domain` | pure dataclass-ы для аннотаций и событий, вспомогательные функции без I/O (speaker_map) | subprocess, ASR, GUI, file I/O |
+
+### 4.1 Внутри `ui/`: три подслоя
+
+У `sources/` деление тоже есть (`sources/speech/`, `sources/game_log/`), но там это просто вид
+источника. В `ui/` подслои отличаются ролью и потоком, в котором живут, поэтому
+им нужен отдельный разбор. Таблица выше говорит, чего слой не делает; здесь —
+как он устроен внутри.
+
+| Подслой | Что там | Правило |
+|---|---|---|
+| `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
+| `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают и про QML не знают ничего. Сигналы — их канал **наружу**, а не единственный способ с ними говорить: работу они получают аргументами конструктора, а тех, у кого есть `cancel()`, останавливают прямым вызовом извне (три разных варианта отмены разобраны ниже). `PipelineController` — исключение и в другом: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
+| `ui/qml` | сам шелл: `ui/qml/Main.qml`, `ui/qml/Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
+
+**Зависимость между `ui/models` и `ui/engines` — в обе стороны, и это стоит
+знать до того, как двигать импорты.** `PipelineController` из `engines` держит
+ссылки на модели и зовёт их методы; в обратную сторону `ModelRegistry` из
+`models` сам создаёт `InstallWorker` из `engines` и поднимает ему поток.
+Цикла на уровне модулей нет только потому, что одна из сторон импортирует тип
+отложенно. Считать эту границу однонаправленной нельзя.
+
+**Потоки.** Воркеры устроены по идиоме Qt `QObject + moveToThread(QThread)`, а не
+наследованием от `QThread`. Каждый воркер — `QObject` с `Slot`-ом, который зовут
+из своего потока, и набором `Signal`-ов наружу.
+
+Отмена устроена в трёх вариантах, и смотреть надо не только на то, что воркер
+умеет, но и на то, что ему реально присылают.
+
+`AsrWorker` умеет оба канала — внешний `QThread.requestInterruption()` и
+собственный слот `cancel()` — и оба ему приходят: `PipelineController.cancel()`
+дёргает `requestInterruption()` на ASR-потоке и вызывает `worker.cancel()`.
+
+Гранулярность при этом **внутри дорожки, а не между ними**, и это стоит знать
+прежде, чем рассчитывать на «дорожка либо расшифрована, либо нет». Обе
+проверки свёрнуты в замыкание `_should_cancel`, которое уходит аргументом в
+`core.asr.transcribe_one_track` и опрашивается в тесном цикле самого источника
+— у GigaAM на каждом окне VAD, у faster-whisper между декодированными
+сегментами. Поэтому отмена останавливает расшифровку посреди файла, а источник
+возвращает то, что успел. Наружу это не течёт: `AsrWorker` в таком случае
+просто не испускает `done`, и частичный результат никуда не идёт.
+
+`MergerWorker` умеет оба, но подключён один. `PipelineController.cancel()`
+трогает только `self._thread` — это поток ASR; `self._merge_thread`
+`requestInterruption()` не получает никогда, до мерж-воркера доходит лишь
+прямой вызов `cancel()`. Рассчитывать на прерывание потока во время мержа
+нельзя, пока эта проводка не появится.
+
+У `PeaksWorker` канал один — слот `cancel()` со своим флагом; им пользуется
+`ui/app_qml.py`, когда выбранная папка сменилась и старый расчёт уже не нужен.
+У `InstallWorker` отмены нет ни в каком виде — а он единственный, кто качает и
+распаковывает файлы; прервать установку бэкенда сейчас нечем.
+
+**Сигналы.** Имена — не описание, а то, что реально объявлено в коде:
+
+| Воркер | Сигналы |
+|---|---|
+| `ui/engines/asr_worker.py::AsrWorker` | `progress(int, float)`, `done(int, list)`, `error(int, str)`, `finished()` |
+| `ui/engines/merger_worker.py::MergerWorker` | `progress(float)`, `gapFilled(float, str)`, `done(str)`, `error(str)`, `finished()` |
+| `ui/engines/peaks_worker.py::PeaksWorker` | `peaksReady(int, int, list)`, `durationReady(float)`, `segmentDurationReady(int, int, float)`, `allDone()` |
+| `ui/engines/install_worker.py::InstallWorker` | `progress(int, str)`, `done(str)`, `error(str)` |
+
+Как гасится поток — у каждого воркера по-своему, и это стоит смотреть, а не
+предполагать. `AsrWorker` и `MergerWorker` испускают `finished()` на **каждой**
+ветке выхода, включая ошибку и отмену; поток-владелец подписан на него своим
+`quit`. У `PeaksWorker` ту же роль играет `allDone`. У `InstallWorker` сигнала
+`finished` нет вовсе — `ModelRegistry` вешает `quit` сразу на `done` и `error`.
+
+**Точки входа — и они ведут в разные места.** `python -m ui` попадает в
+`ui/__main__.py`, оттуда в `ui.main()` (`ui/__init__.py`), который смотрит на
+`sys.argv`: без аргументов — GUI (`ui/app_qml.py`, `QQmlApplicationEngine` +
+`ui/qml/Main.qml`), с аргументами — CLI (`ui/cli.py`).
+
+Дальше пути расходятся, и это стоит знать прежде, чем считать фичу доехавшей:
+
+- **CLI** зовёт `core.pipeline.run` целиком — но не со всеми стадиями из §6.
+  `ui/cli.py` не кладёт `ChunkingOptions` в `PipelineParams`, поэтому стадия
+  `"chunk"` внутри `run` не выполняется никогда; при `--chunk` чанкинг идёт
+  отдельным пост-шагом (`_run_chunk_post_step`) уже после возврата из `run`.
+  Подробнее — в §6.
+- **GUI не зовёт `core.pipeline.run` вообще.** `PipelineController` держит
+  собственную очередь дорожек и гоняет по одной `AsrWorker` на `QThread`
+  (через `core.asr.transcribe_one_track`), а когда очередь опустеет —
+  запускает `MergerWorker` на втором потоке. Стадия рендера схлопнута внутрь
+  merge-воркера, чанкинг контроллер делает синхронно у себя.
+
+Отсюда практическое следствие: фича, добавленная в `core.pipeline.run`, видна
+в CLI и **не видна в GUI**, пока её не провели через `PipelineController` или
+`MergerWorker`. Дважды за неделю «сделано» оказывалось мёртвым кодом ровно
+по этой причине.
+
+### 4.2 Launcher и runtime — два разных исполняемых файла
+
+Собираются двумя разными спеками, и это не одно приложение в двух видах:
+
+| | Спека | Точка входа | Что это |
+|---|---|---|---|
+| Launcher | `launcher/build.spec` | `launcher/bootstrap.py` | Bootstrap-инсталлер. Исключает `PySide6` целиком — UI живёт в другом exe |
+| Runtime | `build.spec` в корне | `ui/app_qml.py` | Само приложение: шесть слоёв и QML-шелл |
+
+Runtime собирается **папочным** дистрибутивом, а не одним файлом: это условие
+LGPL — пользователь должен иметь возможность подменить Qt-библиотеки.
+
+Тяжёлый ML-стек не входит **ни в один** из них и не значится в зависимостях
+`pyproject.toml`. `core/backend_installers.py` доставляет во время работы
+ровно два бандла: GigaAM-v3 RNNT поверх sherpa-onnx и faster-whisper
+large-v3-ru. Поэтому bootstrap остаётся маленьким, а пользователь скачивает
+веса только того бэкенда, который выбрал.
+
+`torch` не ставит ни один из них, и `core/backend_installers.py` тоже: он
+знает только про бандлы GigaAM/sherpa и faster-whisper. Источник
+`sources/speech/whisperx.py`, которому torch нужен, остаётся в дереве, и
+поставить его есть чем — `scripts/install_whisperx_windows.ps1` тянет колёса
+torch (CPU или CUDA) и сам WhisperX в venv проекта. Это путь разработчика, а
+не часть продукта: ни один exe его не запускает и в бандлы он не входит. По
+решению из `TASKS.md` (C2) WhisperX вообще подлежит удалению из master.
+
+Здесь же — всё, что осталось в проекте от tkinter: окно установщика
+(`launcher/installer_ui.py`), окно удаления (`launcher/uninstaller_ui.py`) и
+аварийный диалог ошибки в `launcher/bootstrap.py`. В слое `ui/` его нет, и
+корневая спека исключает его из бандла явно — но выкидывать tkinter из проекта
+целиком нельзя, пока эти три места живы.
 
 ---
 
@@ -181,6 +320,12 @@ class Timeline:
     emotions: list[EmotionTag]
     chat: list[ChatMessage]
     game_log: list[GameLogEntry]
+
+    #: Момент старта записи — единственное, что связывает относительные
+    #: ``at`` аннотаций с настоящим временем. Aware-datetime в зоне самой
+    #: сессии, не в UTC: иначе каждый рендерер обязан был бы выяснять зону
+    #: сам, а взять её неоткуда, кроме как разобрав чат.
+    recording_start: datetime | None = None
 ```
 
 ### 5.3 Merger output — discriminated union (`domain/events.py`)
@@ -196,6 +341,7 @@ class SpeechEvent:
     text: str
     emotion: str | None = None           # проецируется из EmotionTag merger-ом
     parallel_group: int | None = None    # одинаковый id у overlapping SpeechEvent
+    wall_clock: datetime | None = None   # см. ниже
 
 @dataclass
 class ChatEvent:
@@ -203,16 +349,25 @@ class ChatEvent:
     channel: Literal["ic", "ooc"]
     author: str
     text: str
+    wall_clock: datetime | None = None
 
 @dataclass
 class GameEvent:
     at: float
     actor: str
-    action: Literal["roll", "damage", "spell"]
+    action: str                          # открытое множество, не Literal:
+                                         # roll, damage, spell, encounter_start,
+                                         # encounter_end, round_start, turn_start
     detail: str
+    wall_clock: datetime | None = None
 
 ScriptEvent = SpeechEvent | ChatEvent | GameEvent
 ```
+
+`wall_clock` — то, как абсолютное время доезжает до рендерера. `Renderer.render`
+получает только `list[ScriptEvent]` и `Timeline.recording_start` не видит, поэтому
+мерджер раскладывает его по событиям заранее. Без этого поля рендерер, желающий
+напечатать «19:11», взять этот час неоткуда.
 
 Это **discriminated union** в смысле PEP 604 — mypy проверяет exhaustiveness в `match` statement. Для Kotlin разработчика это sealed hierarchy: добавление нового варианта требует обновить все `match` блоки, компилятор (mypy) подсвечивает пропущенные места.
 
@@ -231,6 +386,12 @@ class Source(ABC):
 Generic disk cache decorator, применимый и к `Source`, и к `Merger`. Живёт в
 `core/`, потому что используется обоими слоями и не принадлежит ни одному из
 них (см. ADR-7).
+
+> **Статус на сегодня: заготовка, а не работающий кэш.** В `core/cache.py`
+> объявлен только `DiskCachedSource`, его `_load`/`_save` поднимают
+> `NotImplementedError`, а `core/pipeline.py` этот модуль не импортирует
+> вовсе. `DiskCachedMerger` не написан. Ниже — целевой контракт, по которому
+> интерфейс зарезервирован; читать его как описание работающего кода нельзя.
 
 ```python
 class DiskCachedSource(Source):
@@ -288,46 +449,37 @@ Optional поля (`confidence`, `no_speech_prob`, слова) добавляю�
 ## 6. Pipeline flow
 
 ```
-User runs CLI/GUI
+ui/cli.py собирает params → core.pipeline.run(session_dir, params)
        │
        ▼
-ui/ собирает params → core.pipeline.run(params)
-       │
-       ▼
-┌──────────────────── core.pipeline ───────────────────────┐
+┌──────────────────── core.pipeline.run ───────────────────┐
 │                                                           │
-│  1. core.discovery → list[Path] аудио файлов             │
-│  2. core.gpu_check → CUDA pre-flight                     │
+│  "start"   check_gpu_or_warn(params.device)              │
 │                                                           │
-│  3. Для каждой session_dir:                              │
+│  "speech"  SPEECH_SOURCES[params.speech_backend]         │
+│               .extract(session_dir) → list[SpeechSegment]│
 │                                                           │
-│     sources/speech/faster_whisper.py                     │
-│         wrapped by DiskCachedSource                      │
-│         .extract(session_dir) → list[SpeechSegment]      │
+│  "chat"    find_fvtt_chat_log → FvttChatSource           │
+│               .extract(session_dir) → list[ChatMessage]  │
+│            (или "no chat log" — стадия всё равно есть)   │
 │                                                           │
-│     sources/game_log/fvtt_chat.py                        │
-│         .extract(session_dir) → list[ChatMessage]        │
+│  "combat"  каждый найденный боевой дамп →                │
+│            CombatDumpSource.extract(session_dir)         │
+│               → list[GameLogEntry]                       │
 │                                                           │
-│     (future) sources/emotion/*.py                        │
-│         .extract(session_dir) → list[EmotionTag]         │
+│            Timeline(speech=…, chat=…, game_log=…,        │
+│                     emotions=…, recording_start=…)       │
+│            — собирается здесь, своей стадии не имеет     │
 │                                                           │
-│  4. Timeline assembly (in-memory, inside core):          │
-│     timeline = Timeline(                                  │
-│         speech=speech_segments,                          │
-│         emotions=emotion_tags,                           │
-│         chat=chat_messages,                              │
-│         game_log=game_entries,                           │
-│     )                                                     │
+│  "merge"   MERGERS[params.merger]().merge(timeline)      │
+│               → list[ScriptEvent]                        │
 │                                                           │
-│  5. merger = ScriptMerger()                              │
-│     (для дорогих LLM мерджеров: wrapped by               │
-│      DiskCachedMerger — см. ADR-7)                       │
-│     events = merger.merge(timeline)                      │
+│  "render"  get_renderer(params.renderer).render(events)  │
+│            → bytes → запись на диск                      │
 │                                                           │
-│  6. renderer = PlainTextRenderer()                       │
-│     output_bytes = renderer.render(events)               │
+│  "chunk"   только если params.chunking включён           │
 │                                                           │
-│  7. Запись output_bytes на диск                          │
+│  "done"    путь итогового файла                          │
 │                                                           │
 └──────────────────────────────────────────────────────────┘
        │
@@ -335,9 +487,38 @@ ui/ собирает params → core.pipeline.run(params)
 ui/ отображает результат пользователю
 ```
 
-**Где живёт Timeline:** только внутри одной итерации `pipeline.run`. Не сериализуется, не покидает process memory. Assembled в шаге 4, потребляется в шаге 5, после этого GC.
+**Стадии — это контракт.** `core/pipeline.py::PipelineStage` перечисляет их
+исчерпывающе. Это API `core` для прогресса (`on_stage: StageCallback`) —
+и сейчас его **никто не использует**: `ui/cli.py` зовёт `run` и `run_batch`
+без колбэка, так что все стадии уходят в `_noop_stage`, а у GUI свои каналы
+(`core.asr.transcribe_one_track(on_progress=…)` для дорожек и `InstallProgress`
+из `sources/base.py` для установки бэкендов). То есть контракт есть,
+потребителя у него нет:
 
-**Где применяется DiskCached декоратор:** оборачивает дорогие sources (speech — 10-30 мин wall clock) и дорогие мерджеры (LLM merger — 30-60 сек локально, $ + latency у API). Дешёвые компоненты (chat/game log sources, детерминированный `ScriptMerger`) не оборачиваются. Кэш живёт в `session_dir/_cache/sources/` и `session_dir/_cache/mergers/` соответственно. Рендереры не кэшируются — их вывод и так записывается пользователю в итоговый файл.
+```python
+PipelineStage = Literal[
+    "start", "speech", "chat", "combat", "merge", "render", "chunk", "done"
+]
+```
+
+Восемь имён. `"chat"` и `"combat"` испускаются даже когда соответствующего
+файла нет — с сообщением `"no chat log"` / `"no combat dump"`, чтобы UI мог
+показать пропуск, а не тишину. `"chunk"` — единственная условная: только при
+включённом чанкинге. Прогресс намеренно постадийный, без процента внутри
+стадии.
+
+Стадию `"chunk"` при этом не проходит **никто**: `ui/cli.py` не кладёт
+`ChunkingOptions` в `PipelineParams`, а чанкает пост-шагом после `run`, GUI
+делает то же самое у себя в `PipelineController`. То есть ветка внутри
+`core.pipeline.run` есть, а вызывающих у неё нет — правка чанкинга там не
+доедет ни до CLI, ни до GUI.
+
+**Этот путь — не тот, которым идёт GUI.** См. §4.1: QML-шелл не вызывает
+`core.pipeline.run` и воспроизводит часть этих шагов сам.
+
+**Где живёт Timeline:** внутри одной итерации того, кто его собрал. Не сериализуется, не покидает process memory. На пути CLI это `pipeline.run` — сборка между стадиями `"combat"` и `"merge"`, потребление мерджером, дальше GC. На пути GUI свой экземпляр строит `MergerWorker.run()` (§4.1), поэтому работа, связанная с Timeline, должна доезжать до обоих мест.
+
+**Где применялся бы DiskCached декоратор** (напоминание из §5.4a: это заготовка, `core/pipeline.py` её не импортирует)**:** оборачивает дорогие sources (speech — 10-30 мин wall clock) и дорогие мерджеры (LLM merger — 30-60 сек локально, $ + latency у API). Дешёвые компоненты (chat/game log sources, детерминированный `ScriptMerger`) не оборачиваются. Кэш живёт в `session_dir/_cache/sources/` и `session_dir/_cache/mergers/` соответственно. Рендереры не кэшируются — их вывод и так записывается пользователю в итоговый файл.
 
 **Где happens merge:** в `ScriptMerger.merge()`, чистая функция от `Timeline` к `list[ScriptEvent]`. Merger проецирует EmotionTag на пересекающийся SpeechEvent (заполняя поле `emotion`), разрешает overlapping речь через `parallel_group`, интерливит ChatMessage и GameLogEntry между SpeechEvent-ами по времени `at`.
 
@@ -354,28 +535,32 @@ ui/ отображает результат пользователю
 - Без нового Merger нельзя добавить chat / emotion / game log как равноправные элементы — это блокирует Приоритеты 4-6.
 - Тесты (Приоритет 3) пишутся уже по целевой структуре, не по промежуточной.
 
-Что делает Приоритет 2 конкретно:
-1. Создаёт папки `ui/`, `core/`, `sources/`, `mergers/`, `renderers/`, `domain/` с `__init__.py`.
-2. Переносит `speaker_map.py` в `domain/`, создаёт `domain/annotations.py` и `domain/events.py`.
-3. Оборачивает текущий subprocess вызов whisperx в `sources/speech/whisperx.py` как `Source`.
-4. Добавляет `sources/speech/faster_whisper.py` (новый backend через Python API).
-5. Оборачивает `parse_fvtt_chat.py` в `sources/game_log/fvtt_chat.py` как `Source`.
-6. Переписывает `merge_whisperx.py` в `mergers/script_merger.py` реализующий новый `Merger` ABC и выдающий `list[ScriptEvent]`.
-7. Создаёт `renderers/plain_text.py` который генерирует байтовый вывод эквивалентный текущему `merged.txt`.
-8. Создаёт `core/pipeline.py`, `core/discovery.py`, `core/gpu_check.py`, `core/timeline.py`.
-9. Переписывает CLI и GUI части `wisper_launcher.py` как `ui/cli.py` и `ui/gui.py`, они вызывают `core.pipeline.run(...)`.
-10. Старый `scripts/wisper_launcher.py` удаляется. Старый `scripts/merge_whisperx.py` удаляется. `scripts/parse_fvtt_chat.py` удаляется.
+**Статус: выполнено.** Раздел оставлен как запись о том, откуда взялась текущая
+структура — при чтении старых коммитов это единственное место, где написано,
+что чем заменено. Всё, что ниже, уже в master.
 
-Эквивалентность вывода с legacy проверяется end-to-end тестом: фиксированный аудио + chat log даёт байт-в-байт тот же `merged.txt` до и после.
+Что сделал Приоритет 2:
+1. Завёл шесть слоёв: `ui/`, `core/`, `sources/`, `mergers/`, `renderers/`, `domain/`.
+2. Перенёс работу со speaker map в `domain/speaker_map.py`, завёл `domain/annotations.py` и `domain/events.py`.
+3. Обернул вызов whisperx в `sources/speech/whisperx.py` как `Source`.
+4. Добавил `sources/speech/faster_whisper.py` — backend через Python API.
+5. Обернул разбор фаундривского чат-лога в `sources/game_log/fvtt_chat.py` как `Source`.
+6. Заменил старый merge-скрипт на `mergers/script_merger.py` — реализует `Merger` ABC и выдаёт `list[ScriptEvent]`.
+7. Завёл `renderers/plain_text.py`, сохраняющий прежний формат plain-text. Именно формат: эквивалентность байт-в-байт не проверялась — см. абзац под этим списком.
+8. Завёл `core/pipeline.py`, `core/discovery.py`, `core/gpu_check.py`; `Timeline` при этом уехал в `domain/` (ADR-12).
+9. Разделил CLI и GUI: `ui/cli.py` и отдельный tkinter-шелл. QML пришёл позже, в Приоритете 5 — не смешивать эти две миграции. `core.pipeline.run` зовёт только CLI; как устроен путь GUI сегодня — §4.1.
+10. Три legacy-скрипта из `scripts/` — запускалка, мерджер и парсер чата — удалены. Их имена намеренно не перечислены: документ описывает то, что есть, а не то, чего нет; в истории git они на месте.
+
+План предполагал сверку с legacy байт-в-байт, но она **не была проведена**: снимок вывода до перестройки в репозиторий не попал. Вместо неё в `tests/fixtures/e2e_p2/` лежит baseline, снятый с уже нового пайплайна, а тест сверяет с ним пересечение по токенам с порогом 90%. То есть это защита от регрессий нового пайплайна, а не доказательство эквивалентности старому.
 
 ### Приоритеты 3-6: только расширение существующих слоёв
 
-| Приоритет | Слой | Действие |
-|---|---|---|
-| 3 | `tests/` | Pytest skeleton, fixtures, CI, ruff. Не меняет слои, добавляет инфраструктуру. |
-| 4 | `sources/speech/` | Добавить `sherpa_onnx.py` (GigaAM-v3 RNNT). Новый файл в уже готовом слое. Контракт `Source` не меняется. |
-| 5 | `ui/` | Миграция tkinter → PySide6 если выбрана. Остальные слои не трогаются. Возможно `renderers/markdown.py` / `renderers/obsidian.py`. |
-| 6 | `mergers/`, `sources/emotion/` | Добавить `LocalLLMMerger` и/или emotion source. Всё additive. |
+| Приоритет | Слой | Действие | Статус |
+|---|---|---|---|
+| 3 | `tests/` | Pytest skeleton, fixtures, CI, ruff. Не меняет слои, добавляет инфраструктуру. | сделано |
+| 4 | `sources/speech/` | Добавить backend GigaAM-v3 RNNT. Новый файл в уже готовом слое, контракт `Source` не меняется. | сделано как `sources/speech/gigaam.py` (GigaAM-v3 поверх sherpa-onnx), а не отдельным файлом с именем движка |
+| 5 | `ui/` | Миграция tkinter → PySide6. | сделано, вылилось в QML — см. `docs/adr/ADR-017-ui-toolkit-pyside6.md`, поправка от 2026-04-20 |
+| 6 | `mergers/`, `sources/emotion/` (planned) | `LocalLLMMerger` и/или emotion source. Всё additive. | не начато |
 
 Если после P2 обнаружится что какой-то слой спроектирован неправильно — исправлять его придётся точечно, не полным рефакторингом. Это акцептабельный риск: контракты достаточно узкие (три ABC, четыре dataclass) чтобы проверить их на бумаге перед реализацией.
 
@@ -389,7 +574,7 @@ ADR-стиль: каждое решение + контекст + последс�
 
 **Decision:** Разделение извлечения, комбинирования и форматирования на три независимых стадии со strategy pattern на каждой. Источники возвращают raw annotations, merger комбинирует Timeline в плоский `list[ScriptEvent]`, renderer превращает в файл.
 
-**Context:** Текущий `wisper_launcher.py` смешивает все три ответственности. Добавить новый формат вывода (markdown), новый источник (эмоции) или новую стратегию merge (LLM) нельзя без трогания соседей.
+**Context:** Тогдашняя запускалка из `scripts/` (§2) смешивала все три ответственности. Добавить новый формат вывода (markdown), новый источник (эмоции) или новую стратегию merge (LLM) нельзя без трогания соседей.
 
 **Consequences:**
 - (+) Независимая эволюция слоёв: новый ASR backend не трогает рендереры; новый формат вывода не трогает sources.
@@ -447,7 +632,7 @@ ADR-стиль: каждое решение + контекст + последс�
 
 ### ADR-6: Timeline — внутренний in-memory контейнер, не публичный контракт
 
-**Decision:** `Timeline` живёт в `core/timeline.py`, собирается in-memory из source outputs, передаётся merger-у. Не имеет `schema_version`, не сериализуется публично, не доступна рендерерам. Единственные публичные контракты — `list[Annotation]` на выходе source и `list[ScriptEvent]` на выходе merger.
+**Decision:** `Timeline` живёт в `domain/timeline.py` (эта ADR писалась, когда он лежал в `core/` — переезд зафиксирован в ADR-12 ниже), собирается in-memory из source outputs, передаётся merger-у. Не имеет `schema_version`, не сериализуется публично, не доступна рендерерам. Единственные публичные контракты — `list[Annotation]` на выходе source и `list[ScriptEvent]` на выходе merger.
 
 **Context:** Ранее обсуждалось сделать Timeline публичным контрактом (для будущего interactive UI где виджеты показывают слои отдельно). Но `ScriptEvent` содержит достаточно данных (start, end, speaker, text, emotion, parallel_group) для interactive use case.
 
@@ -532,15 +717,15 @@ ADR-стиль: каждое решение + контекст + последс�
 
 ### ADR-12: `Timeline` живёт в `domain/`, а не в `core/`
 
-**Decision:** `Timeline` dataclass переносится из `core/timeline.py` в `domain/timeline.py`. Ранние версии этого документа (§5.2, §4) размещали его в `core/`.
+**Decision:** `Timeline` dataclass переносится из `core/` в `domain/timeline.py`. Ранние версии этого документа (§5.2, §4) размещали его в `core/`.
 
 **Context:** Dependency rules секции 3 запрещают `mergers → core`. Но `Merger.merge()` имеет сигнатуру `merge(timeline: Timeline) -> list[ScriptEvent]` — значит `mergers/base.py` обязан импортировать `Timeline`. Если Timeline в `core/`, то `mergers` вынужден импортировать из `core` — нарушение. Обнаружено при декомпозиции P2 перед началом реализации.
 
 **Consequences:**
 - (+) Dependency rules строго выполняются: `mergers → domain only`, `core → domain + sources + mergers + renderers`.
 - (+) Timeline остаётся pure dataclass без поведения — его естественное место в `domain/`, не в `core/`.
-- (+) `core` продолжает содержать orchestration (`pipeline.py`), discovery, GPU check, cache — всё что требует знать о sources/mergers/renderers.
-- (−) Ранняя текстовая версия документа упоминала `core/timeline.py` — обновлена в §5.2 и §4 (диаграмма). Эта ADR фиксирует изменение для истории.
+- (+) `core` продолжает содержать orchestration (`core/pipeline.py`), discovery, GPU check, cache — всё что требует знать о sources/mergers/renderers.
+- (−) Ранняя текстовая версия документа помещала Timeline в `core/` — обновлена в §5.2 и §4 (диаграмма). Эта ADR фиксирует изменение для истории.
 - (−) Философски Timeline «internal container для core.pipeline» — это orchestration-layer concept. Но dependency rules важнее философии: если тип пересекает границы, он идёт в тот слой который видят обе стороны. В данном случае `domain` — единственный такой слой (его видят все).
 
 ---
