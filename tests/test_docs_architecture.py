@@ -12,8 +12,10 @@ test.
 
 from __future__ import annotations
 
+import functools
 import pathlib
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,9 +65,9 @@ FILE_SUFFIXES = frozenset(
      ".spec", ".yml", ".yaml", ".ps1", ".bat", ".sh", ".exe", ".zip"}
 )
 
-#: Directories whose contents are not this repository: virtualenvs, caches and
-#: build output. Without pruning them a stale reference could stay green
-#: because some dependency happens to ship a file of the same name.
+#: Directories to skip when git cannot answer (see :func:`_walked_files`).
+#: Only a fallback: `.gitignore` covers far more than any hand-kept list, which
+#: is exactly why the primary source is git and not this set.
 NOT_THE_REPOSITORY = frozenset(
     {".git", "venv", ".venv", "__pycache__", "node_modules", "build", "dist",
      ".pytest_cache", ".ruff_cache", ".mypy_cache", "tools", ".eggs"}
@@ -75,35 +77,80 @@ NOT_THE_REPOSITORY = frozenset(
 #: and not `[t](#anchor)`.
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 
+#: A reference-style Markdown definition: `[ui]: docs/adr/thing.md`. The use
+#: site (`[ADR][ui]`) names no path at all, so the definition is the only place
+#: the destination can be checked — and renaming its target would otherwise
+#: leave this guard green.
+MARKDOWN_REFERENCE = re.compile(
+    r"^\s{0,3}\[[^\]]+\]:\s*<?(?!https?:|mailto:|#)([^>\s]+)>?"
+)
 
-def _repository_files():
-    """Every file in the tree that is actually part of this repository."""
-    for path in PROJECT_ROOT.rglob("*"):
-        if NOT_THE_REPOSITORY.isdisjoint(path.parts) and path.is_file():
-            yield path
+
+def _tracked_files(root: Path) -> frozenset[str] | None:
+    """Repository-relative paths git tracks, or `None` outside a work tree.
+
+    Git is the authority on what this repository *contains*. Walking the
+    filesystem instead lets anything ignored answer for a reference the
+    repository itself has lost — `.gitignore` here excludes `.claude/`,
+    `/handoff/`, `Тестовое/`, `venv/` and generated fixture transcripts, and a
+    dead `foo.py` stays "present" as long as any of them ships that name.
+    """
+    try:
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return frozenset(name for name in listed.stdout.split("\0") if name)
+
+
+def _walked_files(root: Path) -> frozenset[str]:
+    """Fallback for a tree git does not know: walk it, prune the obvious."""
+    return frozenset(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and NOT_THE_REPOSITORY.isdisjoint(path.parts)
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _files_under(root: Path) -> frozenset[str]:
+    tracked = _tracked_files(root)
+    return _walked_files(root) if tracked is None else tracked
+
+
+def _repository_files() -> frozenset[str]:
+    """Every file this repository actually carries, as relative posix paths."""
+    return _files_under(PROJECT_ROOT)
 
 
 def _exists(token: str) -> bool:
-    """Whether the document's path points at something in the tree.
+    """Whether the document's path points at something the repository carries.
 
-    A token with a directory in it is resolved from the repository root. A
-    bare filename cannot be — `Main.qml` lives under `ui/qml/` — so it counts
-    as present when a file of that name exists anywhere the repository owns.
+    A bare filename has no directory to resolve against — `Main.qml` lives
+    under `ui/qml/` — so it counts as present when a tracked file of that name
+    exists anywhere. Directories are matched by prefix, because git lists
+    files and not the folders holding them.
     """
     cleaned = token.split("#")[0].rstrip("/")
     if not cleaned:
         return True
-    candidate = PROJECT_ROOT / cleaned
-    if candidate.exists():
-        return NOT_THE_REPOSITORY.isdisjoint(candidate.parts)
+    files = _repository_files()
+    if cleaned in files:
+        return True
+    if any(name.startswith(f"{cleaned}/") for name in files):
+        return True
     if "/" in cleaned:
         return False
-    return any(path.name == cleaned for path in _repository_files())
+    return any(name.rsplit("/", 1)[-1] == cleaned for name in files)
 
 
 def _repository_entries() -> frozenset[str]:
-    """Top-level names in the working tree, read rather than listed."""
-    return frozenset(entry.name for entry in PROJECT_ROOT.iterdir() if entry.name != ".git")
+    """Top-level names the repository carries, read rather than listed."""
+    return frozenset(name.split("/")[0] for name in _repository_files())
 
 
 def _claimed_paths(text: str) -> list[tuple[int, str]]:
@@ -141,6 +188,7 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
         else:
             candidates = [match.group(1) for match in re.finditer(r"`([^`\n]+)`", line)]
             candidates += MARKDOWN_LINK.findall(line)
+            candidates += MARKDOWN_REFERENCE.findall(line)
         for token in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
@@ -245,10 +293,46 @@ def test_a_markdown_link_destination_is_a_claim():
     assert _claimed_paths("see [section](#anchor)") == []
 
 
+def test_a_reference_style_definition_is_a_claim():
+    """`[ADR][ui]` names no path; its `[ui]: docs/adr/…` definition does, and
+    it is the only place the destination can be checked at all."""
+    assert _claimed_paths("[ui]: docs/adr/gone.md") == [(1, "docs/adr/gone.md")]
+    assert _claimed_paths('[ui]: docs/adr/gone.md "Title"') == [(1, "docs/adr/gone.md")]
+    assert _claimed_paths("[site]: https://example.com/a.md") == []
+    assert _claimed_paths("[top]: #anchor") == []
+
+
+def test_git_decides_what_the_repository_contains(tmp_path, monkeypatch):
+    """The hand-kept skip list can only ever name what someone remembered.
+    `.gitignore` excludes `.claude/`, `/handoff/`, `Тестовое/` and generated
+    fixture output too, so a deleted file stays "present" as long as any
+    ignored directory happens to ship its name. Git knows the difference;
+    exercised against a real repository so the claim is proved, not asserted."""
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@example.com"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "pipeline.py").write_text("", encoding="utf-8")
+    (tmp_path / "handoff").mkdir()
+    (tmp_path / "handoff" / "impostor.py").write_text("", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "core/pipeline.py"], cwd=tmp_path, check=True, capture_output=True
+    )
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _exists("core/pipeline.py")
+    assert _exists("core/")
+    assert not _exists("handoff/impostor.py"), "on disk, but git does not track it"
+    assert not _exists("impostor.py"), "bare name found only in an untracked file"
+
+
 def test_existence_ignores_anything_outside_the_repository(tmp_path, monkeypatch):
-    """With the prescribed in-tree `venv/`, a dependency shipping a file of the
-    same name would otherwise keep a dead reference looking alive. Exercised
-    against a real tree so the pruning is proved, not asserted."""
+    """The fallback for a tree git cannot answer for. With the prescribed
+    in-tree `venv/`, a dependency shipping a file of the same name would
+    otherwise keep a dead reference looking alive."""
     (tmp_path / "core").mkdir()
     (tmp_path / "core" / "pipeline.py").write_text("", encoding="utf-8")
     (tmp_path / "venv" / "lib").mkdir(parents=True)
@@ -276,7 +360,7 @@ def test_a_root_level_file_is_checked_too():
     assert _claimed_paths("writes `merged.txt`") == []
 
 
-def test_repository_roots_are_read_from_disk_not_listed():
+def test_repository_roots_are_derived_not_listed():
     """The whole point of deriving them: a directory added tomorrow is covered
     without anyone remembering to update this file."""
     entries = _repository_entries()

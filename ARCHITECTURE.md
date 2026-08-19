@@ -151,7 +151,7 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 | Подслой | Что там | Правило |
 |---|---|---|
 | `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
-| `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают, про QML не знают ничего и разговаривают только сигналами. `PipelineController` — исключение: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
+| `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают и про QML не знают ничего. Сигналы — их канал **наружу**, а не единственный способ с ними говорить: работу они получают аргументами конструктора, а отменяются прямым вызовом `cancel()` (`PipelineController.cancel()` для `AsrWorker` и `MergerWorker`, `ui/app_qml.py` для `PeaksWorker`). `PipelineController` — исключение и в другом: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
 | `ui/qml` | сам шелл: `Main.qml`, `Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
 
 **Зависимость между `ui/models` и `ui/engines` — в обе стороны, и это стоит
@@ -196,7 +196,11 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 
 Дальше пути расходятся, и это стоит знать прежде, чем считать фичу доехавшей:
 
-- **CLI** зовёт `core.pipeline.run` целиком, со всеми стадиями из §6.
+- **CLI** зовёт `core.pipeline.run` целиком — но не со всеми стадиями из §6.
+  `ui/cli.py` не кладёт `ChunkingOptions` в `PipelineParams`, поэтому стадия
+  `"chunk"` внутри `run` не выполняется никогда; при `--chunk` чанкинг идёт
+  отдельным пост-шагом (`_run_chunk_post_step`) уже после возврата из `run`.
+  Подробнее — в §6.
 - **GUI не зовёт `core.pipeline.run` вообще.** `PipelineController` держит
   собственную очередь дорожек и гоняет по одной `AsrWorker` на `QThread`
   (через `core.asr.transcribe_one_track`), а когда очередь опустеет —
