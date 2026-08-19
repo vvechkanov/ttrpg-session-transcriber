@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -81,38 +82,65 @@ MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 #: site (`[ADR][ui]`) names no path at all, so the definition is the only place
 #: the destination can be checked — and renaming its target would otherwise
 #: leave this guard green.
+#: The whole line has to be the definition — destination plus an optional
+#: title — or prose swallows it: a CommonMark footnote (`[^1]: и/или так`) and
+#: a quoted line (`[Кто-то]: он/она сделал`) both otherwise donate their first
+#: slashed word to the check as a "path".
 MARKDOWN_REFERENCE = re.compile(
-    r"^\s{0,3}\[[^\]]+\]:\s*<?(?!https?:|mailto:|#)([^>\s]+)>?"
+    r"^\s{0,3}\[(?!\^)[^\]^]+\]:\s*<?(?!https?:|mailto:|#)([^>\s]+)>?"
+    r"(?:\s+[\"'(][^\n]*)?\s*$"
 )
 
 
 def _tracked_files(root: Path) -> frozenset[str] | None:
-    """Repository-relative paths git tracks, or `None` outside a work tree.
+    """Repository-relative paths git tracks *and* has on disk, or `None`.
 
     Git is the authority on what this repository *contains*. Walking the
     filesystem instead lets anything ignored answer for a reference the
     repository itself has lost — `.gitignore` here excludes `.claude/`,
     `/handoff/`, `Тестовое/`, `venv/` and generated fixture transcripts, and a
     dead `foo.py` stays "present" as long as any of them ships that name.
+
+    `git ls-files` reads the *index*, not the disk, so the two are intersected:
+    without that a file deleted from the tree but still staged would read as
+    present, which is a check the filesystem walk used to make. The remaining
+    asymmetry is deliberate and worth knowing: a brand-new file the document
+    already references counts as missing until it is `git add`-ed.
+
+    `None` means git had nothing to say — not installed, or a directory it
+    does not track (a checkout unpacked inside someone else's work tree, or a
+    fresh `git init` before the first `add`). An empty listing is that same
+    silence, not an empty repository, and must not be mistaken for one: the
+    caller falls back to :func:`_walked_files`.
     """
     try:
         listed = subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, UnicodeDecodeError, subprocess.CalledProcessError):
         return None
-    return frozenset(name for name in listed.stdout.split("\0") if name)
+    tracked = frozenset(
+        name for name in listed.stdout.split("\0") if name and (root / name).exists()
+    )
+    return tracked or None
 
 
 def _walked_files(root: Path) -> frozenset[str]:
-    """Fallback for a tree git does not know: walk it, prune the obvious."""
+    """Fallback for a tree git does not know: walk it, prune the obvious.
+
+    Pruning is keyed on the path *below* the root — a checkout that happens to
+    live in a directory called `build/` or `venv/` is still a checkout, and
+    matching against absolute parts would erase the whole tree.
+    """
+    below_root = (path.relative_to(root) for path in root.rglob("*") if path.is_file())
     return frozenset(
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and NOT_THE_REPOSITORY.isdisjoint(path.parts)
+        relative.as_posix()
+        for relative in below_root
+        if NOT_THE_REPOSITORY.isdisjoint(relative.parts)
     )
 
 
@@ -300,33 +328,86 @@ def test_a_reference_style_definition_is_a_claim():
     assert _claimed_paths('[ui]: docs/adr/gone.md "Title"') == [(1, "docs/adr/gone.md")]
     assert _claimed_paths("[site]: https://example.com/a.md") == []
     assert _claimed_paths("[top]: #anchor") == []
+    # A definition is the whole line. Prose shaped like one is not, or every
+    # footnote and every quoted line donates its first slashed word as a path.
+    assert _claimed_paths("[^1]: и/или так, см. примечание") == []
+    assert _claimed_paths("[Кто-то сказал]: он/она сделал") == []
 
 
-def test_git_decides_what_the_repository_contains(tmp_path, monkeypatch):
-    """The hand-kept skip list can only ever name what someone remembered.
-    `.gitignore` excludes `.claude/`, `/handoff/`, `Тестовое/` and generated
-    fixture output too, so a deleted file stays "present" as long as any
-    ignored directory happens to ship its name. Git knows the difference;
-    exercised against a real repository so the claim is proved, not asserted."""
+def _init_repository(root: Path) -> None:
     for command in (
         ["git", "init", "-q"],
         ["git", "config", "user.email", "t@example.com"],
         ["git", "config", "user.name", "t"],
     ):
-        subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(command, cwd=root, check=True, capture_output=True)
+
+
+needs_git = pytest.mark.skipif(
+    shutil.which("git") is None, reason="proves the git path; the fallback covers the rest"
+)
+
+
+@needs_git
+def test_git_decides_what_the_repository_contains(tmp_path, monkeypatch):
+    """The hand-kept skip list can only ever name what someone remembered.
+    `.gitignore` excludes `.claude/`, `/handoff/`, `Тестовое/` and generated
+    fixture output too, so a deleted file stays "present" as long as any
+    ignored directory happens to ship its name. Git knows the difference;
+    exercised against a real repository so the claim is proved, not asserted.
+
+    Every name here is one this repository does *not* contain, so the test
+    fails rather than passes if the monkeypatch ever stops taking effect."""
+    _init_repository(tmp_path)
     (tmp_path / "core").mkdir()
-    (tmp_path / "core" / "pipeline.py").write_text("", encoding="utf-8")
+    (tmp_path / "core" / "only_in_the_fixture.py").write_text("", encoding="utf-8")
     (tmp_path / "handoff").mkdir()
     (tmp_path / "handoff" / "impostor.py").write_text("", encoding="utf-8")
     subprocess.run(
-        ["git", "add", "core/pipeline.py"], cwd=tmp_path, check=True, capture_output=True
+        ["git", "add", "core/only_in_the_fixture.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
     )
     monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
 
-    assert _exists("core/pipeline.py")
+    assert _exists("core/only_in_the_fixture.py")
     assert _exists("core/")
     assert not _exists("handoff/impostor.py"), "on disk, but git does not track it"
     assert not _exists("impostor.py"), "bare name found only in an untracked file"
+
+
+@needs_git
+def test_a_tree_git_does_not_track_falls_back_instead_of_failing(tmp_path, monkeypatch):
+    """`git ls-files` exits 0 with nothing to say in two situations that are
+    not "an empty repository": a checkout unpacked inside someone else's work
+    tree, and a fresh `git init` before the first `add`. Reading that silence
+    as "this repository contains no files" fails every single path at once."""
+    _init_repository(tmp_path)
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "pipeline.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _tracked_files(tmp_path) is None, "silence, not an empty repository"
+    assert _exists("core/pipeline.py"), "the walk answers when git will not"
+
+
+@needs_git
+def test_a_file_only_in_the_index_is_not_on_disk(tmp_path, monkeypatch):
+    """`git ls-files` reads the index. Without intersecting it with the tree a
+    file deleted but still staged would read as present — a check the plain
+    filesystem walk used to make, and losing it would make this guard weaker
+    than the one it replaced."""
+    _init_repository(tmp_path)
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "gone.py").write_text("", encoding="utf-8")
+    (tmp_path / "core" / "here.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "add", "core"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "core" / "gone.py").unlink()
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _exists("core/here.py")
+    assert not _exists("core/gone.py"), "staged, but no longer in the tree"
 
 
 def test_existence_ignores_anything_outside_the_repository(tmp_path, monkeypatch):
@@ -343,6 +424,19 @@ def test_existence_ignores_anything_outside_the_repository(tmp_path, monkeypatch
     assert _exists("core/")
     assert not _exists("venv/lib/impostor.py"), "path inside a pruned directory"
     assert not _exists("impostor.py"), "bare name found only inside venv/"
+
+
+def test_the_fallback_prunes_below_the_root_not_above_it(tmp_path, monkeypatch):
+    """A checkout that happens to sit in a directory called `build/` is still a
+    checkout. Matching the skip list against absolute path parts erases the
+    whole tree instead of a subdirectory of it — and since git is the primary
+    source now, this walk is the only thing left to catch the difference."""
+    root = tmp_path / "build" / "proj"
+    (root / "core").mkdir(parents=True)
+    (root / "core" / "pipeline.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", root)
+
+    assert _exists("core/pipeline.py"), "the root's own name is not a skip rule"
 
 
 def test_a_dotted_symbol_is_not_a_filename():
@@ -366,7 +460,6 @@ def test_repository_roots_are_derived_not_listed():
     entries = _repository_entries()
 
     assert {"core", "ui", "tests", "docs", "build.spec"} <= entries
-    assert ".git" not in entries
 
 
 def test_a_misspelled_or_deleted_package_is_still_a_claim():
