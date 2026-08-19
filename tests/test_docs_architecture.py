@@ -494,12 +494,13 @@ def test_the_excusals_are_the_only_way_out():
 def test_the_extractor_reads_the_real_document():
     """And that it is pointed at a document with paths in it at all.
 
-    The floor sits just under the real count rather than at a token value: a
-    guard that passes after two thirds of the references vanish is not
-    guarding much. Raise it when the document grows; a drop means either the
-    extractor broke or the document lost its references — both worth failing
-    over.
+    The floor sits just under the real count rather than at a token value. It
+    was 80 against 138 actual claims, which is not a floor: an entire
+    path-heavy section could vanish — 42% of the references — and this would
+    still pass, while claiming to catch exactly that. Raise it when the
+    document grows; a drop means either the extractor broke or the document
+    lost its references, and both are worth failing over.
     """
     claims = _claimed_paths(ARCHITECTURE.read_text(encoding="utf-8"))
 
-    assert len(claims) >= 80, f"suspiciously few paths extracted: {len(claims)}"
+    assert len(claims) >= 130, f"suspiciously few paths extracted: {len(claims)}"
