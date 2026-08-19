@@ -241,10 +241,13 @@ LGPL — пользователь должен иметь возможность
 large-v3-ru. Поэтому bootstrap остаётся маленьким, а пользователь скачивает
 веса только того бэкенда, который выбрал.
 
-`torch` не ставит ни один из них. Источник `sources/speech/whisperx.py`,
-которому он нужен, остаётся в дереве, но его установка не автоматизирована
-нигде — и по решению из TASKS.md (C2) WhisperX вообще подлежит удалению из
-master.
+`torch` не ставит ни один из них, и `core/backend_installers.py` тоже: он
+знает только про бандлы GigaAM/sherpa и faster-whisper. Источник
+`sources/speech/whisperx.py`, которому torch нужен, остаётся в дереве, и
+поставить его есть чем — `scripts/install_whisperx_windows.ps1` тянет колёса
+torch (CPU или CUDA) и сам WhisperX в venv проекта. Это путь разработчика, а
+не часть продукта: ни один exe его не запускает и в бандлы он не входит. По
+решению из TASKS.md (C2) WhisperX вообще подлежит удалению из master.
 
 Здесь же — всё, что осталось в проекте от tkinter: окно установщика
 (`launcher/installer_ui.py`), окно удаления (`launcher/uninstaller_ui.py`) и
@@ -536,7 +539,7 @@ PipelineStage = Literal[
 4. Добавил `sources/speech/faster_whisper.py` — backend через Python API.
 5. Обернул разбор фаундривского чат-лога в `sources/game_log/fvtt_chat.py` как `Source`.
 6. Заменил старый merge-скрипт на `mergers/script_merger.py` — реализует `Merger` ABC и выдаёт `list[ScriptEvent]`.
-7. Завёл `renderers/plain_text.py`, дающий байтовый вывод, эквивалентный прежнему.
+7. Завёл `renderers/plain_text.py`, сохраняющий прежний формат plain-text. Именно формат: эквивалентность байт-в-байт не проверялась — см. абзац под этим списком.
 8. Завёл `core/pipeline.py`, `core/discovery.py`, `core/gpu_check.py`; `Timeline` при этом уехал в `domain/` (ADR-12).
 9. Разделил CLI и GUI: `ui/cli.py` и отдельный tkinter-шелл. QML пришёл позже, в Приоритете 5 — не смешивать эти две миграции. `core.pipeline.run` зовёт только CLI; как устроен путь GUI сегодня — §4.1.
 10. Три legacy-скрипта из `scripts/` — запускалка, мерджер и парсер чата — удалены. Их имена намеренно не перечислены: документ описывает то, что есть, а не то, чего нет; в истории git они на месте.
