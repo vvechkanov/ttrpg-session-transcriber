@@ -51,7 +51,10 @@ jobs:
           # backends (torch, faster-whisper) stay out — they are
           # provisioned by the bootstrap launcher at runtime, not
           # needed for the test suite.
-          pip install PySide6 pytest pytest-qt pytest-cov numpy
+          # PyYAML is for tests/test_lint_gate.py, which reads this
+          # workflow as data: checking that the ruff gate blocks needs
+          # the step's `continue-on-error`, not just its text.
+          pip install PySide6 pytest pytest-qt pytest-cov numpy pyyaml
 
       # Linux-only: libEGL / xkbcommon are needed by Qt's offscreen
       # platform plugin even though we don't show a window. Without
@@ -87,6 +90,64 @@ jobs:
         shell: bash
         run: |
           pytest tests -m "not slow and not requires_asr" -v
+
+  # ────────────────────────────────────────────────────────────────────
+  # Ruff gate. docs/process.md §7.1 has listed `ruff check --select F821`
+  # as a blocking check for months while ruff ran nowhere in CI — the
+  # only mention of it under .github/ was an unchecked box in the PR
+  # template, which is an honour system rather than a gate. The rule
+  # this runs is already green on master, so the job blocks nothing
+  # retroactively; widening the set is a separate, ordered piece of work.
+  #
+  # F821 earns its place on evidence: a fallback path called a `logger`
+  # the module never imported, the NameError was swallowed by a broad
+  # except, and merged.txt silently did not get written — a lost
+  # transcript from a linting error ruff finds in half a second.
+  # ────────────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          # Pinned, and the pin is the point: this is the only blocking
+          # step here, and `--select F821` names a rule, not the code
+          # that implements it. An unpinned linter turns every PR red the
+          # day detection changes, on a tree nobody touched. Raising the
+          # pin is then a visible commit rather than a surprise.
+          pip install "ruff==0.15.8"
+
+      - name: Ruff gate — undefined names
+        run: ruff check --select F821 .
+
+      # Not a gate: the wider set still has findings, and turning it
+      # blocking here would forbid every commit until they are fixed.
+      # `--exit-zero` rather than `continue-on-error`, so the step is
+      # honestly green instead of a red cross inside a passing job — the
+      # latter is what `gh run view --log-failed` reports as a failure.
+      # The count goes to the job summary so it is visible without
+      # opening the log.
+      # `always()` because a step has an implicit `success()` otherwise, and
+      # the run where the gate went red is exactly the run where you want the
+      # rest of the picture. Without it the report is missing precisely when
+      # it is useful.
+      - name: Ruff, full configured set (report only)
+        if: always()
+        run: |
+          {
+            echo '### Ruff — full configured set (not blocking)'
+            echo '```'
+            ruff check . --exit-zero --statistics
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ────────────────────────────────────────────────────────────────────
   # Static build.spec check — parse-only, no PyInstaller run. The real
