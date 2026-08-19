@@ -135,7 +135,12 @@ jobs:
       # latter is what `gh run view --log-failed` reports as a failure.
       # The count goes to the job summary so it is visible without
       # opening the log.
+      # `always()` because a step has an implicit `success()` otherwise, and
+      # the run where the gate went red is exactly the run where you want the
+      # rest of the picture. Without it the report is missing precisely when
+      # it is useful.
       - name: Ruff, full configured set (report only)
+        if: always()
         run: |
           {
             echo '### Ruff — full configured set (not blocking)'

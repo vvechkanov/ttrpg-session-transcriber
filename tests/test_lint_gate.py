@@ -62,19 +62,28 @@ def test_the_configured_line_length_is_the_one_contributing_promises():
     assert _ruff_config().get("line-length") == int(promised.group(1))
 
 
+#: Ways a command reports success no matter what it found. A step carrying one
+#: of these runs, prints, and fails at nothing — the workflow's own report-only
+#: step uses `--exit-zero` for exactly that reason, which is what makes the
+#: distinction easy to lose sight of.
+NEUTRALIZED = ("--exit-zero", "|| true", "|| :", "; true", "set +e")
+
+
 def _blocking_steps(workflow: str) -> list[str]:
     """Every command a job of this workflow runs and *fails on*.
 
     Read from the parsed workflow rather than from its text, because being a
-    gate is a property of the step and not of the words in it. Two rewrites of
-    this check learned that the hard way: matching any line containing
-    `ruff check` was satisfied by the explanatory comment above the job, and
-    matching any non-comment line was satisfied by a `name:`. Neither noticed a
-    `continue-on-error: true` added to the step, which is precisely how a gate
-    stops being one while still reading like one.
+    gate is a property of the step and not of the words in it. Three rewrites
+    of this check learned that in stages. Matching any line containing
+    `ruff check` was satisfied by the explanatory comment above the job.
+    Matching any non-comment line was satisfied by a `name:`. Reading the
+    parsed steps caught a `continue-on-error: true` and an `if: false` — but
+    still counted a command that had been handed `--exit-zero`, which fails
+    at nothing while looking exactly like a gate.
 
-    A step is skipped here when it is conditional, marked `continue-on-error`,
-    or told not to fail — none of those block anything.
+    So a command counts only when nothing between it and a red build has been
+    switched off: no `continue-on-error`, no `if` on the step or its job, and
+    no shell-level neutralizer inside the command itself.
     """
     workflow = yaml.safe_load(workflow)
     commands = []
@@ -85,7 +94,12 @@ def _blocking_steps(workflow: str) -> list[str]:
             run = step.get("run")
             if not run or step.get("continue-on-error") or "if" in step:
                 continue
-            commands.extend(line.strip() for line in run.splitlines() if line.strip())
+            commands.extend(
+                stripped
+                for line in run.splitlines()
+                if (stripped := line.strip())
+                and not any(marker in stripped for marker in NEUTRALIZED)
+            )
     return commands
 
 
@@ -111,10 +125,16 @@ def test_a_step_that_cannot_fail_is_not_a_gate():
     gate was disabled."""
     gate = "jobs:\n  lint:\n    steps:\n      - name: g\n        run: ruff check --select F821 .\n"
 
+    disabled = "        continue-on-error: true\n        run:"
+
     assert _blocking_steps(gate) == ["ruff check --select F821 ."]
-    assert _blocking_steps(gate.replace("        run:", "        continue-on-error: true\n        run:")) == []
+    assert _blocking_steps(gate.replace("        run:", disabled)) == []
     assert _blocking_steps(gate.replace("  lint:\n", "  lint:\n    if: false\n")) == []
     assert _blocking_steps("jobs:\n  lint:\n    steps:\n      - name: ruff check --select F821 .\n") == []
+    # The command can neutralise itself without the workflow saying a word —
+    # and the report-only step in this very file does exactly that.
+    assert _blocking_steps(gate.replace("F821 .", "F821 . --exit-zero")) == []
+    assert _blocking_steps(gate.replace("F821 .", "F821 . || true")) == []
 
 
 def _commands(markdown: str) -> list[str]:
