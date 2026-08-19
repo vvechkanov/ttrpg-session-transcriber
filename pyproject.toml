@@ -33,6 +33,10 @@ dev = [
     "pytest-qt>=4.4,<5",
     "pytest-cov",
     "ruff",
+    # tests/test_lint_gate.py reads .github/workflows/ci.yml as data —
+    # whether the ruff gate blocks is a property of the step, not of the
+    # text of the command it runs.
+    "pyyaml",
 ]
 
 [tool.setuptools.packages.find]
@@ -56,21 +60,24 @@ ui = ["qml/**/*.qml", "qml/**/*.js", "qml/**/*"]
 # Ruff. Until now there was no config at all, so every contributor got
 # whatever defaults their installed ruff shipped — a target that moves
 # with the version — while CONTRIBUTING.md claimed the settings lived
-# here. Writing them down is the point; the numbers below are today's
-# behaviour made explicit, not a tightening.
+# here.
 # ────────────────────────────────────────────────────────────────────
 [tool.ruff]
 # CONTRIBUTING.md has promised 100 for months while ruff used its
-# default 88, so `ruff format .` reflowed code the document called
-# correctly formatted. tests/test_lint_gate.py keeps the two numbers
-# tied together from now on.
+# default 88. Writing 100 down settles the contradiction in the
+# document's favour, and that IS a change, not a formality: `ruff
+# format` produces different output for 73 of 93 files at 100 than at
+# 88 (measured). Nothing reformats on its own — no formatter runs in CI
+# — but the next `ruff format .` a contributor runs will touch more
+# than their own change. Landing that reflow as one reviewable commit
+# is the first step of the rule-set card, deliberately not this one.
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
 # Ruff's own default set, spelled out. Identical output today — 85
-# findings either way, verified by running both — so nothing turns red
-# on landing. Widening it is a separate, ordered piece of work with its
-# own card: the eight bare `except` clauses (BLE001) are read one by
-# one, and `ruff format` lands as its own commit before any autofix.
+# findings either way, verified by running both, isolated and not — so
+# no lint finding appears or disappears on landing. Widening it is a
+# separate, ordered piece of work with its own card: the eight bare
+# `except` clauses (BLE001) are read one by one.
 select = ["E4", "E7", "E9", "F"]

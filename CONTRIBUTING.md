@@ -43,14 +43,26 @@ ruff check .
 ruff format .
 ```
 
-Settings live in `pyproject.toml` under `[tool.ruff]`, so a local run and CI
-apply the same rules.
+Settings live in `pyproject.toml` under `[tool.ruff]` — line length and rule
+selection, shared by your checkout and CI.
 
-CI runs `ruff check --select F821 .` as a blocking check and reports the wider
-set without blocking. There is no `pre-commit` setup in this repository — an
-earlier version of this file said `pre-commit install` would run these checks
-for you, and it never could: no `.pre-commit-config.yaml` was ever committed.
-Run the two commands above before pushing.
+The two are not the same check, though, and the difference is deliberate:
+
+- **CI blocks on `ruff check --select F821 .`** — undefined names only. That
+  one is clean today, so it never fails on code you did not touch.
+- **`ruff check .`** applies the configured set and still reports findings
+  inherited from before the linter was wired up. Fixing them is scheduled
+  work; do not treat a non-zero count as something your change broke. CI runs
+  this too, without blocking, and prints the count in the job summary.
+
+There is no `pre-commit` setup here. An earlier version of this file said
+`pre-commit install` would run these checks for you; it never could, because no
+`.pre-commit-config.yaml` was ever committed. Run the two commands above
+yourself before pushing.
+
+`ruff format .` reformats to the 100-character line length above. The tree has
+not been reformatted yet, so running it touches files beyond your own change —
+keep those out of your commit until the one-off reflow lands.
 
 ## How to contribute
 
