@@ -38,6 +38,7 @@ NOT_REPOSITORY_PATHS = {
     "_cache": "same, written next to the session",
     "if": "`if/else` is prose, not a path",
     "bzikst": "a HuggingFace model id, not a file",
+    "__init__.py": "named as the Python convention — 15 of them, no one in particular",
 }
 
 #: Slash-less tokens that name a file the pipeline *writes*, not one this
@@ -158,10 +159,20 @@ def _repository_files() -> frozenset[str]:
 def _exists(token: str) -> bool:
     """Whether the document's path points at something the repository carries.
 
-    A bare filename has no directory to resolve against — `Main.qml` lives
-    under `ui/qml/` — so it counts as present when a tracked file of that name
-    exists anywhere. Directories are matched by prefix, because git lists
-    files and not the folders holding them.
+    Every reference resolves from the repository root, bare filenames
+    included: `build.spec` means the one at the root, not the different file
+    at `launcher/build.spec`. Searching for a matching basename anywhere would
+    let the second answer for the first — the document says in §4.2 that these
+    are two executables built from two specs, so validating a claim about one
+    against the other is worse than not checking it.
+
+    The cost is on the document, and it is the right place for it: a file
+    below the root has to be named with its directory. That is a sentence a
+    reader can act on, where `Main.qml` alone is a name they have to go
+    looking for.
+
+    Directories are matched by prefix, because git lists files and not the
+    folders holding them.
     """
     cleaned = token.split("#")[0].rstrip("/")
     if not cleaned:
@@ -169,11 +180,7 @@ def _exists(token: str) -> bool:
     files = _repository_files()
     if cleaned in files:
         return True
-    if any(name.startswith(f"{cleaned}/") for name in files):
-        return True
-    if "/" in cleaned:
-        return False
-    return any(name.rsplit("/", 1)[-1] == cleaned for name in files)
+    return any(name.startswith(f"{cleaned}/") for name in files)
 
 
 def _repository_entries() -> frozenset[str]:
@@ -300,13 +307,19 @@ def test_paths_inside_fenced_blocks_are_checked():
     ]
 
 
-def test_a_bare_filename_is_checked_wherever_it_lives():
-    """`README.md` and `Main.qml` are named without a directory. Keying on a
-    list of "config-ish" extensions would stop checking a Markdown document
-    the day it were renamed — the same rot, one spot over."""
+def test_a_bare_filename_means_a_file_at_the_root():
+    """A name with no directory is a claim about the root, and only the root.
+
+    This tree holds two `build.spec` files — one at the root for the runtime,
+    one under `launcher/` for the installer — and §4.2 turns on their being
+    different. Accepting any matching basename would let the launcher's spec
+    vouch for a root spec that had been deleted: the guard would stay green
+    across exactly the change it exists to catch."""
     assert _claimed_paths("see `README.md`") == [(1, "README.md")]
-    assert _claimed_paths("the shell is `Main.qml`") == [(1, "Main.qml")]
-    assert _exists("Main.qml"), "lives under ui/qml/, still counts as present"
+    assert _exists("README.md")
+    assert _exists("build.spec"), "the runtime spec, at the root"
+    assert not _exists("Main.qml"), "lives under ui/qml/ and has to be named so"
+    assert _exists("ui/qml/Main.qml")
     assert not _exists("no_such_document.md")
 
 

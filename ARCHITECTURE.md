@@ -152,7 +152,7 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 |---|---|---|
 | `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
 | `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают и про QML не знают ничего. Сигналы — их канал **наружу**, а не единственный способ с ними говорить: работу они получают аргументами конструктора, а тех, у кого есть `cancel()`, останавливают прямым вызовом извне (три разных варианта отмены разобраны ниже). `PipelineController` — исключение и в другом: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
-| `ui/qml` | сам шелл: `Main.qml`, `Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
+| `ui/qml` | сам шелл: `ui/qml/Main.qml`, `ui/qml/Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
 
 **Зависимость между `ui/models` и `ui/engines` — в обе стороны, и это стоит
 знать до того, как двигать импорты.** `PipelineController` из `engines` держит
@@ -165,10 +165,21 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 наследованием от `QThread`. Каждый воркер — `QObject` с `Slot`-ом, который зовут
 из своего потока, и набором `Signal`-ов наружу.
 
-Отмена устроена в трёх вариантах, и это тоже стоит смотреть, а не
-предполагать. У `AsrWorker` и `MergerWorker` два канала: внешний
-`QThread.requestInterruption()` и собственный слот `cancel()`; воркер проверяет
-оба между единицами работы, поэтому прерывание не рвёт файл на середине записи.
+Отмена устроена в трёх вариантах, и смотреть надо не только на то, что воркер
+умеет, но и на то, что ему реально присылают.
+
+`AsrWorker` умеет оба канала — внешний `QThread.requestInterruption()` и
+собственный слот `cancel()` — и оба ему приходят: `PipelineController.cancel()`
+дёргает `requestInterruption()` на ASR-потоке и вызывает `worker.cancel()`.
+Воркер проверяет оба между единицами работы, поэтому прерывание не рвёт файл
+на середине записи.
+
+`MergerWorker` умеет оба, но подключён один. `PipelineController.cancel()`
+трогает только `self._thread` — это поток ASR; `self._merge_thread`
+`requestInterruption()` не получает никогда, до мерж-воркера доходит лишь
+прямой вызов `cancel()`. Рассчитывать на прерывание потока во время мержа
+нельзя, пока эта проводка не появится.
+
 У `PeaksWorker` канал один — слот `cancel()` со своим флагом; им пользуется
 `ui/app_qml.py`, когда выбранная папка сменилась и старый расчёт уже не нужен.
 У `InstallWorker` отмены нет ни в каком виде — а он единственный, кто качает и
@@ -703,7 +714,7 @@ ADR-стиль: каждое решение + контекст + последс�
 **Consequences:**
 - (+) Dependency rules строго выполняются: `mergers → domain only`, `core → domain + sources + mergers + renderers`.
 - (+) Timeline остаётся pure dataclass без поведения — его естественное место в `domain/`, не в `core/`.
-- (+) `core` продолжает содержать orchestration (`pipeline.py`), discovery, GPU check, cache — всё что требует знать о sources/mergers/renderers.
+- (+) `core` продолжает содержать orchestration (`core/pipeline.py`), discovery, GPU check, cache — всё что требует знать о sources/mergers/renderers.
 - (−) Ранняя текстовая версия документа помещала Timeline в `core/` — обновлена в §5.2 и §4 (диаграмма). Эта ADR фиксирует изменение для истории.
 - (−) Философски Timeline «internal container для core.pipeline» — это orchestration-layer concept. Но dependency rules важнее философии: если тип пересекает границы, он идёт в тот слой который видят обе стороны. В данном случае `domain` — единственный такой слой (его видят все).
 
