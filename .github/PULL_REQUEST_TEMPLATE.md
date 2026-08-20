@@ -27,7 +27,7 @@ Closes #
 
 How was this tested? What did you run?
 
-- [ ] `ruff check .` passes
+- [ ] `ruff check --select F821 .` passes (the blocking gate; `ruff check .` still has known findings)
 - [ ] `pytest tests/` passes
 - [ ] Manually tested on a real Craig recording
 - [ ] Manually tested on Windows
