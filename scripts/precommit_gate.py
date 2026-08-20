@@ -28,9 +28,15 @@ form this project's own process prescribes — reaches the gate with x.py still
 unstaged, and the content that gets committed is the working-tree one.
 ``git commit -a``, ``--only`` and ``-p`` move the index after the hook has
 run in the same way. Telling those cases apart means parsing the command
-line, which is exactly what this gate no longer does; checking both trees
-covers them without knowing which one is happening, because every file the
-commit can draw from comes from one tree or the other.
+line, which is exactly what this gate no longer does, so it looks at both
+trees instead: every file such a commit records comes from one of them, and
+both have been read.
+
+That is per file, and it is worth being exact about what it is not. A
+path-limited commit records a *mixture* — the named path from the tree, the
+rest from the index or from HEAD — and no run here materialises that
+mixture. Each half was seen; their combination was not. Closing that would
+mean reading the command line again, so the gate does not claim it.
 
 That parse is gone on purpose. Five rounds of review found about two dozen
 real defects in it, three of them introduced by its own fixes: ``git`` and
@@ -60,6 +66,7 @@ tests do not answer, plus anything that weakens the guarantee it just gave.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -137,8 +144,13 @@ REMINDERS = (
 )
 
 
-def _git(*args: str) -> list[str]:
-    """Return the non-empty lines of a git command, or [] if git is unusable."""
+def _git(*args: str) -> list[str] | None:
+    """The non-empty lines of a git command, or None if git could not answer.
+
+    None and ``[]`` must not be the same value here. "Nothing to report" is
+    what lets the gate skip a whole run; "git timed out on a large
+    repository" is not, and collapsing the two would drop that run silently.
+    """
     try:
         result = subprocess.run(
             ["git", *args],
@@ -150,18 +162,22 @@ def _git(*args: str) -> list[str]:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if result.returncode != 0:
-        return []
+        return None
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def _snapshot_index(destination: Path) -> bool:
     """Materialise the index into *destination*. False if it could not be.
 
-    ``git checkout-index -a --prefix=<dir>/`` writes every file the index
+    ``git checkout-index -a --prefix=<dir>/`` writes the files the index
     holds, creating the directories it needs, and reads nothing from the
-    working tree. The trailing separator is what makes ``--prefix`` a
+    working tree. "The files it holds" has one exception worth knowing: an
+    unmerged path in the middle of a conflict is written by nothing and git
+    still exits 0. That leaves the snapshot short of a file — but a
+    conflicted path is always in ``git diff --name-only`` too, so the
+    working-tree run happens and covers it. The trailing separator is what makes ``--prefix`` a
     directory rather than a filename prefix, and the path is given in posix
     form because git wants forward slashes on Windows too.
 
@@ -181,7 +197,18 @@ def _snapshot_index(destination: Path) -> bool:
     try:
         destination.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
-            ["git", "checkout-index", "-a", f"--prefix={prefix}"],
+            [
+                "git",
+                "checkout-index",
+                "-a",
+                # A sparse checkout marks the paths it does not materialise
+                # with skip-worktree, and ``-a`` alone honours that mark. But
+                # those entries are still in the index, so they are still in
+                # the commit: without this the snapshot is a subset of what
+                # gets recorded, and the checks pass over the missing part.
+                "--ignore-skip-worktree-bits",
+                f"--prefix={prefix}",
+            ],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -194,8 +221,8 @@ def _snapshot_index(destination: Path) -> bool:
     return result.returncode == 0
 
 
-def _outside_the_index() -> list[str]:
-    """Working-tree content the index snapshot does not carry.
+def _outside_the_index() -> list[str] | None:
+    """Working-tree content the index snapshot does not carry, or None.
 
     Unstaged edits to tracked files and untracked files alike: neither is in
     the index, so neither is in the snapshot. A file that is both staged and
@@ -204,11 +231,16 @@ def _outside_the_index() -> list[str]:
 
     Emptiness here is what decides whether the working tree needs checking at
     all: nothing outside the index means the two trees agree about every file
-    the commit could draw from, and one run covers both.
+    the commit could draw from, and one run covers both. That is why "git
+    could not tell me" has to be its own answer — read as emptiness it would
+    cancel the second run without a word, and the bigger the repository the
+    likelier git is to be the one that times out.
     """
-    modified = set(_git("diff", "--name-only"))
-    untracked = set(_git("ls-files", "--others", "--exclude-standard"))
-    return sorted(modified | untracked)
+    modified = _git("diff", "--name-only")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    if modified is None or untracked is None:
+        return None
+    return sorted(set(modified) | set(untracked))
 
 
 def _listing(paths: list[str]) -> str:
@@ -220,29 +252,16 @@ def _listing(paths: list[str]) -> str:
     return "\n".join(shown)
 
 
-def _deny(reason: str) -> None:
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        },
-        sys.stdout,
-    )
+def _denial(reason: str) -> dict:
+    return {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }
 
 
-def _allow_with_note(note: str) -> None:
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": note,
-            }
-        },
-        sys.stdout,
-    )
+def _pass(note: str) -> dict:
+    return {"hookEventName": "PreToolUse", "additionalContext": note}
 
 
 def _is_module_missing(output: str, module: str) -> bool:
@@ -322,8 +341,13 @@ def _run_checks(workdir: Path, tree: str) -> tuple[str | None, list[str]]:
     return None, skipped
 
 
-def _judge(snapshot: Path | None, outside: list[str]) -> int:
-    """Decide on the trees that are available, and say which they were."""
+def _judge(snapshot: Path | None, outside: list[str] | None) -> dict:
+    """Decide on the trees that are available, and say which they were.
+
+    Returns the decision rather than printing it. Exactly one decision may
+    reach stdout — two concatenated JSON objects are not JSON, and the hook
+    that reads them is left with nothing at all.
+    """
     trees: list[tuple[str, Path]] = []
     degraded = ""
     if snapshot is not None:
@@ -333,7 +357,9 @@ def _judge(snapshot: Path | None, outside: list[str]) -> int:
             "\n\nСнимок индекса собрать не удалось — проверено только "
             f"{WORKTREE}. Это другой код, чем тот, который запишет коммит."
         )
-    if outside or not trees:
+    # None is "git could not say", and it buys the working tree a run rather
+    # than costing it one: an unknown difference is not a known absence.
+    if outside is None or outside or not trees:
         trees.append((WORKTREE, PROJECT_ROOT))
 
     reason: str | None = None
@@ -345,33 +371,77 @@ def _judge(snapshot: Path | None, outside: list[str]) -> int:
             break
 
     if reason is not None:
-        _deny(reason + degraded)
-        return 0
+        return _denial(reason + degraded)
 
     note = REMINDERS + degraded
     note += "\n\nПроверено: " + ", ".join(tree for tree, _ in trees) + "."
     if skipped:
-        note += f"\n\nНе проверено (инструмента нет):\n{_listing(skipped)}"
-    if outside:
+        note += f"\n\nНе проверено:\n{_listing(skipped)}"
+    if outside is None:
+        note += (
+            "\n\nЧем рабочее дерево отличается от индекса, узнать не удалось "
+            "(git не ответил) — поэтому дерево проверено на всякий случай."
+        )
+    elif outside:
         note += (
             "\n\nВ рабочем дереве есть то, чего нет в индексе:\n"
             f"{_listing(outside)}\n"
-            "Обычный коммит их не запишет, но хук срабатывает до всей "
-            "командной строки: git add в той же строке, а также git commit "
-            "-a, --only и -p проиндексируют их уже после проверки. Поэтому "
+            "Часть отсюда коммит всё-таки запишет: половинчато "
+            "проиндексированный файл уйдёт своей staged-половиной, а git add "
+            "в той же командной строке, git commit -a, --only и -p "
+            "проиндексируют остальное уже после этой проверки. Поэтому "
             "дерево проверено наравне со снимком."
         )
-    _allow_with_note(note)
-    return 0
+    return _pass(note)
+
+
+def _command(payload: object) -> str:
+    """The Bash command out of a hook payload, whatever the payload is.
+
+    Anything may arrive on stdin, and every shape that is not the expected
+    one has to end in the empty string rather than in an exception. ``[]``
+    and ``null`` are valid JSON, and reaching for ``.get`` on them kills a
+    hook that then blocks nothing at all.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return ""
+    return str(tool_input.get("command") or "")
+
+
+def _decide() -> dict:
+    """Run the checks on the trees that exist and return the one decision.
+
+    The temporary directory is made and removed by hand rather than with a
+    context manager: ``TemporaryDirectory`` raises from its own cleanup when
+    a file is still locked, which Windows does routinely, and an exception
+    thrown *after* the decision was reached is the one thing that can turn
+    one decision into two.
+    """
+    outside = _outside_the_index()
+    try:
+        workspace: str | None = tempfile.mkdtemp(prefix="precommit-gate-")
+    except OSError:
+        # No temporary directory at all: a full disk, an unwritable TMPDIR.
+        workspace = None
+    try:
+        snapshot = Path(workspace) / "index" if workspace is not None else None
+        if snapshot is not None and not _snapshot_index(snapshot):
+            snapshot = None
+        return _judge(snapshot, outside)
+    finally:
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 def main() -> int:
+    command = ""
     try:
-        payload = json.load(sys.stdin)
+        command = _command(json.load(sys.stdin))
     except Exception:  # noqa: BLE001 — a hook must never die on its input
-        payload = {}
-
-    command = str((payload.get("tool_input") or {}).get("command") or "")
+        pass
 
     if "commit" not in command:
         # Not a commit at all. The hook may be registered for every Bash
@@ -379,16 +449,22 @@ def main() -> int:
         # commands someone runs to diagnose a failing test.
         return 0
 
-    outside = _outside_the_index()
     try:
-        with tempfile.TemporaryDirectory(prefix="precommit-gate-") as workspace:
-            snapshot = Path(workspace) / "index"
-            return _judge(snapshot if _snapshot_index(snapshot) else None, outside)
-    except OSError:
-        # Not even a temporary directory: a full disk, an unwritable TMPDIR.
-        # Dying here would print no decision at all and leave the commit
-        # unexamined, so the working tree has to carry the check alone.
-        return _judge(None, outside)
+        decision = _decide()
+    except Exception as failure:  # noqa: BLE001 — see below
+        # Whatever went wrong, the commit has not been checked. A hook that
+        # dies here prints nothing, and a PreToolUse hook that prints nothing
+        # blocks nothing: the commit sails through as if the gate had
+        # approved it. Refusing is the recoverable direction — it is visible,
+        # it names what broke, and it costs one command to override.
+        decision = _denial(
+            "Коммит остановлен: гейт упал и ничего не проверил.\n\n"
+            f"{type(failure).__name__}: {failure}\n\n"
+            "Это отказ, а не пропуск: упавшая проверка ничего не гарантирует."
+        )
+
+    json.dump({"hookSpecificOutput": decision}, sys.stdout)
+    return 0
 
 
 if __name__ == "__main__":

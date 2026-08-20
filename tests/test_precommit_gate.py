@@ -17,6 +17,7 @@ import io
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -204,8 +205,8 @@ def test_a_half_staged_file_is_checked_rather_than_refused(
 ):
     """A file staged and then edited further used to stop the gate dead: it
     could not tell which half the commit would carry, so it refused outright.
-    Both halves are now looked at — the staged one in the snapshot, the edited
-    one in the tree — so the split itself is no longer a reason to refuse."""
+    The split alone is no longer a reason to refuse — that each half is
+    actually read is pinned by the two tests above, on their own scenario."""
     (repo / "a.py").write_text("v2\n", encoding="utf-8")
     _git(repo, "add", "a.py")
     (repo / "a.py").write_text("v3\n", encoding="utf-8")
@@ -356,6 +357,21 @@ def test_a_staged_file_alone_is_not_reported_as_outside_the_index(
     assert "a.py" not in gate._outside_the_index()
 
 
+def test_a_skip_worktree_entry_is_still_in_the_snapshot(repo, monkeypatch, capsys):
+    """A sparse checkout marks the paths it does not materialise with
+    skip-worktree, and ``git checkout-index -a`` honours that mark on its
+    own. Those entries are still in the index, so they are still in the
+    commit: a snapshot without them is a subset of what gets recorded, and
+    the checks pass over the part that is missing."""
+    _git(repo, "update-index", "--skip-worktree", "b.py")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("b.py", "v1")]
+    )
+
+    assert not _is_deny(decision)
+
+
 # ── When the snapshot cannot be taken ───────────────────────────────────────
 
 
@@ -402,6 +418,100 @@ def test_a_snapshot_that_cannot_be_written_degrades_instead_of_killing_the_hook(
 
     assert not _is_deny(decision)
     assert "Снимок индекса собрать не удалось" in _text(decision)
+
+
+def test_a_gate_that_falls_over_refuses_instead_of_standing_aside(
+    repo, monkeypatch, capsys
+):
+    """A PreToolUse hook that prints nothing blocks nothing: the commit sails
+    through exactly as if the gate had approved it. So whatever breaks —
+    here, git itself — the answer has to be a refusal, and exactly one."""
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("git ушёл под воду")
+
+    monkeypatch.setattr(gate, "_outside_the_index", explode)
+    monkeypatch.setattr(gate, "CHECKS", [])
+    payload = json.dumps({"tool_input": {"command": "git commit -m x"}})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    assert gate.main() == 0
+
+    printed = capsys.readouterr().out
+    decision = json.loads(printed)["hookSpecificOutput"]
+    assert _is_deny(decision)
+    assert "гейт упал" in _text(decision)
+
+
+def test_a_snapshot_left_behind_is_removed_even_when_the_checks_blow_up(
+    repo, monkeypatch, capsys
+):
+    """The copy is temporary. One left behind per failed commit fills the
+    disk quietly, and failures are exactly when nobody is looking."""
+    seen: list[Path] = []
+    original = gate._snapshot_index
+
+    def remember(destination: Path) -> bool:
+        seen.append(destination)
+        return original(destination)
+
+    monkeypatch.setattr(gate, "_snapshot_index", remember)
+    monkeypatch.setattr(gate, "_judge", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": "git commit"}})))
+
+    assert gate.main() == 0
+
+    assert seen and not seen[0].exists()
+
+
+def test_git_that_cannot_answer_buys_the_tree_a_run_rather_than_costing_it_one(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """``_outside_the_index`` returning None means git timed out or refused,
+    not that the tree is clean. Read as clean it would cancel the working-tree
+    run without a word — and the bigger the repository, the likelier git is
+    to be the one that gives up."""
+    monkeypatch.setattr(gate, "_outside_the_index", lambda: None)
+    tally = tmp_path / "runs"
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_counting(tally)]
+    )
+
+    assert tally.read_text() == "xx"
+    assert gate.WORKTREE in _text(decision)
+    assert "git не ответил" in _text(decision)
+
+
+def test_a_check_that_times_out_is_a_refusal_not_a_skipped_check(
+    repo, monkeypatch, capsys
+):
+    """A check that never finished proved nothing. Filing it beside "the tool
+    is not installed" would turn the slowest possible failure into a pass."""
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="проба", timeout=180)
+
+    monkeypatch.setattr(subprocess, "run", hang)
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+    )
+
+    assert _is_deny(decision)
+    assert "не уложился" in _text(decision)
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", "5", '{"tool_input": 5}', '{"tool_input": null}'])
+def test_a_payload_of_the_wrong_shape_does_not_kill_the_hook(monkeypatch, capsys, payload):
+    """``[]`` and ``null`` are valid JSON, so the json.load guard does not
+    catch them; reaching for .get on them raises AttributeError, the hook
+    dies without printing, and a hook that prints nothing blocks nothing."""
+    monkeypatch.setattr(gate, "CHECKS", [])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    assert gate.main() == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_a_failed_snapshot_still_denies_a_failing_check(repo, monkeypatch, capsys):
