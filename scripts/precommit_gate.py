@@ -110,13 +110,22 @@ class Check(NamedTuple):
     here to check", or ``None`` when it has no such status. pytest exits 5 on
     an empty collection, which a snapshot of an empty index produces; that is
     an absent check, not a failing one, and denying the commit over it would
-    be a refusal the developer cannot act on.
+    be a refusal the developer cannot act on. It is only ever read for a tree
+    that holds nothing at all — pytest exits 5 for a suite that collected
+    nothing too, and a staged change to ``python_files`` can arrange exactly
+    that, which is a check silenced rather than a check with nothing to do.
+
+    ``on_index`` is appended when the check runs against the snapshot. The
+    snapshot holds the index and nothing else, so a tool that skips
+    gitignored paths there skips *tracked* files — the ones the commit is
+    made of.
     """
 
     label: str
     module: str
     argv: list[str]
     empty_code: int | None
+    on_index: tuple[str, ...] = ()
 
 
 CHECKS: list[Check] = [
@@ -125,6 +134,12 @@ CHECKS: list[Check] = [
         "ruff",
         [PYTHON, "-m", "ruff", "check", "--select", "F821", "--quiet", "."],
         None,
+        # ruff honours .gitignore by default, which is right for the working
+        # tree and wrong for the snapshot: a tracked file matched by an
+        # ignore rule is still in the index, still in the commit, and would
+        # otherwise never be looked at. ruff's own default excludes (venv,
+        # build, node_modules…) are unaffected by this.
+        on_index=("--no-respect-gitignore",),
     ),
     Check(
         "pytest (fast suite)",
@@ -297,10 +312,14 @@ def _run_checks(workdir: Path, tree: str) -> tuple[str | None, list[str]]:
     Returns ``(denial reason or None, checks that never ran)``.
     """
     skipped: list[str] = []
+    barren = not any(workdir.iterdir())
     for check in CHECKS:
+        argv = list(check.argv)
+        if tree == INDEX:
+            argv += check.on_index
         try:
             result = subprocess.run(
-                check.argv,
+                argv,
                 cwd=workdir,
                 capture_output=True,
                 text=True,
@@ -328,8 +347,20 @@ def _run_checks(workdir: Path, tree: str) -> tuple[str | None, list[str]]:
             skipped.append(f"{check.label}: не установлен")
             continue
         if check.empty_code is not None and result.returncode == check.empty_code:
-            skipped.append(f"{check.label}: проверять нечего ({tree})")
-            continue
+            if barren:
+                skipped.append(f"{check.label}: проверять нечего ({tree})")
+                continue
+            # The tree has files and the tool still found nothing to do. That
+            # is the check being silenced — a staged pytest.ini narrowing
+            # python_files to a pattern nothing matches reads exactly like an
+            # empty repository — and silencing the strongest check must cost
+            # a refusal, not a note.
+            return (
+                f"Коммит остановлен: {check.label} не нашёл, что проверять "
+                f"({tree}), хотя дерево не пустое.\n\n{output}\n\n"
+                "Проверка, которой нечего делать, ничего и не гарантирует.",
+                skipped,
+            )
 
         tail = "\n".join(output.splitlines()[-25:])
         return (

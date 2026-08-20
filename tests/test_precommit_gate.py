@@ -528,12 +528,48 @@ def test_a_failed_snapshot_still_denies_a_failing_check(repo, monkeypatch, capsy
     assert "Снимок индекса собрать не удалось" in _text(decision)
 
 
-def test_an_empty_snapshot_is_an_absent_check_not_a_failing_one(
+def _wants(flag: str) -> gate.Check:
+    """A check that passes only when *flag* was appended to its own argv."""
+    script = f"import sys; sys.exit(0 if {flag!r} in sys.argv else 1)"
+    return gate.Check(
+        "проба", "проба", [sys.executable, "-c", script], None, on_index=(flag,)
+    )
+
+
+def test_a_check_can_be_told_it_is_looking_at_the_index(repo, monkeypatch, capsys):
+    """ruff skips gitignored paths by default. In the working tree that is
+    right; in the snapshot it is not — everything there is tracked, so an
+    ignore rule matching a tracked file hides part of the commit itself."""
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_wants("--flag")]
+    )
+
+    assert not _is_deny(decision)
+
+
+def test_the_working_tree_run_is_not_told_that(repo, monkeypatch, capsys):
+    """The same argument would be wrong here: a gitignored file in the tree
+    is one git will not commit without being forced, so refusing over it is
+    noise rather than the deliberate needless refusal."""
+    (repo / "a.py").write_text("v2\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_wants("--flag")]
+    )
+
+    assert _is_deny(decision)
+    assert gate.WORKTREE in _text(decision)
+
+
+def test_a_tree_with_nothing_in_it_is_an_absent_check_not_a_failing_one(
     repo, monkeypatch, capsys
 ):
     """pytest exits 5 when it collected nothing, which is what a snapshot of
     an empty index gives it. Denying over that is a refusal the developer
     cannot act on."""
+    _git(repo, "rm", "-r", "-q", "--cached", ".")
+    (repo / "a.py").unlink()
+    (repo / "b.py").unlink()
     empty = gate.Check(
         "проба", "проба", [sys.executable, "-c", "raise SystemExit(5)"], 5
     )
@@ -544,20 +580,21 @@ def test_an_empty_snapshot_is_an_absent_check_not_a_failing_one(
     assert "проверять нечего" in _text(decision)
 
 
-def test_an_empty_index_still_gets_its_checks_run(repo, monkeypatch, capsys):
-    """``git checkout-index`` writes only the directories it has files to put
-    in, so an empty index leaves none at all. A check pointed at a path that
-    does not exist comes back as FileNotFoundError, which this gate forgives
-    as "the tool is not installed" — an unchecked commit arriving dressed as
-    a green one."""
-    _git(repo, "rm", "-r", "-q", "--cached", ".")
-
-    decision = _decide(
-        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+def test_finding_nothing_to_do_in_a_tree_that_has_files_is_a_refusal(
+    repo, monkeypatch, capsys
+):
+    """The same exit status means something else entirely when the tree is
+    full: a staged pytest.ini narrowing python_files to a pattern nothing
+    matches collects nothing and exits 5 too. Forgiving that turns the
+    strongest check into a line the developer scrolls past."""
+    empty = gate.Check(
+        "проба", "проба", [sys.executable, "-c", "raise SystemExit(5)"], 5
     )
 
+    decision = _decide(monkeypatch, capsys, "git commit -m x", checks=[empty])
+
     assert _is_deny(decision)
-    assert "интерпретатор не найден" not in _text(decision)
+    assert "не пустое" in _text(decision)
 
 
 def test_the_same_exit_status_from_a_check_that_has_no_empty_code_is_a_failure(
