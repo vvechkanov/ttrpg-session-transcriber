@@ -35,12 +35,19 @@ from its plugin hook. The test suite runs headless (`tests/conftest.py` sets
 these:
 
 ```bash
-sudo apt-get install -y libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 ffmpeg
+sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 ffmpeg
 ```
 
 This is the same list `.github/workflows/ci.yml` installs on its Ubuntu
 runners; keep the two in sync. `ffmpeg` is there for
 `tests/test_core_peaks.py`, which synthesises a sine-wave FLAC.
+
+`libgl1` is separate from `libegl1` and neither pulls the other in
+(`apt-cache depends libegl1` lists `libglvnd0` and `libegl-mesa0`, not
+`libgl1`), while `ldd` on the installed `PySide6/QtGui.abi3.so` reports both
+`libEGL.so.1` and `libGL.so.1`. Hosted CI images already carry `libgl1`, so
+leaving it out shows up only on a minimal machine — which is exactly the one
+a new contributor sets up.
 
 ### Run the GUI
 

@@ -38,6 +38,16 @@ rest from the index or from HEAD — and no run here materialises that
 mixture. Each half was seen; their combination was not. Closing that would
 mean reading the command line again, so the gate does not claim it.
 
+Two more gaps are known and not closed here, both reproduced. Under
+``pip install -e .`` the editable finder maps this project's packages back
+to the checkout, and it is consulted *after* the snapshot's own path fails:
+staged code importing a module that exists only in the working tree resolves
+it from the checkout and the snapshot run passes. And a check can be
+disarmed by the very commit being made — a staged ``[tool.ruff] exclude`` or
+a ``pytest.ini`` that collects nothing is a config change the checks then
+read as their own. Both are on the board rather than patched over at the
+edges.
+
 That parse is gone on purpose. Five rounds of review found about two dozen
 real defects in it, three of them introduced by its own fixes: ``git`` and
 ``sh`` have more syntax than a hook can model, and every misreading of the
