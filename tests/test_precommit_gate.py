@@ -4,6 +4,10 @@ The gate exists to refuse a commit the machine can already tell is broken.
 Every case here is one where it used to say "green" (or "not installed", or
 nothing at all) about code that was not the code being committed — that is,
 where it handed back exactly the assurance it exists to provide, wrongly.
+
+The guarantee now rests on one fact: the checks run against a materialised
+copy of the index, so "the code being committed" and "the code that was
+checked" are the same tree by construction rather than by inference.
 """
 
 from __future__ import annotations
@@ -57,28 +61,24 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
-def _shape(command: str):
-    """The shape of the single ``git commit`` in *command*."""
-    plan = gate._plan(command)
-    assert plan.commits, f"command should contain a commit: {command!r}"
-    return gate._commit_shape(plan.commits[0])
+def _reading(path: str, expected: str) -> gate.Check:
+    """A check that passes only when *path*, read from its own working
+    directory, holds *expected*.
+
+    This is how a test asks "which tree did the checks actually see?" without
+    trusting the gate's own account of it.
+    """
+    script = (
+        "import pathlib, sys;"
+        f"p = pathlib.Path({path!r});"
+        f"sys.exit(0 if p.is_file() and p.read_text().strip() == {expected!r} else 1)"
+    )
+    return gate.Check("проба", "проба", [sys.executable, "-c", script], None)
 
 
-def _selects_paths(command: str) -> bool:
-    """Whether any ``git commit`` in *command* names the paths it records."""
-    plan = gate._plan(command)
-    assert plan.commits, f"command should contain a commit: {command!r}"
-    return any(gate._commit_shape(argv).selects_paths for argv in plan.commits)
-
-
-def _restaged(command: str) -> set[str] | None:
-    plan = gate._plan(command)
-    return gate._restaged_paths(plan, [gate._commit_shape(a) for a in plan.commits])
-
-
-def _decide(monkeypatch, capsys, command: str) -> dict:
-    """Run main() for *command* with the checks stubbed out, return its JSON."""
-    monkeypatch.setattr(gate, "CHECKS", [])
+def _decide(monkeypatch, capsys, command: str, checks=None) -> dict:
+    """Run main() for *command*, return the hook decision it printed."""
+    monkeypatch.setattr(gate, "CHECKS", [] if checks is None else checks)
     payload = json.dumps({"tool_input": {"command": command}})
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert gate.main() == 0
@@ -87,6 +87,12 @@ def _decide(monkeypatch, capsys, command: str) -> dict:
 
 def _is_deny(decision: dict) -> bool:
     return decision.get("permissionDecision") == "deny"
+
+
+def _text(decision: dict) -> str:
+    return decision.get("permissionDecisionReason") or decision.get(
+        "additionalContext", ""
+    )
 
 
 # ── A check that never started vs. a check that started and found a bug ──────
@@ -116,335 +122,356 @@ def test_a_module_whose_name_merely_starts_with_the_tool_is_not_the_tool():
     assert gate._is_module_missing("No module named ruffles", "ruff") is False
 
 
-# ── What the commit will actually contain ───────────────────────────────────
+def test_the_tools_own_name_quoted_inside_a_check_is_not_a_missing_tool():
+    """The same distinction with the names that make it dangerous: the check
+    is pytest and the module pytest could not import is *also* called pytest.
+    Bare means the interpreter never started the tool; quoted means a tool
+    that did start raised ModuleNotFoundError. Match on the substring and
+    this output — staged code with a broken import, caught by a check that
+    ran — is filed as "pytest is not installed", the check is skipped, and
+    the commit passes."""
+    output = (
+        "ImportError while importing test module 'tests/test_x.py'.\n"
+        "tests/test_x.py:1: in <module>\n"
+        "    import pytest\n"
+        "E   ModuleNotFoundError: No module named 'pytest'\n"
+    )
+    assert gate._is_module_missing(output, "pytest") is False
 
 
-def test_untracked_files_count_as_working_tree_the_commit_will_not_carry(repo):
-    """Staged code can import a helper that exists only as an untracked file:
-    the checks pass, and a clean checkout of the commit fails."""
-    (repo / "helper_new.py").write_text("HELPER = 1\n", encoding="utf-8")
+def test_a_package_without_an_entry_point_counts_as_a_missing_tool():
+    """``python -m ruff`` where ruff imports but has no ``__main__``: the
+    tool still never started, so this is an absent check and not a failing
+    one."""
+    output = (
+        "/usr/bin/python3: No module named ruff.__main__; "
+        '"ruff" is a package and cannot be directly executed'
+    )
+    assert gate._is_module_missing(output, "ruff") is True
+
+
+# ── Which tree the checks actually see ──────────────────────────────────────
+
+
+def test_a_defect_only_in_the_working_tree_is_caught_too(repo, monkeypatch, capsys):
+    """``a.py`` is sound in the index and broken in the tree. The hook fires
+    before the whole command line, so ``git add a.py && git commit`` — the
+    form this project's process prescribes — commits the broken one, and the
+    gate cannot tell that command from a plain ``git commit`` without the
+    parse it no longer does. So it checks the tree as well and refuses."""
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("BROKEN\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+    )
+
+    assert _is_deny(decision)
+    assert gate.WORKTREE in _text(decision)
+
+
+def test_a_defect_only_in_the_index_is_still_caught(repo, monkeypatch, capsys):
+    """The same fact the other way round: the working tree is clean and the
+    index is broken. A gate that reads the tree calls this green, and the
+    broken version is what lands."""
+    (repo / "a.py").write_text("BROKEN\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("v1\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+    )
+
+    assert _is_deny(decision)
+    assert gate.INDEX in _text(decision)
+
+
+def test_untracked_files_are_not_in_the_snapshot(repo, monkeypatch, capsys):
+    """Staged code that imports a helper existing only in the working tree.
+    The checks pass against the tree and a clean checkout of the commit fails
+    on the missing file, so the snapshot must not contain it."""
+    (repo / "helper.py").write_text("v1\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("helper.py", "v1")]
+    )
+
+    assert _is_deny(decision)
+
+
+def test_a_half_staged_file_is_checked_rather_than_refused(
+    repo, monkeypatch, capsys
+):
+    """A file staged and then edited further used to stop the gate dead: it
+    could not tell which half the commit would carry, so it refused outright.
+    Both halves are now looked at — the staged one in the snapshot, the edited
+    one in the tree — so the split itself is no longer a reason to refuse."""
+    (repo / "a.py").write_text("v2\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("v3\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("b.py", "v1")]
+    )
+
+    assert not _is_deny(decision)
+
+
+def test_the_gate_leaves_the_repository_exactly_as_it_found_it(
+    repo, monkeypatch, capsys
+):
+    """``git stash`` would have done the same job and would have moved the
+    developer's work to do it. Taking a copy must not disturb anything."""
+    (repo / "a.py").write_text("v2\n", encoding="utf-8")
+    _git(repo, "add", "a.py")
+    (repo / "a.py").write_text("v3\n", encoding="utf-8")
+    before = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    _decide(monkeypatch, capsys, "git commit -m x", checks=[_reading("b.py", "v1")])
+
+    after = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert after == before
+    assert (repo / "a.py").read_text(encoding="utf-8") == "v3\n"
+
+
+def test_the_snapshot_is_thrown_away_after_the_checks(repo, monkeypatch, capsys):
+    """The copy is temporary. A gate that leaves one behind per commit fills
+    the disk quietly."""
+    seen: list[Path] = []
+    original = gate._snapshot_index
+
+    def _remember(destination: Path) -> bool:
+        seen.append(destination)
+        return original(destination)
+
+    monkeypatch.setattr(gate, "_snapshot_index", _remember)
+
+    _decide(monkeypatch, capsys, "git commit -m x")
+
+    assert seen and not seen[0].exists()
+
+
+def _counting(tally: Path) -> gate.Check:
+    """A check that always passes and records that it ran."""
+    script = (
+        "import pathlib;"
+        f"p = pathlib.Path({str(tally)!r});"
+        "p.write_text((p.read_text() if p.exists() else '') + 'x')"
+    )
+    return gate.Check("счётчик", "счётчик", [sys.executable, "-c", script], None)
+
+
+def test_a_tree_that_matches_the_index_is_checked_once(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """Nothing outside the index means both trees hold the same content for
+    every file the commit could draw from. Running the suite twice over it
+    would double the wait a developer feels on every commit and prove
+    nothing."""
+    tally = tmp_path / "runs"
+
+    _decide(monkeypatch, capsys, "git commit -m x", checks=[_counting(tally)])
+
+    assert tally.read_text() == "x"
+
+
+def test_a_tree_that_differs_from_the_index_is_checked_as_well(
+    repo, tmp_path, monkeypatch, capsys
+):
+    tally = tmp_path / "runs"
+    (repo / "a.py").write_text("v2\n", encoding="utf-8")
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_counting(tally)]
+    )
+
+    assert tally.read_text() == "xx"
+    assert gate.INDEX in _text(decision)
+    assert gate.WORKTREE in _text(decision)
+
+
+# ── What the pass does not cover, said out loud ─────────────────────────────
+
+
+def test_the_note_names_the_content_the_snapshot_left_out(
+    repo, monkeypatch, capsys
+):
+    """An unstaged edit and an untracked file are both outside the commit and
+    outside the check. ``git commit -a`` would sweep the first one in after
+    the gate has run, so the gate says which files that would be."""
+    (repo / "a.py").write_text("v2\n", encoding="utf-8")
+    (repo / "new.py").write_text("v1\n", encoding="utf-8")
+
+    decision = _decide(monkeypatch, capsys, "git commit -m x")
+
+    note = _text(decision)
+    assert not _is_deny(decision)
+    assert "a.py" in note
+    assert "new.py" in note
+    assert "-a" in note
+
+
+def test_a_clean_tree_gets_no_warning_about_it(repo, monkeypatch, capsys):
+    decision = _decide(monkeypatch, capsys, "git commit -m x")
+
+    assert "В рабочем дереве есть" not in _text(decision)
+
+
+def test_the_listing_stops_before_it_becomes_wallpaper():
+    """A clone with build output in it has hundreds of untracked files. A
+    note that long is skipped whole, and the one line that mattered goes with
+    it."""
+    listing = gate._listing([f"f{n}.py" for n in range(gate.MAX_LISTED + 5)])
+
+    assert listing.count("\n") == gate.MAX_LISTED
+    assert "f0.py" in listing
+    assert f"f{gate.MAX_LISTED}.py" not in listing
+    assert "и ещё 5" in listing
+
+
+def test_a_short_listing_is_not_cut():
+    assert gate._listing(["a.py"]) == "  - a.py"
+
+
+def test_a_staged_file_alone_is_not_reported_as_outside_the_index(
+    repo, monkeypatch, capsys
+):
+    """A fully staged file *is* the commit. Listing it as unchecked content
+    would train the developer to ignore the list."""
     (repo / "a.py").write_text("v2\n", encoding="utf-8")
     _git(repo, "add", "a.py")
 
-    assert "helper_new.py" in gate._dirty_elsewhere()
+    assert "a.py" not in gate._outside_the_index()
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        'git commit -m "msg" -- a.py',
-        "git commit --only a.py",
-        "git commit -o a.py",
-        "git commit a.py",
-        # No pathspec spelled out, but --only/-o still means "the paths, not
-        # the index" — and these reach the flag branches that a bare pathspec
-        # would otherwise mask.
-        "git commit --only",
-        "git commit -o",
-    ],
-)
-def test_path_selecting_commits_do_not_describe_the_index(command):
-    """``git commit -- a.py`` records that path and leaves the rest of the
-    index alone, so no index-derived conclusion maps onto the commit."""
-    assert _selects_paths(command) is True
+# ── When the snapshot cannot be taken ───────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git commit",
-        'git commit -m "a.py fixes"',
-        'git commit -am "msg"',
-        "git commit --no-verify",
-        'git commit -m "fix -- broken"',
-        'git commit --author "A <a@b.c>" -m msg',
-    ],
-)
-def test_ordinary_commits_do_describe_the_index(command):
-    assert _selects_paths(command) is False
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        'git commit -m "x" && git push',
-        'git commit -m "x"; git log --oneline -1',
-        'git commit -m "x"\ngit push',
-        'git commit -m "x" 2>&1',
-        'git commit -m "x" >/dev/null',
-        'git commit -m "a && b"',
-    ],
-)
-def test_what_follows_the_commit_is_not_a_pathspec(command):
-    """The regression a naive tokeniser reintroduces: `shlex` knows nothing
-    about `;`, newlines or redirections, so everything after the commit
-    looked like a pathspec — and the gate switched itself off silently on the
-    multi-line command blocks that are the common case."""
-    assert _selects_paths(command) is False
-
-
-def test_path_selecting_commit_is_not_denied_over_an_unrelated_file(
+def test_a_failed_snapshot_is_reported_and_not_passed_off_as_a_check(
     repo, monkeypatch, capsys
 ):
-    """a.py is staged and dirty, but the commit only records b.py, so a.py's
-    split state says nothing about it — denying here is a false alarm."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+    """No git, no repository, a broken index. Checking the working tree is
+    worth more than checking nothing, but it is a different tree — and a
+    weaker guarantee handed back as the full one is the failure this gate
+    exists to prevent."""
+    monkeypatch.setattr(gate, "_snapshot_index", lambda destination: False)
+    (repo / "a.py").write_text("worktree only\n", encoding="utf-8")
 
-    assert not _is_deny(_decide(monkeypatch, capsys, "git commit -m x -- b.py"))
+    decision = _decide(
+        monkeypatch,
+        capsys,
+        "git commit -m x",
+        checks=[_reading("a.py", "worktree only")],
+    )
+
+    assert not _is_deny(decision)
+    assert "Снимок индекса собрать не удалось" in _text(decision)
 
 
-# ── Commands that stage their own files ─────────────────────────────────────
+def test_a_snapshot_that_cannot_be_written_degrades_instead_of_killing_the_hook(
+    repo, monkeypatch, capsys
+):
+    """A read-only filesystem, a full disk, a directory the user cannot
+    write: the snapshot fails before git is ever reached. An exception there
+    escapes the hook, which then prints no decision at all — and standing
+    aside silently is the one failure the gate cannot recover from."""
+    real_mkdir = Path.mkdir
+
+    def refuse(self, *args, **kwargs):
+        if "precommit-gate-" in str(self):
+            raise PermissionError(13, "Read-only file system")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+    )
+
+    assert not _is_deny(decision)
+    assert "Снимок индекса собрать не удалось" in _text(decision)
 
 
-def test_partial_stage_survives_a_compound_command(repo, monkeypatch, capsys):
-    """The regression: ``git add b.py && git commit`` used to switch the
-    conflict check off wholesale. ``git add b.py`` does not restage a.py, so
-    a.py stays half-staged — the checks see its working-tree version and the
-    commit records the older index one."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
-    (repo / "b.py").write_text("v2\n", encoding="utf-8")
+def test_a_failed_snapshot_still_denies_a_failing_check(repo, monkeypatch, capsys):
+    monkeypatch.setattr(gate, "_snapshot_index", lambda destination: False)
 
-    decision = _decide(monkeypatch, capsys, 'git add b.py && git commit -m "x"')
+    decision = _decide(
+        monkeypatch,
+        capsys,
+        "git commit -m x",
+        checks=[_reading("a.py", "something else")],
+    )
 
     assert _is_deny(decision)
-    assert "a.py" in decision["permissionDecisionReason"]
+    assert "Снимок индекса собрать не удалось" in _text(decision)
 
 
-def test_file_the_command_restages_is_not_reported_as_conflicted(
+def test_an_empty_snapshot_is_an_absent_check_not_a_failing_one(
     repo, monkeypatch, capsys
 ):
-    """The false alarm that switching the check off was meant to cure:
-    ``git add a.py`` is about to make a.py whole, so it is not a conflict."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+    """pytest exits 5 when it collected nothing, which is what a snapshot of
+    an empty index gives it. Denying over that is a refusal the developer
+    cannot act on."""
+    empty = gate.Check(
+        "проба", "проба", [sys.executable, "-c", "raise SystemExit(5)"], 5
+    )
 
-    assert not _is_deny(_decide(monkeypatch, capsys, 'git add a.py && git commit -m "x"'))
+    decision = _decide(monkeypatch, capsys, "git commit -m x", checks=[empty])
 
-
-def test_a_directory_pathspec_covers_the_files_under_it(repo, monkeypatch, capsys):
-    (repo / "pkg").mkdir()
-    (repo / "pkg" / "m.py").write_text("v1\n", encoding="utf-8")
-    _git(repo, "add", "pkg/m.py")
-    _git(repo, "commit", "-qm", "add pkg")
-    (repo / "pkg" / "m.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "pkg/m.py")
-    (repo / "pkg" / "m.py").write_text("worktree\n", encoding="utf-8")
-
-    assert not _is_deny(_decide(monkeypatch, capsys, 'git add pkg && git commit -m "x"'))
+    assert not _is_deny(decision)
+    assert "проверять нечего" in _text(decision)
 
 
-@pytest.mark.parametrize("command", ["git add . && git commit", "git add -A && git commit"])
-def test_staging_everything_leaves_nothing_to_conflict(repo, monkeypatch, capsys, command):
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+def test_an_empty_index_still_gets_its_checks_run(repo, monkeypatch, capsys):
+    """``git checkout-index`` writes only the directories it has files to put
+    in, so an empty index leaves none at all. A check pointed at a path that
+    does not exist comes back as FileNotFoundError, which this gate forgives
+    as "the tool is not installed" — an unchecked commit arriving dressed as
+    a green one."""
+    _git(repo, "rm", "-r", "-q", "--cached", ".")
 
-    assert not _is_deny(_decide(monkeypatch, capsys, command))
-
-
-def test_plain_commit_still_denies_a_half_staged_file(repo, monkeypatch, capsys):
-    """The gate's original purpose, still intact."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
-
-    decision = _decide(monkeypatch, capsys, 'git commit -m "x"')
+    decision = _decide(
+        monkeypatch, capsys, "git commit -m x", checks=[_reading("a.py", "v1")]
+    )
 
     assert _is_deny(decision)
-    assert "a.py" in decision["permissionDecisionReason"]
+    assert "интерпретатор не найден" not in _text(decision)
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        'git commit -m "x"; git log',
-        'git commit -m "x"\ngit push',
-        'git commit -m "x" 2>&1',
-    ],
-)
-def test_a_half_staged_file_is_still_caught_past_a_shell_operator(
-    repo, monkeypatch, capsys, command
-):
-    """A command block must not be able to silence the gate."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
-
-    assert _is_deny(_decide(monkeypatch, capsys, command))
-
-
-def test_every_git_add_in_the_line_counts_not_just_the_first(repo, monkeypatch, capsys):
-    (repo / "pkg").mkdir()
-    (repo / "pkg" / "m.py").write_text("v1\n", encoding="utf-8")
-    _git(repo, "add", "pkg/m.py")
-    _git(repo, "commit", "-qm", "add pkg")
-    for path in ("a.py", "pkg/m.py"):
-        (repo / path).write_text("staged\n", encoding="utf-8")
-        _git(repo, "add", path)
-        (repo / path).write_text("worktree\n", encoding="utf-8")
-
-    command = 'git add a.py && git add pkg/m.py && git commit -m "x"'
-    assert not _is_deny(_decide(monkeypatch, capsys, command))
-
-
-@pytest.mark.parametrize("spelling", ["./a.py", r"a.py"])
-def test_pathspecs_are_matched_in_the_shape_git_reports_them(
-    repo, monkeypatch, capsys, spelling
-):
-    """``./a.py`` and a backslash-separated Windows path both name the file
-    git calls ``a.py``; missing that denies a perfectly good commit."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
-
-    command = f'git add {spelling} && git commit -m "x"'
-    assert not _is_deny(_decide(monkeypatch, capsys, command))
-
-
-def test_windows_style_pathspec_normalises_to_forward_slashes():
-    assert _restaged(r"git add scripts\gate.py && git commit") == {"scripts/gate.py"}
-
-
-def test_commit_dash_a_stages_everything_so_nothing_stays_conflicted(
+def test_the_same_exit_status_from_a_check_that_has_no_empty_code_is_a_failure(
     repo, monkeypatch, capsys
 ):
-    """``git commit -a`` restages every tracked change, so a half-staged
-    tracked file is about to become whole."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+    failing = gate.Check(
+        "проба", "проба", [sys.executable, "-c", "raise SystemExit(5)"], None
+    )
 
-    assert not _is_deny(_decide(monkeypatch, capsys, 'git commit -am "x"'))
+    decision = _decide(monkeypatch, capsys, "git commit -m x", checks=[failing])
 
-
-@pytest.mark.parametrize("flag", ["-A", "-u", "--all", "--update"])
-def test_a_widening_flag_still_obeys_the_pathspec_beside_it(flag):
-    """``-A`` and ``-u`` widen *what kinds of change* are staged, not *where*
-    (``git add [<options>] [--] <pathspec>...``). Reading them as "the whole
-    tree" would clear the conflict on every other half-staged file."""
-    assert _restaged(f"git add {flag} b.py && git commit") == {"b.py"}
+    assert _is_deny(decision)
 
 
-@pytest.mark.parametrize("flag", ["-A", "-u", "--all", "--update"])
-def test_a_widening_flag_without_a_pathspec_does_mean_everything(flag):
-    assert _restaged(f"git add {flag} && git commit") is None
-
-
-@pytest.mark.parametrize("command", ["git commit -mdata", "git commit -mhello"])
-def test_an_attached_message_is_not_read_as_a_cluster_of_flags(command):
-    """`-mdata` is the message `data`. Scanning it letter by letter finds an
-    `a` and calls the commit `-a`, or an `o` and calls it `--only` — either
-    way the gate drops the checks on a commit that stages nothing of the
-    kind."""
-    shape = _shape(command)
-    assert shape.stages_everything is False
-    assert shape.selects_paths is False
-
-
-def test_an_unquoted_comment_is_not_a_pathspec():
-    """`git commit -m x  # note` — the tail is a shell comment, and reading
-    it as a pathspec switches the gate off."""
-    assert _selects_paths("git commit -m x # ordinary note") is False
-
-
-def test_interactive_add_settles_nothing_in_advance():
-    """`git add -p` stages the hunks a human picks, so the index it leaves
-    cannot be read off the command line."""
-    assert _restaged("git add -p a.py && git commit -m x") == set()
-
-
-def test_an_add_after_the_commit_does_not_count():
-    """`git commit -m x; git add a.py` commits the old index first."""
-    assert _restaged("git commit -m x; git add a.py") == set()
-
-
-def test_a_command_that_rewrites_files_before_committing_credits_nothing():
-    """The checks run before the whole line. If something writes a.py after
-    they finish, they measured code that no longer exists — crediting the
-    later `git add` would hide exactly that."""
-    command = "printf 'broken(\\n' > a.py && git add a.py && git commit -m x"
-    assert _restaged(command) == set()
-
-
-@pytest.mark.parametrize(
-    "prefix", ["cd /repo && ", "git status && ", "git diff --stat && "]
-)
-def test_harmless_commands_before_the_add_do_not_cost_the_credit(prefix):
-    assert _restaged(f"{prefix}git add a.py && git commit -m x") == {"a.py"}
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git -C . commit -m x",
-        "git -c user.name=x commit -m y",
-        "git --git-dir=.git commit -m z",
-    ],
-)
-def test_git_global_options_do_not_hide_the_subcommand(command):
-    """``git [-C <path>] … <command>``. Reading ``-C`` as the subcommand made
-    the gate stand aside from a commit entirely — the worst outcome available,
-    since it skips every check without saying so."""
-    assert gate._plan(command).commits, f"should be seen as a commit: {command!r}"
-
-
-@pytest.mark.parametrize("flag", ["-i", "--include"])
-def test_include_commits_the_index_too_so_it_still_needs_checking(flag):
-    """``--include`` adds the named paths *to* the index and commits the lot;
-    ``--only`` commits the paths *instead of* it. Treating them alike drops
-    the checks on every other half-staged file."""
-    shape = _shape(f"git commit {flag} a.py -m x")
-
-    assert shape.selects_paths is False
-    assert _restaged(f"git commit {flag} a.py -m x") == {"a.py"}
-
-
-@pytest.mark.parametrize("command", ["git commit -p -m x", "git commit --interactive"])
-def test_interactive_commit_settles_nothing_in_advance(command):
-    """A human picks hunks after the gate has run, so a whole-file fix in the
-    working tree can pass the checks while the chosen snapshot stays broken."""
-    assert _shape(command).uncreditable is True
-    assert _restaged(command) == set()
-
-
-def test_interactive_commit_overrides_an_earlier_add(repo, monkeypatch, capsys):
-    """``git add a.py && git commit -p`` — the add makes a.py whole, but the
-    commit then records only the hunks a human picks, so the add settles
-    nothing after all."""
-    assert _restaged("git add a.py && git commit -p -m x") == set()
-
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
-
-    assert _is_deny(_decide(monkeypatch, capsys, "git add a.py && git commit -p -m x"))
-
-
-def test_a_later_no_all_cancels_the_earlier_dash_a():
-    """``-a, --[no-]all`` — git applies the last one."""
-    assert _shape("git commit -a --no-all -m x").stages_everything is False
-    assert _shape("git commit --no-all -a -m x").stages_everything is True
-
-
-def test_add_refresh_stages_nothing():
-    """``--refresh`` is documented as "don't add, only refresh the index", so
-    the staged content stays exactly as it was."""
-    assert _restaged("git add --refresh a.py && git commit -m x") == set()
+# ── When the gate stands aside ──────────────────────────────────────────────
 
 
 def test_a_command_without_a_commit_is_left_alone(repo, monkeypatch, capsys):
-    """The hook may be registered for every Bash call. Running the suite on
-    `git status` would deny the very commands someone runs to diagnose a
-    failing test."""
+    """A hook registered for every Bash call must not answer ``git status``
+    with a full test run — and must not deny the commands someone runs to
+    diagnose a failing test."""
     monkeypatch.setattr(gate, "CHECKS", [])
-    monkeypatch.setattr(
-        sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": "git status"}}))
-    )
+    payload = json.dumps({"tool_input": {"command": "git status"}})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
 
     assert gate.main() == 0
     assert capsys.readouterr().out == ""
@@ -453,33 +480,31 @@ def test_a_command_without_a_commit_is_left_alone(repo, monkeypatch, capsys):
 @pytest.mark.parametrize(
     "command",
     [
-        "GIT_AUTHOR_DATE=2026-01-01 git commit -m x",
-        "env GIT_EDITOR=true git commit -m x",
+        "GIT_AUTHOR_DATE=x git commit -m x",
+        "env FOO=1 git commit -m x",
+        'git commit -m"fix thing"',
+        "git -C . commit -m x",
+        "git add a.py missing || git commit -m x",
+        "make commit",
     ],
 )
-def test_a_commit_the_parser_did_not_recognise_is_still_checked(
-    repo, monkeypatch, capsys, command
-):
-    """An environment assignment in front of `git` makes the first token
-    something other than `git`, so the parser sees no commit. Standing aside
-    is the one outcome the gate cannot recover from, so it takes more than the
-    parser's say-so: the word `commit` in the line is enough to keep it in."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+def test_anything_that_says_commit_is_checked(repo, monkeypatch, capsys, command):
+    """Standing aside is the one outcome the gate cannot recover from: it
+    does not refuse, does not warn and leaves no trace. So the test for it is
+    deliberately cruder than any parse — an assignment, a wrapper, an
+    unspaced ``-m``, a shell operator that inverts which command runs. All of
+    these once talked the gate out of checking; a false positive here costs a
+    test run, and only that."""
+    decision = _decide(monkeypatch, capsys, command)
 
-    assert _is_deny(_decide(monkeypatch, capsys, command))
+    # Standing aside prints nothing at all, which _decide cannot parse. Get
+    # this far and the gate ran; the note is what it says when it did.
+    assert "Проверки прошли" in _text(decision)
 
 
-def test_an_unreadable_command_is_not_read_as_staging_everything(
-    repo, monkeypatch, capsys
-):
-    """An unbalanced quote means the gate does not know what will be staged.
-    It must then report the index as it stands — a needless refusal is
-    visible and recoverable, a silent pass is the failure it exists to
-    prevent."""
-    (repo / "a.py").write_text("staged\n", encoding="utf-8")
-    _git(repo, "add", "a.py")
-    (repo / "a.py").write_text("worktree\n", encoding="utf-8")
+def test_a_broken_payload_does_not_kill_the_hook(monkeypatch, capsys):
+    monkeypatch.setattr(gate, "CHECKS", [])
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json at all"))
 
-    assert _is_deny(_decide(monkeypatch, capsys, 'git add a.py && git commit -m "unmatched'))
+    assert gate.main() == 0
+    assert capsys.readouterr().out == ""

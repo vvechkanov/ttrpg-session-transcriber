@@ -13,3 +13,7 @@
 - **`download_gigaam.py`** — загрузка модели GigaAM.
 - **`capture_qml_screens.py`, `dump_qml_geometry.py`** — отладочные утилиты для QML-UI.
 - **`gen_*.py`, `generate_e2e_fixtures.py`** — генерация тестовых фикстур.
+- **`precommit_gate.py`** — хук Claude Code `PreToolUse`. Читает payload со stdin, и если в команде есть слово `commit`, материализует индекс через `git checkout-index -a --prefix=<tmp>/` и гоняет по снимку `ruff check --select F821` и быстрый набор pytest. Красное — отказ в коммите. Проверяет индекс, а не рабочее дерево: коммит записывает индекс.
+- **`test_edit_reminder.py`** — хук Claude Code `PostToolUse` на `Write|Edit`. На файл в `tests/` отдаёт три вопроса, отличающие тест, который поймает регрессию, от теста, который только выглядит так; на остальных файлах молчит.
+
+Оба хука включаются через `.claude/settings.json`, а `.claude/` — в `.gitignore`. На свежем клоне и в облачной сессии они не работают; блокирующая проверка там живёт в CI (см. `docs/process.md` §7.1).
