@@ -128,21 +128,42 @@ Rectangle {
 
         // ── Tabs ──────────────────────────────────────────────────
         RowLayout {
+            objectName: "sessionTabRow"
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
             spacing: 2
 
             Repeater {
+                // Все четыре вкладки показывают, куда идёт проект, но
+                // экраны есть пока только за «Обработкой». Неготовые
+                // выключены, а не спрятаны: выключенное состояние не
+                // врёт, а отсутствие вкладки — умалчивает.
+                //
+                // `ready` снимается по мере появления экрана, и вкладка
+                // сразу становится кликабельной: и курсор, и обработчик
+                // нажатия висят на этом же флаге.
                 model: [
-                    { id: "process",    label: "Обработка" },
-                    { id: "transcript", label: "Транскрипт" },
-                    { id: "log",        label: "Журнал" },
-                    { id: "settings",   label: "Настройки сессии" }
+                    { id: "process",    label: "Обработка",        ready: true  },
+                    { id: "transcript", label: "Транскрипт",       ready: false },
+                    { id: "log",        label: "Журнал",           ready: false },
+                    { id: "settings",   label: "Настройки сессии", ready: false }
                 ]
 
                 delegate: Item {
+                    id: tabDelegate
+                    objectName: "sessionTab"
+
+                    readonly property string tabId: modelData.id
                     readonly property bool isActive: modelData.id === root.activeTab
+
+                    // Одного `enabled` хватает и на клик, и на
+                    // курсор-руку: TapHandler на выключенном элементе
+                    // не срабатывает, а курсор Qt считает по включённым
+                    // (замерено: над неготовой вкладкой ArrowCursor).
+                    enabled: modelData.ready
+                    opacity: enabled ? 1.0 : 0.45
+
                     implicitWidth: tabText.implicitWidth + 28
                     implicitHeight: 36
 
@@ -151,15 +172,15 @@ Rectangle {
                         anchors.centerIn: parent
                         anchors.verticalCenterOffset: -1
                         text: modelData.label
-                        color: parent.isActive ? Theme.ink : Theme.ink3
+                        color: tabDelegate.isActive ? Theme.ink : Theme.ink3
                         font.family: Theme.fontSans
                         font.pixelSize: 13
-                        font.weight: parent.isActive ? Font.DemiBold : Font.Medium
+                        font.weight: tabDelegate.isActive ? Font.DemiBold : Font.Medium
                         font.letterSpacing: -0.05
                     }
 
                     Rectangle {
-                        visible: parent.isActive
+                        visible: tabDelegate.isActive
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
@@ -167,8 +188,19 @@ Rectangle {
                         color: Theme.accent
                     }
 
-                    HoverHandler { cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: root.tabActivated(modelData.id) }
+                    // `enabled` здесь не ради курсора — тот и так
+                    // стрелка на выключенной вкладке. Это про сам
+                    // hover: события до обработчика доходят и на
+                    // выключенном элементе, и `hovered` у него честно
+                    // переключается. Пока по `hovered` ничего не
+                    // рисуется, но подсветка сюда однажды попросится,
+                    // и без этой строки она загорелась бы на вкладках,
+                    // которые нажать нельзя.
+                    HoverHandler {
+                        enabled: tabDelegate.enabled
+                        cursorShape: Qt.PointingHandCursor
+                    }
+                    TapHandler { onTapped: root.tabActivated(tabDelegate.tabId) }
                 }
             }
 

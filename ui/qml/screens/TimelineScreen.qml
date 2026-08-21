@@ -36,6 +36,14 @@ Rectangle {
     readonly property string phase: appModel ? appModel.phase : "idle"
     property int _gutterWidth: 220
 
+    // Активная вкладка верхней панели. Раньше здесь стоял литерал
+    // `activeTab: "process"`, и подчёркивание показывало нужную
+    // вкладку по той причине, что не могло показать никакую другую.
+    // Экран пока один, поэтому значение и правда не меняется — но
+    // теперь оно состояние, а не константа, и вторая вкладка заработает
+    // от снятия `ready` в SessionTopBar, а не от второй правки здесь.
+    property string sessionTab: "process"
+
     // Coverage banner is dismissible, but only for the session it was
     // raised on — opening another folder must not inherit the previous
     // "seen it" state.
@@ -88,12 +96,14 @@ Rectangle {
         spacing: 0
 
         SessionTopBar {
+            objectName: "sessionTopBar"
             Layout.fillWidth: true
             z: 2
             campaignTitle:   sessionMeta ? sessionMeta.campaignTitle   : ""
             sessionTitle:    sessionMeta ? sessionMeta.sessionTitle    : ""
             segmentsCaption: sessionMeta ? sessionMeta.segmentsCaption : ""
-            activeTab: "process"
+            activeTab: root.sessionTab
+            onTabActivated: (tab) => root.sessionTab = tab
         }
 
         Flickable {
