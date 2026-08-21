@@ -184,17 +184,28 @@ def _tabs(root: QQuickItem) -> list[QQuickItem]:
     return sorted(found, key=lambda item: item.x())
 
 
+def _centre(tab: QQuickItem):
+    return tab.mapToScene(QPointF(tab.width() / 2, tab.height() / 2)).toPoint()
+
+
 def _tap(harness: _Harness, tab: QQuickItem) -> None:
     """Click the centre of a tab, the way a user would."""
 
-    centre = tab.mapToScene(QPointF(tab.width() / 2, tab.height() / 2))
     QTest.mouseClick(
         harness.view,
         Qt.MouseButton.LeftButton,
         Qt.KeyboardModifier.NoModifier,
-        centre.toPoint(),
+        _centre(tab),
     )
     harness.app.processEvents()
+
+
+def _hover_cursor(harness: _Harness, tab: QQuickItem) -> Qt.CursorShape:
+    """Cursor the window shows while the pointer sits over ``tab``."""
+
+    QTest.mouseMove(harness.view, _centre(tab))
+    harness.app.processEvents()
+    return harness.view.cursor().shape()
 
 
 @pytest.mark.gui
@@ -251,6 +262,33 @@ def test_tapping_the_ready_tab_is_heard() -> None:
     assert bar.property("activeTab") == "process", (
         "SessionTopBar.activeTab is not bound to TimelineScreen.sessionTab"
     )
+
+
+@pytest.mark.gui
+def test_only_the_ready_tab_offers_a_pointing_hand() -> None:
+    """The cursor is the promise, so it is the thing to check.
+
+    «Курсор-рука на пустом месте» is the wording on the card: before
+    the pointer ever gets pressed, the hand says "this does
+    something". A tab that leads nowhere must show a plain arrow.
+
+    Hovers are interleaved ready/unready so a stale cursor left over
+    from the previous hover cannot pass for the right answer.
+    """
+
+    harness = _mount()
+    tabs = {t.property("tabId"): t for t in _tabs(harness.root)}
+
+    for tab_id in ["transcript", "process", "log", "process", "settings"]:
+        shape = _hover_cursor(harness, tabs[tab_id])
+        expected = (
+            Qt.CursorShape.PointingHandCursor
+            if tab_id in _READY_TABS
+            else Qt.CursorShape.ArrowCursor
+        )
+        assert shape == expected, (
+            f"hovering {tab_id!r} showed {shape!r}, expected {expected!r}"
+        )
 
 
 @pytest.mark.gui
