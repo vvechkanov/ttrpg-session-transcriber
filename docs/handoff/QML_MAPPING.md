@@ -301,6 +301,12 @@ Qt's `Popup` can be anchored to a specific item using `x`/`y` relative to its pa
 
 ### Drawer from right edge
 
+> **Отложенный раздел прототипа, а не задача.** Единственным потребителем этого
+> рецепта был `ModelDetailsDrawer`, и он удалён — см. заметку «Про
+> `ModelDetailsDrawer`» выше. Раздел оставлен как справка для будущей карточки
+> модели; собирать по нему панель поверх списка моделей сейчас — значит вернуть
+> ровно то мёртвое взаимодействие, которое убрали.
+
 ```qml
 Drawer {
     id: modelDrawer
@@ -354,7 +360,7 @@ Behavior on opacity { NumberAnimation { duration: 180 } }
 ## Recommended implementation order
 
 1. **Theme + Main shell + Sidebar** — get navigation working between 3 empty screens
-2. **ModelsScreen** with a `ListView` + drawer — simplest data flow, teaches you the Q_PROPERTY + dialog pattern
+2. **ModelsScreen** with a `ListView` — simplest data flow, teaches you the Q_PROPERTY + dialog pattern. Install/activate/remove live in the row; the drawer is not part of this step (see the `ModelDetailsDrawer` note above)
 3. **EmptyScreen + Settings** — pure forms, no threading
 4. **TimelineScreen idle phase** — ruler, tracks, sources, but no processing. Get the layout right.
 5. **AsrWorker + progress wiring** — run one track, show progress overlay on its waveform
