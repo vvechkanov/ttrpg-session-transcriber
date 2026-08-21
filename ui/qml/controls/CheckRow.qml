@@ -3,10 +3,8 @@ import QtQuick.Layouts
 import App.Theme
 
 // Checkbox + label, row-shaped. Toggles on click anywhere in the row.
-// Used for settings-page toggles ("Показывать подсказки…"), drawer
-// switches, etc. The earlier inline version in ModelDetailsDrawer
-// remains there until the drawer's full wiring phase — shared control
-// is used going forward.
+// Used for settings-page toggles ("Показывать подсказки…") and any
+// other place a boolean needs a row.
 RowLayout {
     id: root
 

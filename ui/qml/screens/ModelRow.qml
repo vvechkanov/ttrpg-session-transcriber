@@ -38,7 +38,6 @@ Rectangle {
     property int busyPct: 0         // 0..100, only used for install
     property string busyNote: ""    // free-form ffmpeg/download status
 
-    signal rowClicked()
     signal activateClicked()
     signal installClicked()
     signal uninstallClicked()
@@ -68,23 +67,16 @@ Rectangle {
         color: Theme.borderSoft
     }
 
-    // Input handlers (Qt 6 idiomatic): HoverHandler for the row tint,
-    // TapHandler for the drawer-open click on blank areas. Both are
-    // pointer-event handlers that coexist with child Button-s without
-    // blocking their hover/press delivery — unlike a MouseArea, which
-    // per QTBUG-72843 and mousearea docs propagates only CLICK events
-    // (not hover) even with propagateComposedEvents: true, so it would
-    // silently eat Button.hovered and make the background flicker on
-    // enter/exit. TapHandler by default uses gesturePolicy that only
-    // claims the grab after release+inside — a child Button that
-    // accepts the press first pre-empts it cleanly.
+    // Row tint only. There is no row-level click: the blank area of a
+    // row does nothing, so it must not offer a pointing-hand cursor —
+    // the actions live in the buttons on the right, and those are real.
+    //
+    // HoverHandler rather than MouseArea: per QTBUG-72843 a MouseArea
+    // propagates only CLICK events (not hover) even with
+    // propagateComposedEvents, so it would silently eat Button.hovered
+    // and make the background flicker on enter/exit.
     HoverHandler {
         id: hoverHandler
-        cursorShape: Qt.PointingHandCursor
-    }
-
-    TapHandler {
-        onTapped: root.rowClicked()
     }
 
     RowLayout {

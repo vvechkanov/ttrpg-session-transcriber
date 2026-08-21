@@ -152,7 +152,7 @@ subprocess-вызов whisperx, оркестрацию пайплайна и GPU
 |---|---|---|
 | `ui/models` | `QObject` и `QAbstractListModel`, которые QML видит как свойства и модели: `AppModel`, `AppPreferences`, `ModelRegistry`, `SessionMeta`, `TrackListModel`, `SourceListModel` | Держат состояние и отдают его в QML. Долгую работу не делают — она уходит в `ui/engines` |
 | `ui/engines` | воркеры на отдельных потоках: `AsrWorker`, `MergerWorker`, `PeaksWorker`, `InstallWorker` — и оркестратор `PipelineController` | Воркеры считают и про QML не знают ничего. Сигналы — их канал **наружу**, а не единственный способ с ними говорить: работу они получают аргументами конструктора, а тех, у кого есть `cancel()`, останавливают прямым вызовом извне (три разных варианта отмены разобраны ниже). `PipelineController` — исключение и в другом: он отдаётся в QML контекст-проперти, объявляет `Property` ради биндингов и держит ссылки на модели из `ui/models`, вызывая их методы напрямую |
-| `ui/qml` | сам шелл: `ui/qml/Main.qml`, `ui/qml/Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/drawers/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
+| `ui/qml` | сам шелл: `ui/qml/Main.qml`, `ui/qml/Theme.qml`, плюс `ui/qml/screens/`, `ui/qml/controls/`, `ui/qml/timeline/`, `ui/qml/popovers/` | Разметка и анимация. Никакой доменной логики |
 
 **Зависимость между `ui/models` и `ui/engines` — в обе стороны, и это стоит
 знать до того, как двигать импорты.** `PipelineController` из `engines` держит
