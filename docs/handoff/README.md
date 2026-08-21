@@ -92,7 +92,7 @@ Table of ASR models:
 | Action | `Сделать активной` / `Установить` / `Удалить` |
 
 - Active model row has a tinted background and an "активна" badge
-- Row click → opens **Model details drawer** on the right (see below)
+- Row click → opens **Model details drawer** on the right (see below) — *в реализации отсутствует: панель удалена, строка не кликабельна, см. §6*
 - Bottom: disk-usage bar ("Занято на диске: 4.3 GB из 3 моделей") + "Открыть папку моделей" button
 - Top: "+ Добавить модель" primary button (opens dialog to paste HuggingFace URL or local path)
 
@@ -125,6 +125,14 @@ This is the 4th tab inside a session (`Настройки сессии`), distin
 - "Сбросить к глобальным" button
 
 ### 6. Model details drawer (overlays Models screen)
+
+> **Отложено, реализовано не будет в этом виде.** Панель была портирована как
+> вёрстка, без обработчиков, и в августе 2026 удалена: из 17 контролов работал
+> крестик закрытия. Установка, активация и удаление модели живут в строке
+> списка и работают по-настоящему; параметры запуска — глобальные, в Settings
+> (§4). Раздел ниже описывает прототип и остаётся справкой для будущей
+> полноценной карточки модели — это отдельная работа, а не невыполненный пункт
+> хендоффа. Подробнее: `QML_MAPPING.md`, заметка «Про `ModelDetailsDrawer`».
 
 Right-side drawer, 460px wide, slides in from right.
 
@@ -180,8 +188,8 @@ Dismiss: click elsewhere, close button, or "Готово".
 ### Models
 
 - Row hover: background lightens
-- Row click: drawer slides in (200–240ms, ease-out)
-- Drawer backdrop: 28% ink overlay; clicking closes
+- Row click: drawer slides in (200–240ms, ease-out) — *отложено вместе с §6; в реализации строка не кликабельна и курсор-руку не показывает*
+- Drawer backdrop: 28% ink overlay; clicking closes — *там же*
 
 ### Popovers
 
@@ -302,4 +310,4 @@ Waveforms are **generated client-side** from mock data in the prototype. In prod
    - Timeline · done (playable)
    - Models
    - Settings (session settings tab)
-3. Click around — per-track badges open the override popover, model rows open the drawer, add-source/add-track open their dialogs.
+3. Click around — per-track badges open the override popover, model rows open the drawer, add-source/add-track open their dialogs. *Это про HTML-прототип; в приложении строка модели drawer не открывает (§6).*

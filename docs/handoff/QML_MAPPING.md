@@ -44,8 +44,6 @@ ttrpg-session-transcriber/
 │       ├── dialogs/
 │       │   ├── AddSourceDialog.qml
 │       │   └── AddTrackDialog.qml
-│       ├── drawers/
-│       │   └── ModelDetailsDrawer.qml
 │       ├── popovers/
 │       │   └── TrackOverridePopover.qml
 │       └── controls/
@@ -69,8 +67,8 @@ ttrpg-session-transcriber/
 | `<TrackRow>`               | `TrackRow.qml`                   | `RowLayout` { Avatar + Labels + ModelBadge + WaveformCanvas } |
 | `<WaveformLane>` (SVG)     | `WaveformCanvas.qml`             | `Canvas` painting peaks from `track.peaks` (Float32Array equivalent); repaint on `progressChanged` to show ASR overlay |
 | `<MergeStitches>`          | `StitchOverlay.qml`              | Absolutely positioned `Repeater` of vertical lines; animate opacity in when phase==="merge" |
-| `<ModelsScreen>`           | `ModelsScreen.qml`               | `ListView` with `model: modelRegistry` + delegate row; click opens drawer |
-| `<ModelDetailsDrawer>`     | `ModelDetailsDrawer.qml`         | Use Qt Quick Controls `Drawer` with `edge: Qt.RightEdge` |
+| `<ModelsScreen>`           | `ModelsScreen.qml`               | `ListView` with `model: modelRegistry` + delegate row; install/activate/remove live in the row |
+| `<ModelDetailsDrawer>`     | —                                | Ported as layout-only, then removed: 16 of its 17 controls did nothing. See the note below |
 | `<TrackOverridePopover>`   | `TrackOverridePopover.qml`       | Qt Quick `Popup` anchored to the badge item |
 | `<SessionScreen>` tabs     | `TabBar` + `StackLayout`         | Tabs drive `currentIndex` of a `StackLayout` containing 4 panes |
 | `<SessionSettings>`        | `SessionSettingsPage.qml`        | Two scroll sections: players table + merger form |
@@ -83,6 +81,15 @@ ttrpg-session-transcriber/
 | State from backend         | Q_PROPERTY on exposed objects    | Session data, track data, merger settings |
 | `useEffect` w/ listener    | `Connections` element            | Listen to signals from Python models |
 | `localStorage` persist     | `QSettings`                      | For last-opened session, window size, etc. |
+
+**Про `ModelDetailsDrawer`.** Прототип рисовал карточку модели с параметрами
+запуска — устройство, точность весов, потоки, VAD, beam, три переключателя.
+Она была портирована как вёрстка, без единого обработчика, и в этом виде
+прожила до августа 2026: из 17 контролов работал крестик закрытия. Удалена.
+Установка, активация и удаление модели живут в строке списка и работают
+по-настоящему; параметры запуска — глобальные, в Settings. Полноценная
+карточка модели вернётся отдельной работой, и этот раздел прототипа тогда
+снова пригодится.
 
 ## Theme singleton
 
@@ -294,6 +301,12 @@ Qt's `Popup` can be anchored to a specific item using `x`/`y` relative to its pa
 
 ### Drawer from right edge
 
+> **Отложенный раздел прототипа, а не задача.** Единственным потребителем этого
+> рецепта был `ModelDetailsDrawer`, и он удалён — см. заметку «Про
+> `ModelDetailsDrawer`» выше. Раздел оставлен как справка для будущей карточки
+> модели; собирать по нему панель поверх списка моделей сейчас — значит вернуть
+> ровно то мёртвое взаимодействие, которое убрали.
+
 ```qml
 Drawer {
     id: modelDrawer
@@ -347,7 +360,7 @@ Behavior on opacity { NumberAnimation { duration: 180 } }
 ## Recommended implementation order
 
 1. **Theme + Main shell + Sidebar** — get navigation working between 3 empty screens
-2. **ModelsScreen** with a `ListView` + drawer — simplest data flow, teaches you the Q_PROPERTY + dialog pattern
+2. **ModelsScreen** with a `ListView` — simplest data flow, teaches you the Q_PROPERTY + dialog pattern. Install/activate/remove live in the row; the drawer is not part of this step (see the `ModelDetailsDrawer` note above)
 3. **EmptyScreen + Settings** — pure forms, no threading
 4. **TimelineScreen idle phase** — ruler, tracks, sources, but no processing. Get the layout right.
 5. **AsrWorker + progress wiring** — run one track, show progress overlay on its waveform

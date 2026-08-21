@@ -3,7 +3,6 @@ import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import App.Theme
 import "../controls"
-import "../drawers"
 
 // Models manager screen.
 //
@@ -24,8 +23,6 @@ import "../drawers"
 Rectangle {
     id: root
     color: Theme.bg
-
-    ModelDetailsDrawer { id: drawer }
 
     Flickable {
         anchors.fill: parent
@@ -282,7 +279,6 @@ Rectangle {
                                 busyKind: busy.row === index ? busy.kind : ""
                                 busyPct:  busy.row === index ? busy.pct  : 0
                                 busyNote: busy.row === index ? busy.note : ""
-                                onRowClicked: drawer.openFor(modelRegistry.entryAt(index))
                                 onActivateClicked: modelRegistry.setActive(index)
                                 onInstallClicked: {
                                     installError.text = ""
