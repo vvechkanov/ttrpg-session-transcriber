@@ -13,7 +13,13 @@ app_run.log
 # (tests/fixtures/e2e_p2/session/speaker_map.json), which broke CI
 # after a fresh checkout.
 /speaker_map.json
-.claude/
+# Claude Code. The hook registration is the project's, not the machine's:
+# without it in the repository a fresh clone and a cloud session run
+# neither hook (scripts/precommit_gate.py, scripts/test_edit_reminder.py).
+# Everything else under .claude/ is local state — personal overrides,
+# worktrees, agent definitions — and stays out.
+.claude/*
+!.claude/settings.json
 
 # Python packaging build artifacts (pip install -e . / python -m build)
 build/

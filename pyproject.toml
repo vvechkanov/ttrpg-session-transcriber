@@ -32,6 +32,9 @@ dev = [
     "pytest",
     "pytest-qt>=4.4,<5",
     "pytest-cov",
+    # The commit gate (scripts/precommit_gate.py) runs `python -m ruff` as its
+    # first check, and CONTRIBUTING.md documents `ruff check .` — neither works
+    # in a fresh `pip install -e .[dev]` environment unless ruff is here.
     "ruff",
     # tests/test_lint_gate.py reads .github/workflows/ci.yml as data —
     # whether the ruff gate blocks is a property of the step, not of the
