@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `craig-start` marker now resolves to the nearest quarter hour instead of the nearest hour, so zones like UTC+5:30 and UTC+5:45 survive it
 
 ### Fixed
+- Three of the four session tabs — «Транскрипт», «Журнал», «Настройки сессии» — offered a pointing-hand cursor and did nothing when clicked: the screens behind them do not exist yet and their `tabActivated` signal had no listener anywhere. They are now visibly disabled, and the active tab is bound to screen state instead of a hardcoded literal
 - The UI, the timeline strip and the merger resolved the chat log's UTC offset three different ways and could disagree by whole hours on the same files. They now share one resolver
 - The system-timezone step asked for today's offset instead of the session's, sliding sessions recorded across a DST boundary by an hour
 - Chat messages and combat events recorded before the recording started were dropped silently; they are now reported
