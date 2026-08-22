@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import glob as globlib
+import re
 import shlex
 import subprocess
 import sys
@@ -45,6 +46,11 @@ WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
 #: command collect if it filtered nothing". Appended rather than stripped: the
 #: last `-m` wins, so this is immune to `-m EXPR`, `-m=EXPR` and `-mEXPR` alike.
 SELECTS_EVERYTHING = "slow or not slow"
+
+#: Console-verbosity options. Dropped from a probed command so the collection
+#: listing keeps the one-node-id-per-line shape this file reads. They cannot
+#: change *what* pytest collects, only how it prints it.
+VERBOSITY = re.compile(r"^(-[qv]+|--quiet|--verbose|--verbosity(=.*)?)$")
 
 #: The markers that keep the tier-2 run out of CI.
 KEEPS_IT_OUT = ("slow", "requires_asr")
@@ -200,25 +206,33 @@ def _collects_tier2(arguments: list[str], where: Path) -> bool:
     `testpaths` from pytest.ini when no target is given — all of it is pytest's
     to decide, and none of it is re-implemented here.
     """
-    # `-o addopts=` clears the `-v` in pytest.ini, and the verbosity flags from
-    # CI's own line go with it. Not to change what is collected — verbosity
-    # cannot — but to force the one-node-id-per-line format. In the tree format
-    # the listing carries module docstrings, and this file's docstring names
-    # the tier-2 module: matching against that text answers yes to everything.
-    quiet = [a for a in _expand(arguments, where) if a not in ("-v", "-vv", "--verbose", "-q")]
+    # `-o addopts=` clears the `-v` in pytest.ini, and every verbosity flag from
+    # CI's own line goes with it. Not to change what is collected — verbosity
+    # cannot — but to pin the listing format. One notch up and the listing
+    # carries module docstrings, and this file's docstring names the tier-2
+    # module, so matching that text answers yes to everything; one notch down
+    # (`-qq`) and pytest prints `path: count` with no node ids at all, so
+    # matching answers no to everything.
+    pinned = [a for a in _expand(arguments, where) if not VERBOSITY.match(a)]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header"]
+        [sys.executable, "-m", "pytest", "--collect-only", "--no-header"]
         + ["-p", "no:cacheprovider", "-o", "addopts="]
-        + quiet,
+        + pinned
+        + ["-q"],
         cwd=where,
         capture_output=True,
         text=True,
         timeout=300,
     )
-    # Collection can end non-zero (no tests matched the selection); that is an
-    # answer, not a failure. A usage error is neither, so say so out loud.
-    assert result.returncode != 4, (
-        f"pytest could not parse the arguments CI uses: {arguments}\n{result.stderr}"
+    # Only two outcomes are answers: something was collected, or nothing was.
+    # An import error, an internal error or a bad option produce empty output
+    # that reads exactly like "tier-2 is not collected" — the dangerous way to
+    # be wrong, so refuse to interpret it.
+    assert result.returncode in (0, 5), (
+        f"pytest could not answer for `pytest {' '.join(arguments)}` in "
+        f"{where}: exit {result.returncode}. Until that is fixed this check "
+        f"cannot tell a safe command from a dangerous one.\n"
+        f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
     )
     node_ids = [line.split("::")[0] for line in result.stdout.splitlines() if "::" in line]
     return any(Path(node).name == TIER2.name for node in node_ids)
