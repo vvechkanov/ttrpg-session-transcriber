@@ -17,7 +17,7 @@ paths, expanding globs. Every round of review found another rule it had got
 wrong (chained commands, `pytestmark` scope, shell globs, `--ignore`), which is
 the expected outcome: a second implementation of somebody else's selection
 logic is wrong in exactly the cases nobody thought of. So each pytest command
-in the workflow is now handed back to pytest with `--collect-only`, and the
+in every workflow is now handed back to pytest with `--collect-only`, and the
 question "would CI run this suite" is answered by the program that decides it.
 Collection of the whole tree costs under a second.
 
@@ -32,14 +32,19 @@ import glob as globlib
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TIER2 = PROJECT_ROOT / "tests" / "test_e2e_tier2_semantic.py"
 CONTRIBUTING = PROJECT_ROOT / "CONTRIBUTING.md"
-CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = PROJECT_ROOT / ".github" / "workflows"
+
+#: A marker expression that selects everything, used to ask "what would this
+#: command collect if it filtered nothing". Appended rather than stripped: the
+#: last `-m` wins, so this is immune to `-m EXPR`, `-m=EXPR` and `-mEXPR` alike.
+SELECTS_EVERYTHING = "slow or not slow"
 
 #: The markers that keep the tier-2 run out of CI.
 KEEPS_IT_OUT = ("slow", "requires_asr")
@@ -90,18 +95,33 @@ def _commands(script: str) -> list[list[str]]:
     return [command for command in commands if command]
 
 
+def _workflow_files() -> list[Path]:
+    """Every workflow in the repository, not just `ci.yml`.
+
+    The promise in `CONTRIBUTING.md` is that *CI* never runs the tier-2 suite,
+    and `release.yml` is CI too. Reading one file would leave the other free to
+    add the run without anything noticing.
+    """
+    files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
+    assert files, f"no workflows under {WORKFLOWS.relative_to(PROJECT_ROOT)}"
+    return files
+
+
 def _steps() -> list[tuple[list[list[str]], Path]]:
-    """Every `run:` step in the workflow, with the directory it runs in."""
-    workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
-    workflow_default = workflow.get("defaults", {}).get("run", {}).get("working-directory")
+    """Every `run:` step in every workflow, with the directory it runs in."""
     steps = []
-    for job in workflow["jobs"].values():
-        job_default = job.get("defaults", {}).get("run", {}).get("working-directory")
-        for step in job.get("steps", []):
-            if "run" not in step:
-                continue
-            where = step.get("working-directory") or job_default or workflow_default or "."
-            steps.append((_commands(step["run"]), PROJECT_ROOT / where))
+    for path in _workflow_files():
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(workflow, dict) or "jobs" not in workflow:
+            continue
+        workflow_default = workflow.get("defaults", {}).get("run", {}).get("working-directory")
+        for job in workflow["jobs"].values():
+            job_default = job.get("defaults", {}).get("run", {}).get("working-directory")
+            for step in job.get("steps", []):
+                if "run" not in step:
+                    continue
+                where = step.get("working-directory") or job_default or workflow_default or "."
+                steps.append((_commands(step["run"]), PROJECT_ROOT / where))
     return steps
 
 
@@ -111,9 +131,25 @@ def _steps() -> list[tuple[list[list[str]], Path]]:
 INSTALLERS = frozenset({"pip", "pip3", "uv", "conda", "apt-get", "apt", "choco", "brew"})
 
 
+def _program(token: str) -> str:
+    """The bare program name in a token, across platforms.
+
+    `pytest.exe` on the Windows half of the matrix is the same launcher as
+    `pytest` on the Linux half, and `C:\\hostedtoolcache\\…\\pytest.exe` is too.
+    A reader that knows only the Unix spelling stops guarding one of the two
+    operating systems this project supports.
+    """
+    name = PurePosixPath(token.replace("\\", "/")).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _is_pytest(token: str) -> bool:
+    return _program(token) in ("pytest", "py.test")
+
+
 def _is_install(command: list[str]) -> bool:
-    head = Path(command[0]).name
-    if head in INSTALLERS or head == "sudo" and len(command) > 1 and command[1] in INSTALLERS:
+    head = _program(command[0])
+    if head in INSTALLERS or (head == "sudo" and len(command) > 1 and command[1] in INSTALLERS):
         return True
     return head.startswith("python") and "-m" in command[:2] and "pip" in command[:3]
 
@@ -129,9 +165,7 @@ def _pytest_arguments(command: list[str]) -> list[str] | None:
     if not command or _is_install(command):
         return None
     for index, token in enumerate(command):
-        if token == "pytest" or token.endswith("/pytest"):
-            if token == "pytest" and index >= 2 and command[index - 1] == "-m":
-                return command[index + 1 :]
+        if _is_pytest(token):
             return command[index + 1 :]
     return None
 
@@ -216,12 +250,8 @@ def test_some_step_in_ci_would_have_collected_it_but_for_the_markers():
     not, CI no longer covers `tests/` at all and the check above proves nothing.
     """
     for arguments, where in _pytest_invocations():
-        without_markers = [
-            argument
-            for index, argument in enumerate(arguments)
-            if argument != "-m" and (index == 0 or arguments[index - 1] != "-m")
-        ]
-        if _collects_tier2(without_markers, where):
+        unfiltered = [*arguments, "-m", SELECTS_EVERYTHING]
+        if _collects_tier2(unfiltered, where):
             return
     raise AssertionError(
         "no pytest step in ci.yml reaches tests/test_e2e_tier2_semantic.py even "
@@ -277,14 +307,17 @@ def test_no_ci_step_hides_its_tests_behind_a_repository_script():
     would skip it while the script inside ran the tier-2 suite. Rather than
     guess, fail and ask for the wrapper to be named here.
     """
-    for commands, _ in _steps():
+    for commands, where in _steps():
         for command in commands:
-            if any(token == "pytest" or token.endswith("/pytest") for token in command):
+            if any(_is_pytest(token) for token in command):
                 continue
             for token in command:
-                if not token.endswith(SCRIPT_SUFFIXES):
+                if not token.lower().endswith(SCRIPT_SUFFIXES):
                     continue
-                if not (PROJECT_ROOT / token).exists():
+                # Resolved against the step's own directory: `working-directory:
+                # tests` plus `bash ci.sh` means tests/ci.sh, and looking only at
+                # the root would walk past it.
+                if not (where / token).exists():
                     continue
                 assert token in SCRIPTS_THAT_CANNOT_RUN_TESTS, (
                     f"CI runs {token}, a script from this repository, and this "
