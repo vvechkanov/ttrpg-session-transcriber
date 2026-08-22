@@ -134,7 +134,7 @@
 > Тесты launcher (F-D1) демотированы в Отложено — инсталлер заморожен до
 > «работает у меня» (D1). Вернуть в скоуп при разморозке #1.
 - [ ] `tests/test_ui_cli.py`: argparse → PipelineParams маппинг, exit codes
-- [x] CONTRIBUTING: когда обязателен локальный tier-2 e2e прогон (перед релизом; при правках sources/mergers) (F-D3) — раздел «The tier-2 end-to-end run»; решение не тащить прогон в CI записано в ADR-021, механическую половину сторожит `tests/test_tier2_e2e_gate.py`
+- [x] CONTRIBUTING: когда обязателен локальный tier-2 e2e прогон (перед релизом; при правках sources/mergers) (F-D3) — раздел «The tier-2 end-to-end run»; решение не тащить прогон в CI записано в ADR-022, механическую половину сторожит `tests/test_tier2_e2e_gate.py`
 
 ### 1.8 Удалить legacy `install_whisperx_windows.ps1` (C3)
 > Ревью рекомендует удалить вместе с WhisperX (скрипт ставит именно его).

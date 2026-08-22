@@ -65,16 +65,20 @@ pytest tests/
 
 `tests/test_e2e_tier2_semantic.py` runs the whole pipeline over the synthetic
 fixture session and compares the result with the frozen baseline
-`tests/fixtures/e2e_p2/expected_merged.txt` by token overlap (>= 0.90). It is
-the only check that exercises `sources/` → `mergers/` → `renderers/` together
-rather than one at a time.
+`tests/fixtures/e2e_p2/expected_merged.txt` by token overlap (>= 0.90).
+
+It is not the only check that crosses `sources/` → `mergers/` → `renderers/`:
+`tests/test_integration_full_pipeline.py` does too, with the real merger and
+renderer, and it runs in CI. What is unique here is the other half — a real ASR
+backend instead of a fake one, and a comparison against frozen output rather
+than against a handful of assertions. That is what makes it the check that
+notices a change in the transcript nobody meant to make.
 
 **CI never runs it, and that is a decision rather than an oversight.** The
 suite is marked `slow` and `requires_asr`; the CI step selects
 `-m "not slow and not requires_asr"`, because the run needs a faster-whisper
 bundle of about 3.2 GB. Paying that on every pull request buys less than it
-costs — see [ADR-021](docs/adr/ADR-021-screen-invariants-over-screenshots.md),
-which records the same trade-off for screenshots.
+costs — see [ADR-022](docs/adr/ADR-022-tier2-e2e-run-stays-manual.md).
 
 The price of the decision is that a person has to run it. You owe the run:
 
@@ -82,8 +86,9 @@ The price of the decision is that a person has to run it. You owe the run:
   tagged build;
 - **whenever you change `sources/`, `mergers/`, `renderers/` or
   `core/pipeline.py`** — those are the layers the baseline measures. A change
-  outside them cannot move the output; a change inside them can, silently, and
-  no other check will say so.
+  outside them cannot move the output; a change inside them can, and the checks
+  that do run in CI compare against assertions somebody wrote, not against a
+  transcript somebody read.
 
 ```bash
 # One-time bundle install (~3.2 GB — wheels + model weights)
