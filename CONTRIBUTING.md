@@ -118,6 +118,12 @@ python -c "from core.backend_installers import install_backend, BackendId; \
 pytest tests/test_e2e_tier2_semantic.py -v -m slow
 ```
 
+**A pass is `2 passed`. `2 skipped` is not a pass** — it is what the command
+prints, with exit code 0, when the bundle is missing or the install above
+failed. Both tests are guarded by `skipif(not _fw_bundle_installed())`, so the
+run reports success without ever entering the pipeline or reading the baseline.
+Read the count before you tag anything.
+
 If the output moved and the new output is the correct one, regenerate the
 baseline with `python scripts/gen_baseline_newpipeline.py` — and say in the
 pull request why the old baseline was wrong. A regenerated baseline nobody
