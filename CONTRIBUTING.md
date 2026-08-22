@@ -84,11 +84,17 @@ The price of the decision is that a person has to run it. You owe the run:
 
 - **before a release** — it is the last thing between a broken pipeline and a
   tagged build;
-- **whenever you change `sources/`, `mergers/`, `renderers/` or
-  `core/pipeline.py`** — those are the layers the baseline measures. A change
-  outside them cannot move the output; a change inside them can, and the checks
-  that do run in CI compare against assertions somebody wrote, not against a
-  transcript somebody read.
+- **whenever you change `sources/`, `mergers/`, `renderers/`, `core/` or
+  `domain/`** — everything the run reads. Not just `core/pipeline.py`: it
+  imports `core.discovery`, `core.session_clock`, `core.chunking`,
+  `core.file_matchers` and the `domain` types, so a change in any of them can
+  move a timestamp, a discovered input, or a rendered line. The checks that do
+  run in CI compare against assertions somebody wrote; this one compares
+  against a transcript somebody read.
+
+Only `ui/` and `launcher/` are reliably outside that list — the run never
+enters them. When in doubt, run it anyway: being wrong in the other direction
+costs a tagged build.
 
 ```bash
 # One-time bundle install (~3.2 GB — wheels + model weights)

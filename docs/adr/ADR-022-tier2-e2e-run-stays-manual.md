@@ -31,7 +31,11 @@
 
 Строка в §7.1 переезжает из «планируется» в «руками»: не гейт, но и не план.
 Момент, когда прогон обязателен, записан в `CONTRIBUTING.md` — перед релизом и
-при правках `sources/`, `mergers/`, `renderers/`, `core/pipeline.py`.
+при правках `sources/`, `mergers/`, `renderers/`, `core/`, `domain/`. Список
+именно такой широкий: `core/pipeline.py` читает `core.discovery`,
+`core.session_clock`, `core.chunking`, `core.file_matchers` и типы `domain`, и
+правка в любом из них двигает выход. Снаружи надёжно остаются только `ui/` и
+`launcher/`.
 
 ## Рассмотрено и отвергнуто
 

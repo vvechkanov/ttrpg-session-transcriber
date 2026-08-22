@@ -38,6 +38,14 @@ CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 #: hook for.
 KEEPS_IT_OUT = frozenset({"slow", "requires_asr"})
 
+#: What `CONTRIBUTING.md` has to name as a moment the manual run comes due.
+#: `core/` and `domain/` are in the list because `core/pipeline.py` reads
+#: `core.discovery`, `core.session_clock`, `core.chunking` and the `domain`
+#: types: naming only the four obvious paths would tell a contributor editing
+#: `core/session_clock.py` that they owe nothing, which is exactly the change
+#: most likely to move timestamps in the frozen output.
+OWED_ON = ("release", "sources/", "mergers/", "renderers/", "core/", "domain/")
+
 #: Options whose *next* token is a value rather than a target path. Without
 #: this list `-k something` would read `something` as a file to collect.
 TAKES_A_VALUE = frozenset(
@@ -66,16 +74,21 @@ def _mark_name(decorator: ast.expr) -> str | None:
     return node.attr
 
 
-def _module_level_marks(tree: ast.Module) -> frozenset[str]:
-    """Markers applied to the whole module via `pytestmark`.
+def _pytestmark_in(body: list[ast.stmt]) -> frozenset[str]:
+    """Markers assigned to `pytestmark` **at this scope**.
 
     `pytestmark = [pytest.mark.slow, pytest.mark.requires_asr]` is the ordinary
     way to mark a whole file, and it is exactly equivalent to decorating each
-    test. A check that only read decorators would call that refactor a
+    test — a check that only read decorators would call that refactor a
     regression.
+
+    Scope matters, though, and reading it wrong is worse than not reading it:
+    pytest applies a `pytestmark` inside `class Test…` to that class only, so
+    treating a class-local one as module-wide would mark unrelated tests as
+    excluded when they are not.
     """
     names = set()
-    for node in ast.walk(tree):
+    for node in body:
         if not isinstance(node, ast.Assign):
             continue
         if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
@@ -86,27 +99,43 @@ def _module_level_marks(tree: ast.Module) -> frozenset[str]:
     return frozenset(names)
 
 
+def _decorator_marks(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+    return frozenset(name for name in map(_mark_name, node.decorator_list) if name)
+
+
 def _markers_on_tests(module: Path) -> dict[str, frozenset[str]]:
-    """Map every `test_*` function in *module* to the markers pytest sees on it.
+    """Map every test pytest would collect from *module* to the markers it sees.
 
     Read from the syntax tree rather than by importing: the module skips itself
     at import time when the faster-whisper bundle is missing, which is every
     machine this check runs on.
 
-    Walked in full rather than over the module body, because a test added
-    inside a `class Test…` is collected by pytest just the same — and an
-    unmarked one there is precisely the regression this file exists to catch.
+    Descends into classes, because a test added inside a `class Test…` is
+    collected just the same — and an unmarked one there is precisely the
+    regression this file exists to catch. Marks inherit the way pytest
+    inherits them: module `pytestmark`, then the class's decorators and its own
+    `pytestmark`, then the function's decorators.
     """
     tree = ast.parse(module.read_text(encoding="utf-8"))
-    inherited = _module_level_marks(tree)
     found: dict[str, frozenset[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if not node.name.startswith("test_"):
-            continue
-        own = {name for name in map(_mark_name, node.decorator_list) if name}
-        found[node.name] = frozenset(own | inherited)
+
+    def walk(body: list[ast.stmt], prefix: str, inherited: frozenset[str]) -> None:
+        marks = inherited | _pytestmark_in(body)
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    found[prefix + node.name] = marks | _decorator_marks(node)
+            elif isinstance(node, ast.ClassDef):
+                if node.name.startswith("Test"):
+                    walk(node.body, f"{prefix}{node.name}::", marks | _decorator_marks(node))
+            elif isinstance(node, (ast.If, ast.Try)):
+                # Not a scope of its own: pytest collects what these define.
+                walk(node.body, prefix, marks)
+                walk(node.orelse, prefix, marks)
+                for handler in getattr(node, "handlers", []):
+                    walk(handler.body, prefix, marks)
+
+    walk(tree.body, "", frozenset())
     return found
 
 
@@ -133,16 +162,32 @@ def _pytest_invocations() -> list[tuple[list[str], str | None]]:
 
 
 def _invocations_in(line: str) -> list[tuple[list[str], str | None]]:
+    """Every pytest command on one shell line, each with only its own arguments.
+
+    Split on the shell's own separators, because `pytest … -m "slow" ; pytest …
+    -m "not slow"` is two commands and reading it as one lets the second's
+    harmless selection stand in for the first's dangerous one.
+    """
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
     try:
-        tokens = shlex.split(line, comments=True)
+        tokens = list(lexer)
     except ValueError:  # unbalanced quotes — unreadable, so unchecked
         raise AssertionError(f"cannot read this CI command line: {line!r}") from None
 
+    commands: list[list[str]] = [[]]
+    for token in tokens:
+        if all(character in ";&|<>" for character in token):
+            commands.append([])
+        else:
+            commands[-1].append(token)
+
     found = []
-    for index, token in enumerate(tokens):
-        if token != "pytest" and not token.endswith("/pytest"):
-            continue
-        found.append(_parse_arguments(tokens[index + 1 :]))
+    for command in commands:
+        for index, token in enumerate(command):
+            if token == "pytest" or token.endswith("/pytest"):
+                found.append(_parse_arguments(command[index + 1 :]))
+                break
     return found
 
 
@@ -287,6 +332,38 @@ def test_the_reader_tells_the_dangerous_shapes_apart():
     targets, _ = _invocations_in("pytest -k tests tests/test_build_spec.py")[0]
     assert targets == ["tests/test_build_spec.py"]
 
+    # Two commands on one line are two commands: the second one's harmless
+    # selection must not stand in for the first one's.
+    chained = _invocations_in(
+        'pytest tests -m "slow and requires_asr"; pytest tests -m "not slow and not requires_asr"'
+    )
+    assert len(chained) == 2, chained
+    assert _selects(chained[0][1], frozenset({"slow", "requires_asr"}))
+    assert not _selects(chained[1][1], frozenset({"slow", "requires_asr"}))
+
+    piped = _invocations_in('pytest tests -m "not slow and not requires_asr" | tee log.txt')
+    assert len(piped) == 1 and piped[0][0] == ["tests"]
+
+
+def test_marker_inheritance_follows_the_scope_pytest_uses(tmp_path):
+    """A `pytestmark` inside a class marks that class, not the whole module."""
+    module = tmp_path / "test_scoped.py"
+    module.write_text(
+        "import pytest\n"
+        "def test_at_module_level(): pass\n"
+        "class TestInner:\n"
+        "    pytestmark = [pytest.mark.slow]\n"
+        "    def test_inside(self): pass\n"
+        "@pytest.mark.requires_asr\n"
+        "class TestDecorated:\n"
+        "    def test_from_class_decorator(self): pass\n",
+        encoding="utf-8",
+    )
+    markers = _markers_on_tests(module)
+    assert markers["test_at_module_level"] == frozenset()
+    assert markers["TestInner::test_inside"] == frozenset({"slow"})
+    assert markers["TestDecorated::test_from_class_decorator"] == frozenset({"requires_asr"})
+
 
 # ── the document that carries the half a machine cannot check ───────────────
 
@@ -326,16 +403,48 @@ def _tier2_section() -> str:
     return "\n".join(body)
 
 
+def _obligation_block() -> str:
+    """The bullets that say when the run is owed — not the whole section.
+
+    Narrower than the section on purpose. `renderers/` is also named a
+    paragraph earlier, where the text explains what else crosses that layer, so
+    a check over the whole section stays green after the obligation itself
+    stops mentioning it — which is the change that would actually cost a
+    release.
+    """
+    lines = _tier2_section().splitlines()
+    for index, line in enumerate(lines):
+        if line.rstrip().endswith("You owe the run:"):
+            block = []
+            for following in lines[index + 1 :]:
+                stripped = following.strip()
+                if not stripped:
+                    block.append(following)
+                    continue
+                if following.startswith(("-", " ")):
+                    block.append(following)
+                    continue
+                break
+            return "\n".join(block)
+    raise AssertionError(
+        "the tier-2 section no longer has a list of moments the run is owed. "
+        "An obligation with no list of occasions is a suggestion."
+    )
+
+
 def test_contributing_says_when_the_manual_run_is_owed():
     section = _tier2_section()
     assert "tests/test_e2e_tier2_semantic.py" in section, (
         "the tier-2 section does not name the module it is about. The suite is "
         "nobody's job unless the document says which suite."
     )
-    for trigger in ("release", "sources/", "mergers/"):
-        assert trigger in section, (
+    owed = _obligation_block()
+    for trigger in OWED_ON:
+        assert trigger in owed, (
             f"the tier-2 section does not name {trigger!r} as a moment the run is "
-            f"owed. 'Run it sometimes' is not an obligation."
+            f"owed. 'Run it sometimes' is not an obligation — and dropping one "
+            f"path from the list silently narrows what a release is protected "
+            f"against."
         )
 
 
