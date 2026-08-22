@@ -61,6 +61,47 @@ python -m ui
 pytest tests/
 ```
 
+### The tier-2 end-to-end run — manual, and when it is owed
+
+`tests/test_e2e_tier2_semantic.py` runs the whole pipeline over the synthetic
+fixture session and compares the result with the frozen baseline
+`tests/fixtures/e2e_p2/expected_merged.txt` by token overlap (>= 0.90). It is
+the only check that exercises `sources/` → `mergers/` → `renderers/` together
+rather than one at a time.
+
+**CI never runs it, and that is a decision rather than an oversight.** The
+suite is marked `slow` and `requires_asr`; the CI step selects
+`-m "not slow and not requires_asr"`, because the run needs a faster-whisper
+bundle of about 3.2 GB. Paying that on every pull request buys less than it
+costs — see [ADR-021](docs/adr/ADR-021-screen-invariants-over-screenshots.md),
+which records the same trade-off for screenshots.
+
+The price of the decision is that a person has to run it. You owe the run:
+
+- **before a release** — it is the last thing between a broken pipeline and a
+  tagged build;
+- **whenever you change `sources/`, `mergers/`, `renderers/` or
+  `core/pipeline.py`** — those are the layers the baseline measures. A change
+  outside them cannot move the output; a change inside them can, silently, and
+  no other check will say so.
+
+```bash
+# One-time bundle install (~3.2 GB — wheels + model weights)
+python -c "from core.backend_installers import install_backend, BackendId; \
+           install_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU)"
+
+pytest tests/test_e2e_tier2_semantic.py -v -m slow
+```
+
+If the output moved and the new output is the correct one, regenerate the
+baseline with `python scripts/gen_baseline_newpipeline.py` — and say in the
+pull request why the old baseline was wrong. A regenerated baseline nobody
+explains turns the check off without anyone deciding to turn it off.
+
+`tests/test_tier2_e2e_gate.py` guards the two mechanical halves of this
+section: that the suite still carries both markers, and that CI's selection
+still excludes it. It cannot check that anybody actually ran it.
+
 ### Lint and format
 
 ```bash
