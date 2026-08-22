@@ -210,18 +210,31 @@ def _parse_arguments(arguments: list[str]) -> tuple[list[str], str | None]:
     return targets, expression
 
 
+def _reaches(candidate: Path, relative: Path) -> bool:
+    return candidate == relative or candidate in relative.parents
+
+
 def _collects(targets: list[str], module: Path) -> bool:
     """Would a pytest run over *targets* collect *module*?
 
     No targets means pytest falls back to `testpaths` from pytest.ini, which is
     the whole `tests` tree — so an argument-less run collects it too.
+
+    Globs are expanded rather than compared as text: the shell hands pytest the
+    expansion, so `pytest tests/test_*.py` is a run over this file even though
+    the literal never equals its name.
     """
     relative = module.relative_to(PROJECT_ROOT)
     if not targets:
         targets = ["tests"]
     for target in targets:
-        path = Path(target.split("::")[0])
-        if path == relative or path in relative.parents:
+        raw = target.split("::")[0]
+        if any(character in raw for character in "*?["):
+            matches = (match.relative_to(PROJECT_ROOT) for match in PROJECT_ROOT.glob(raw))
+            if any(_reaches(match, relative) for match in matches):
+                return True
+            continue
+        if _reaches(Path(raw), relative):
             return True
     return False
 
@@ -343,6 +356,12 @@ def test_the_reader_tells_the_dangerous_shapes_apart():
 
     piped = _invocations_in('pytest tests -m "not slow and not requires_asr" | tee log.txt')
     assert len(piped) == 1 and piped[0][0] == ["tests"]
+
+    # A glob the shell would expand over this file is a run over this file.
+    targets, _ = _invocations_in('pytest tests/test_e2e_*.py -m "slow"')[0]
+    assert _collects(targets, TIER2)
+    targets, _ = _invocations_in("pytest tests/ui_qml_smoke/test_*.py")[0]
+    assert not _collects(targets, TIER2)
 
 
 def test_marker_inheritance_follows_the_scope_pytest_uses(tmp_path):

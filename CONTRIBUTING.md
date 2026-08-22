@@ -71,8 +71,22 @@ It is not the only check that crosses `sources/` → `mergers/` → `renderers/`
 `tests/test_integration_full_pipeline.py` does too, with the real merger and
 renderer, and it runs in CI. What is unique here is the other half — a real ASR
 backend instead of a fake one, and a comparison against frozen output rather
-than against a handful of assertions. That is what makes it the check that
-notices a change in the transcript nobody meant to make.
+than against a handful of assertions.
+
+Two limits, so that a pass is read for what it is worth:
+
+- **The fixture is audio only.** `tests/fixtures/e2e_p2/session/` holds three
+  FLAC tracks and a `speaker_map.json` — no chat log, no combat dump. The run
+  therefore takes the "no chat log" and "no combat dump" branches and never
+  enters `FvttChatSource` or `CombatDumpSource`. A green tier-2 run says
+  nothing about a change to those parsers.
+- **The comparison is order-blind.** `_token_overlap` scores a multiset of
+  tokens, so reordering every line of the transcript still scores 1.0. It
+  catches words that appeared, vanished or changed; it does not catch events
+  landing in the wrong order.
+
+Both are worth fixing and both have cards; until then, a change in those areas
+needs its own check rather than this one.
 
 **CI never runs it, and that is a decision rather than an oversight.** The
 suite is marked `slow` and `requires_asr`; the CI step selects
@@ -90,7 +104,7 @@ The price of the decision is that a person has to run it. You owe the run:
   `core.file_matchers` and the `domain` types, so a change in any of them can
   move a timestamp, a discovered input, or a rendered line. The checks that do
   run in CI compare against assertions somebody wrote; this one compares
-  against a transcript somebody read.
+  against a frozen transcript, within the two limits above.
 
 Only `ui/` and `launcher/` are reliably outside that list — the run never
 enters them. When in doubt, run it anyway: being wrong in the other direction
