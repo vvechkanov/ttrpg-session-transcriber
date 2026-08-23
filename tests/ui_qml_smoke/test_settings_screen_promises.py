@@ -31,7 +31,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # Прогреваем sources/__init__ до глубоких импортов Qt (см. test_core_asr).
 from core.pipeline import run as _  # noqa: F401
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QSettings, QStandardPaths, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import qmlRegisterSingletonType
 from PySide6.QtQuick import QQuickItem, QQuickView
@@ -91,9 +91,30 @@ def _ensure_app() -> QGuiApplication:
     return app
 
 
+def _redirect_settings_to_scratch() -> None:
+    """Увести QSettings в temp до создания AppPreferences.
+
+    ``AppPreferences`` открывает INI, называя организацию и приложение
+    явно (``QSettings(IniFormat, UserScope, "Session Transcriber",
+    "Session Transcriber")``), поэтому имена, выставленные на
+    ``QGuiApplication``, его никуда не уводят. Без этой подмены
+    монтирование экрана трогает НАСТОЯЩИЕ настройки разработчика:
+    ``onCurrentIndexChanged`` у SelectField срабатывает при построении и
+    записывает нормализованное значение, если в хранилище лежало
+    незнакомое.
+    """
+
+    QSettings.setPath(
+        QSettings.Format.IniFormat,
+        QSettings.Scope.UserScope,
+        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation),
+    )
+
+
 @pytest.fixture(scope="module")
 def screen() -> _Harness:
     app = _ensure_app()
+    _redirect_settings_to_scratch()
     QQuickStyle.setStyle("Basic")
     theme_url = QUrl.fromLocalFile(str(_QML_ROOT / "Theme.qml"))
     qmlRegisterSingletonType(theme_url, "App.Theme", 1, 0, "Theme")
