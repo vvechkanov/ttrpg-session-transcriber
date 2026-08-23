@@ -39,6 +39,15 @@ from renderers import RENDERERS, Renderer
 
 logger = logging.getLogger(__name__)
 
+#: Порог склейки реплик для пути GUI, когда пользователь его не
+#: задал. Отличается от ``mergers.script_merger.DEFAULT_MERGE_GAP_SEC``
+#: (2.0), которым пользуется CLI: это расхождение существует с
+#: Phase 7 и здесь только названо, не исправлено — менять поведение
+#: GUI по умолчанию значит менять вывод у всех, кто ничего не
+#: настраивал. Заведено отдельной карточкой.
+DEFAULT_GUI_GAP_SEC = 1.0
+
+
 class MergerWorker(QObject):
     """One-shot worker that glues segments + chat into a merged.txt file."""
 
@@ -68,7 +77,7 @@ class MergerWorker(QObject):
         speech_segments: list[SpeechSegment],
         chat_log_path: Path | None = None,
         total_duration: float = 0.0,
-        gap_sec: float = 1.0,
+        gap_sec: float = DEFAULT_GUI_GAP_SEC,
         combat_log_paths: list[Path] | None = None,
         renderer_name: str = "plain-text",
     ) -> None:
