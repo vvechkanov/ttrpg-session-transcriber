@@ -14,6 +14,9 @@ from pathlib import Path
 # Warm sources/__init__ before any deep imports (see test_core_asr).
 from core.pipeline import run as _  # noqa: F401
 
+import pytest
+
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 
 import sys
@@ -584,3 +587,194 @@ def test_guard_passes_when_a_model_is_installed(tmp_path: Path) -> None:
 
     assert app_model.errorMessage == "", app_model.errorMessage
     assert spawned == [True], "the guard swallowed a run it should have allowed"
+
+
+class _StubMergerWorker(QObject):
+    """Stands in for :class:`ui.engines.merger_worker.MergerWorker`.
+
+    Real signals, because ``_spawn_merger`` connects six of them and a
+    plain object would blow up on the first ``connect``. ``run`` emits
+    ``finished`` straight away so the QThread it was moved onto quits
+    instead of outliving the test.
+    """
+
+    progress = Signal(float)
+    gapFilled = Signal(float, str)
+    done = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    #: Constructor keywords of the most recent instance, or ``None``
+    #: when nothing was constructed since the last reset. A sentinel
+    #: rather than an empty dict on purpose: with a plain dict left
+    #: over from the previous test, a ``_spawn_merger`` that bails out
+    #: before building anything reads as a pass.
+    seen: dict | None = None
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        _StubMergerWorker.seen = dict(kwargs)
+
+    @Slot()
+    def run(self) -> None:
+        self.finished.emit()
+
+
+class _StubMergerPrefs:
+    """Just the two properties ``_spawn_merger`` reads off preferences."""
+
+    def __init__(self, gap: str) -> None:
+        self.mergerMaxGap = gap
+        self.renderer = "plain-text"
+
+
+def _spawn_merger_with(prefs, tmp_path: Path, monkeypatch) -> dict:
+    """Run ``_spawn_merger`` against a stub worker, return its kwargs."""
+
+    _ensure_app()
+
+    session = tmp_path / "session"
+    session.mkdir(parents=True, exist_ok=True)
+    _write_flac_stub(session / "1-vova.flac")
+
+    monkeypatch.setattr(
+        "ui.engines.pipeline_controller.MergerWorker", _StubMergerWorker
+    )
+    _StubMergerWorker.seen = None
+
+    meta = SessionMeta()
+    controller = PipelineController(
+        AppModel(), TrackListModel(), meta, preferences=prefs
+    )
+    meta.openSession(session.as_uri())
+
+    controller._spawn_merger()
+
+    thread = controller._merge_thread
+    if thread is not None:
+        thread.quit()
+        thread.wait(2000)
+
+    seen = _StubMergerWorker.seen
+    assert seen is not None, (
+        "_spawn_merger не построил MergerWorker вовсе — мержа не было, "
+        "и любая проверка его аргументов ниже ничего не значит"
+    )
+    return seen
+
+
+def test_merge_gap_from_settings_reaches_the_merger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The number under «Макс. gap между репликами» must reach the merger.
+
+    It did not. ``_spawn_merger`` built ``MergerWorker`` without
+    ``gap_sec``, so the worker fell back to its own default and
+    ``ScriptMerger`` glued replicas by that instead — whatever the user
+    typed. The field saved, redisplayed and was ignored, which is worse
+    than not offering it: the transcript looks configured and is not.
+
+    Asserted at the constructor rather than on the preferences object,
+    because the defect lived exactly in the step between the two.
+    """
+
+    seen = _spawn_merger_with(_StubMergerPrefs("2.5"), tmp_path, monkeypatch)
+
+    assert seen.get("gap_sec") == 2.5, (
+        "MergerWorker was built without the user's gap "
+        f"(got {seen.get('gap_sec')!r}) — the setting is decoration"
+    )
+
+
+def test_merge_gap_survives_a_nonsense_value(tmp_path: Path, monkeypatch) -> None:
+    """The field is free text, so it can hold anything.
+
+    A stored «две с половиной» must not take the merge down; the run
+    falls back to the default gap the GUI used before the setting was
+    wired at all.
+    """
+
+    seen = _spawn_merger_with(_StubMergerPrefs("две с половиной"), tmp_path, monkeypatch)
+
+    assert seen.get("gap_sec") == 1.0, (
+        f"garbage in the field produced {seen.get('gap_sec')!r} instead of the default"
+    )
+
+
+def test_merge_gap_without_preferences_uses_the_default(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No ``AppPreferences`` at all — the CLI and most tests.
+
+    Mirrors ``_renderer_name``: absent preferences mean the historical
+    behaviour, not a crash.
+    """
+
+    seen = _spawn_merger_with(None, tmp_path, monkeypatch)
+
+    assert seen.get("gap_sec") == 1.0, seen.get("gap_sec")
+
+
+@pytest.mark.parametrize(
+    "typed, expected",
+    [
+        # Интерфейс русский, и запятая — то, что человек напечатает.
+        ("2,5", 2.5),
+        ("  3.5  ", 3.5),
+        # Ниже — значения, которые float примет молча, а мержер от них
+        # сломается: отрицательный порог отключает склейку, inf слепляет
+        # всю сессию в один абзац, nan обнуляет все сравнения внутри.
+        ("-3", 1.0),
+        ("inf", 1.0),
+        ("1e400", 1.0),
+        ("nan", 1.0),
+        ("", 1.0),
+        # Верхнего предела нет: «601» странный выбор, но это выбор, и
+        # подменять его молча — тот же дефект в мелком масштабе.
+        ("601", 601.0),
+        ("100000", 100000.0),
+    ],
+)
+def test_merge_gap_reads_what_a_person_would_type(
+    tmp_path: Path, monkeypatch, typed: str, expected: float
+) -> None:
+    """Поле свободнотекстовое, и в нём бывает всё.
+
+    Отдельный случай — запятая: отвергнуть её значило бы повторить
+    ровно тот дефект, ради которого заведена карточка. Человек видит
+    в поле «2,5», а склейка идёт по умолчанию, и сказать ему об этом
+    некому.
+    """
+
+    seen = _spawn_merger_with(_StubMergerPrefs(typed), tmp_path, monkeypatch)
+
+    assert seen.get("gap_sec") == expected, (
+        f"поле {typed!r} превратилось в {seen.get('gap_sec')!r}, ожидалось {expected}"
+    )
+
+
+def test_merge_gap_is_read_when_the_merge_starts(tmp_path: Path, monkeypatch) -> None:
+    """Значение берётся в момент сборки, а не на старте приложения.
+
+    Это и записано теперь в описании группы на экране настроек. Раньше
+    там стояло «Применяются к новым сессиям», что неправдой было и до
+    этой карточки: формат merged.txt читается ровно там же, в
+    ``_spawn_merger``. Тест закрепляет фактическое поведение, чтобы
+    текст и код не разошлись снова молча.
+
+    Вопрос, не должно ли быть наоборот — снимок настроек на старте
+    сессии, — заведён отдельной карточкой: он касается и рендерера.
+    """
+
+    prefs = _StubMergerPrefs("1.0")
+    seen = _spawn_merger_with(prefs, tmp_path, monkeypatch)
+    assert seen.get("gap_sec") == 1.0
+
+    # Пользователь открыл настройки посреди работы и поменял порог.
+    prefs.mergerMaxGap = "4.0"
+    seen = _spawn_merger_with(prefs, tmp_path / "second", monkeypatch)
+
+    assert seen.get("gap_sec") == 4.0, (
+        "правка настройки не застала следующую сборку — значит значение "
+        "где-то закешировано, и описание на экране снова врёт"
+    )

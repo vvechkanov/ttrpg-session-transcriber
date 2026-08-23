@@ -57,6 +57,11 @@ Rectangle {
                 SettingsGroup {
                     title: "Рабочая папка"
                     description: "Где хранятся файлы сессий, merged.txt и кэш ASR."
+                    // Значение никто не читает: папку сессии выбирает
+                    // FolderDialog в EmptyScreen.qml, и начальный путь ему
+                    // не передаётся. Кнопка «Выбрать…» тут и вовсе без
+                    // обработчика с Phase 4.
+                    soon: true
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -291,7 +296,12 @@ Rectangle {
                 // ── Merger defaults ───────────────────────────────
                 SettingsGroup {
                     title: "Мержер по умолчанию"
-                    description: "Параметры сборки merged.txt. Применяются к новым сессиям."
+                    // «К новым сессиям» было неправдой: и порог склейки, и
+                    // формат merged.txt читаются в момент запуска сборки
+                    // (pipeline_controller.py, _spawn_merger), то есть
+                    // правка застаёт и уже открытую сессию. Обещать
+                    // иное — тот же дефект, что и у мёртвых настроек.
+                    description: "Параметры сборки merged.txt. Читаются в момент сборки — правка застанет и уже открытую сессию."
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -335,6 +345,11 @@ Rectangle {
                         SettingField {
                             Layout.fillWidth: true
                             label: "OOC В FOUNDRY-ЧАТЕ"
+                            // Не проводка, а несделанная фича: параметра
+                            // OOC нет ни у ScriptMerger, ни в PipelineParams,
+                            // канал не влияет ни на один рендерер, а
+                            // FvttChatSource всегда проставляет "ic".
+                            soon: true
 
                             SelectField {
                                 id: oocSelect
@@ -358,6 +373,10 @@ Rectangle {
                 // ── Interface ─────────────────────────────────────
                 SettingsGroup {
                     title: "Интерфейс"
+                    // Все три настройки группы без читателей: QTranslator
+                    // в проекте отсутствует, ToolTip в QML нет ни одного,
+                    // проигрывания звука нет вовсе.
+                    soon: true
 
                     SettingField {
                         label: "ЯЗЫК"

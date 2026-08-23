@@ -19,6 +19,8 @@ dropped a folder) fail fast with a user-visible error.
 
 from __future__ import annotations
 
+import math
+
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,7 +38,8 @@ from core.speaker_map import (
 )
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
-from ui.engines.merger_worker import MergerWorker
+from ui.engines.merger_worker import DEFAULT_GUI_GAP_SEC, MergerWorker
+
 from ui.models.app_model import AppModel
 from ui.models.session import SessionMeta, TrackListModel
 
@@ -381,6 +384,39 @@ class PipelineController(QObject):
         self.saveSpeakerMapEntry(row, player, wire_role, list(current_chars))
 
     # ── Internals ─────────────────────────────────────────────────────
+    def _merge_gap_sec(self) -> float:
+        """Порог склейки реплик из настроек, с падением на дефолт GUI.
+
+        Поле свободнотекстовое, так что в нём может лежать что угодно, а
+        старые настройки ключа не содержат вовсе. Ни то, ни другое не
+        повод ронять мерж: обе ситуации означают «пользователь не
+        задал», то есть прежнее поведение.
+
+        Запятая принимается наравне с точкой: интерфейс русский, и
+        «2,5» — это ровно то, что человек напечатает. Отвергать её
+        молча значило бы повторить дефект, ради которого заведена
+        карточка, — поле показывает одно, мержер делает другое.
+
+        Отвергаются ровно три вещи: отрицательное число, ``inf`` и
+        ``nan``. Первое отключает склейку, второе слепляет всю сессию в
+        один абзац, третье ломает все сравнения внутри мержера — это не
+        настройки, а поломки. Верхнего предела нет намеренно: «601» —
+        странный, но осмысленный выбор, а молча подменить его дефолтом
+        значило бы повторить здесь ровно тот дефект, ради которого
+        заведена карточка, — поле показывает одно, мержер делает другое.
+        """
+        if self._preferences is None:
+            return DEFAULT_GUI_GAP_SEC
+        raw = str(self._preferences.mergerMaxGap or "").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_GUI_GAP_SEC
+        # isfinite отсекает inf и nan разом; отрицательное — отдельно.
+        if not math.isfinite(value) or value < 0.0:
+            return DEFAULT_GUI_GAP_SEC
+        return value
+
     def _renderer_name(self) -> str:
         """Формат merged.txt из настроек, с падением на plain-text.
 
@@ -576,6 +612,7 @@ class PipelineController(QObject):
             chat_log_path=chat_log,
             total_duration=total_seconds,
             combat_log_paths=combat_logs,
+            gap_sec=self._merge_gap_sec(),
             renderer_name=self._renderer_name(),
         )
         worker.moveToThread(thread)
