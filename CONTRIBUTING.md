@@ -61,6 +61,78 @@ python -m ui
 pytest tests/
 ```
 
+### The tier-2 end-to-end run — manual, and when it is owed
+
+`tests/test_e2e_tier2_semantic.py` runs the whole pipeline over the synthetic
+fixture session and compares the result with the frozen baseline
+`tests/fixtures/e2e_p2/expected_merged.txt` by token overlap (>= 0.90).
+
+It is not the only check that crosses `sources/` → `mergers/` → `renderers/`:
+`tests/test_integration_full_pipeline.py` does too, with the real merger and
+renderer, and it runs in CI. What is unique here is the other half — a real ASR
+backend instead of a fake one, and a comparison against frozen output rather
+than against a handful of assertions.
+
+Two limits, so that a pass is read for what it is worth:
+
+- **The fixture is audio only.** `tests/fixtures/e2e_p2/session/` holds three
+  FLAC tracks and a `speaker_map.json` — no chat log, no combat dump. The run
+  therefore takes the "no chat log" and "no combat dump" branches and never
+  enters `FvttChatSource` or `CombatDumpSource`. A green tier-2 run says
+  nothing about a change to those parsers.
+- **The comparison is order-blind.** `_token_overlap` scores a multiset of
+  tokens, so reordering every line of the transcript still scores 1.0. It
+  catches words that appeared, vanished or changed; it does not catch events
+  landing in the wrong order.
+
+Both are worth fixing and both have cards; until then, a change in those areas
+needs its own check rather than this one.
+
+**CI never runs it, and that is a decision rather than an oversight.** The
+suite is marked `slow` and `requires_asr`; the CI step selects
+`-m "not slow and not requires_asr"`, because the run needs a faster-whisper
+bundle of about 3.2 GB. Paying that on every pull request buys less than it
+costs — see [ADR-022](docs/adr/ADR-022-tier2-e2e-run-stays-manual.md).
+
+The price of the decision is that a person has to run it. You owe the run:
+
+- **before a release** — it is the last thing between a broken pipeline and a
+  tagged build;
+- **whenever you change `sources/`, `mergers/`, `renderers/`, `core/` or
+  `domain/`** — everything the run reads. Not just `core/pipeline.py`: it
+  imports `core.discovery`, `core.session_clock`, `core.chunking`,
+  `core.file_matchers` and the `domain` types, so a change in any of them can
+  move a timestamp, a discovered input, or a rendered line. The checks that do
+  run in CI compare against assertions somebody wrote; this one compares
+  against a frozen transcript, within the two limits above.
+
+Only `ui/` and `launcher/` are reliably outside that list — the run never
+enters them. When in doubt, run it anyway: being wrong in the other direction
+costs a tagged build.
+
+```bash
+# One-time bundle install (~3.2 GB — wheels + model weights)
+python -c "from core.backend_installers import install_backend, BackendId; \
+           install_backend(BackendId.FASTER_WHISPER_LARGE_V3_RU)"
+
+pytest tests/test_e2e_tier2_semantic.py -v -m slow
+```
+
+**A pass is `2 passed`. `2 skipped` is not a pass** — it is what the command
+prints, with exit code 0, when the bundle is missing or the install above
+failed. Both tests are guarded by `skipif(not _fw_bundle_installed())`, so the
+run reports success without ever entering the pipeline or reading the baseline.
+Read the count before you tag anything.
+
+If the output moved and the new output is the correct one, regenerate the
+baseline with `python scripts/gen_baseline_newpipeline.py` — and say in the
+pull request why the old baseline was wrong. A regenerated baseline nobody
+explains turns the check off without anyone deciding to turn it off.
+
+`tests/test_tier2_e2e_gate.py` guards the two mechanical halves of this
+section: that the suite still carries both markers, and that CI's selection
+still excludes it. It cannot check that anybody actually ran it.
+
 ### Lint and format
 
 ```bash
