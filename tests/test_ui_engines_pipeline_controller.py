@@ -634,7 +634,7 @@ def _spawn_merger_with(prefs, tmp_path: Path, monkeypatch) -> dict:
     _ensure_app()
 
     session = tmp_path / "session"
-    session.mkdir()
+    session.mkdir(parents=True, exist_ok=True)
     _write_flac_stub(session / "1-vova.flac")
 
     monkeypatch.setattr(
@@ -750,4 +750,31 @@ def test_merge_gap_reads_what_a_person_would_type(
 
     assert seen.get("gap_sec") == expected, (
         f"поле {typed!r} превратилось в {seen.get('gap_sec')!r}, ожидалось {expected}"
+    )
+
+
+def test_merge_gap_is_read_when_the_merge_starts(tmp_path: Path, monkeypatch) -> None:
+    """Значение берётся в момент сборки, а не на старте приложения.
+
+    Это и записано теперь в описании группы на экране настроек. Раньше
+    там стояло «Применяются к новым сессиям», что неправдой было и до
+    этой карточки: формат merged.txt читается ровно там же, в
+    ``_spawn_merger``. Тест закрепляет фактическое поведение, чтобы
+    текст и код не разошлись снова молча.
+
+    Вопрос, не должно ли быть наоборот — снимок настроек на старте
+    сессии, — заведён отдельной карточкой: он касается и рендерера.
+    """
+
+    prefs = _StubMergerPrefs("1.0")
+    seen = _spawn_merger_with(prefs, tmp_path, monkeypatch)
+    assert seen.get("gap_sec") == 1.0
+
+    # Пользователь открыл настройки посреди работы и поменял порог.
+    prefs.mergerMaxGap = "4.0"
+    seen = _spawn_merger_with(prefs, tmp_path / "second", monkeypatch)
+
+    assert seen.get("gap_sec") == 4.0, (
+        "правка настройки не застала следующую сборку — значит значение "
+        "где-то закешировано, и описание на экране снова врёт"
     )
