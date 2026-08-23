@@ -19,6 +19,8 @@ dropped a folder) fail fast with a user-visible error.
 
 from __future__ import annotations
 
+import math
+
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,11 +66,6 @@ def _format_bytes(size: int) -> str:
         return f"{int(round(kb))} KB"
     mb = size / (1024 * 1024)
     return f"{mb:.1f} MB"
-
-#: Верхняя граница осмысленного порога склейки, секунды. Реплики
-#: дальше десяти минут друг от друга — это не пауза в разговоре, а
-#: другая часть сессии; всё, что выше, читается как опечатка.
-MAX_SANE_GAP_SEC = 600.0
 
 
 class PipelineController(QObject):
@@ -400,11 +397,13 @@ class PipelineController(QObject):
         молча значило бы повторить дефект, ради которого заведена
         карточка, — поле показывает одно, мержер делает другое.
 
-        Диапазон нужен по той же причине. ``float`` честно вернёт
-        ``-3``, ``inf`` и ``nan``: первое отключает склейку, второе
-        слепляет всю сессию в один абзац, третье ломает все сравнения
-        внутри мержера. Ни одно из трёх не является осмысленной
-        настройкой, поэтому все три читаются как «не задано».
+        Отвергаются ровно три вещи: отрицательное число, ``inf`` и
+        ``nan``. Первое отключает склейку, второе слепляет всю сессию в
+        один абзац, третье ломает все сравнения внутри мержера — это не
+        настройки, а поломки. Верхнего предела нет намеренно: «601» —
+        странный, но осмысленный выбор, а молча подменить его дефолтом
+        значило бы повторить здесь ровно тот дефект, ради которого
+        заведена карточка, — поле показывает одно, мержер делает другое.
         """
         if self._preferences is None:
             return DEFAULT_GUI_GAP_SEC
@@ -413,8 +412,8 @@ class PipelineController(QObject):
             value = float(raw)
         except (TypeError, ValueError):
             return DEFAULT_GUI_GAP_SEC
-        # NaN проваливает сравнение сам, отдельной проверки не требует.
-        if not (0.0 <= value <= MAX_SANE_GAP_SEC):
+        # isfinite отсекает inf и nan разом; отрицательное — отдельно.
+        if not math.isfinite(value) or value < 0.0:
             return DEFAULT_GUI_GAP_SEC
         return value
 
