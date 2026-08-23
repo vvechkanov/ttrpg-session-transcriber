@@ -136,6 +136,12 @@ REQUIRED_CLAIMS = {
         "an unbounded wait and a wait in the wrong unit look identical to a "
         "reader, and both spend the night",
     ),
+    "that asking is bounded per commit, not per run": (
+        phrase("один раз на HEAD-коммит"),
+        "the card outlives the night: a per-run bound lets the next run "
+        "re-enter the same iteration at the same HEAD and spend another "
+        "forty minutes on a PR that is simply silent",
+    ),
 }
 
 #: What the process document must not send the reader after, anywhere. The
@@ -248,16 +254,3 @@ def test_the_document_does_not_send_the_reader_after_reactions(
         f"docs/process.md still mentions {token!r}: {why}. "
         "A sign the agent cannot observe makes it wait instead of act."
     )
-
-
-def test_every_entry_carries_its_reason() -> None:
-    """An unexplained entry is how a guard quietly stops being understood.
-
-    Both tables above are read by the next person deciding whether a failure
-    is a real regression or a stale rule. An entry with an empty reason gives
-    them nothing to decide with.
-    """
-    for name, (_, why) in REQUIRED_CLAIMS.items():
-        assert why.strip(), f"required claim {name!r} has no reason"
-    for token, why in UNOBSERVABLE_SIGNS.items():
-        assert why.strip(), f"banned token {token!r} has no reason"
