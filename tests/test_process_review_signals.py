@@ -142,6 +142,12 @@ REQUIRED_CLAIMS = {
         "re-enter the same iteration at the same HEAD and spend another "
         "forty minutes on a PR that is simply silent",
     ),
+    "that the invocation carries the commit it asks about": (
+        phrase("@codex review (HEAD:"),
+        "a PR comment has no commit attached, so a bare invocation cannot be "
+        "told apart from last night's — the per-commit bound is unenforceable "
+        "unless the sha is written into the call itself",
+    ),
 }
 
 #: What the process document must not send the reader after, anywhere. The
@@ -152,6 +158,10 @@ REQUIRED_CLAIMS = {
 #: point. Banning only the emoji bans a codepoint, not a signal: «Codex может
 #: также поставить реакцию — это тоже одобрение» reintroduces the exact defect
 #: with the emoji nowhere in sight.
+#:
+#: Matched case-folded, because a sentence or heading opening with «Реакция»
+#: or "Reaction" is the most natural way to write the rule back in — and a
+#: case-sensitive substring check would wave it straight through.
 #:
 #: Banned across the whole document rather than only §5 for the same reason.
 #: §6 step 3 sends the night agent into this very rule («для каждой карточки в
@@ -250,7 +260,7 @@ def test_the_document_does_not_send_the_reader_after_reactions(
     process_doc: str, token: str, why: str
 ) -> None:
     """No section depends on a signal the cloud agent cannot see."""
-    assert token not in process_doc, (
+    assert token.casefold() not in process_doc.casefold(), (
         f"docs/process.md still mentions {token!r}: {why}. "
         "A sign the agent cannot observe makes it wait instead of act."
     )
