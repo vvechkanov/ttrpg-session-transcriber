@@ -57,6 +57,11 @@ Rectangle {
                 SettingsGroup {
                     title: "Рабочая папка"
                     description: "Где хранятся файлы сессий, merged.txt и кэш ASR."
+                    // Значение никто не читает: папку сессии выбирает
+                    // FolderDialog в EmptyScreen.qml, и начальный путь ему
+                    // не передаётся. Кнопка «Выбрать…» тут и вовсе без
+                    // обработчика с Phase 4.
+                    soon: true
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -335,6 +340,11 @@ Rectangle {
                         SettingField {
                             Layout.fillWidth: true
                             label: "OOC В FOUNDRY-ЧАТЕ"
+                            // Не проводка, а несделанная фича: параметра
+                            // OOC нет ни у ScriptMerger, ни в PipelineParams,
+                            // канал не влияет ни на один рендерер, а
+                            // FvttChatSource всегда проставляет "ic".
+                            soon: true
 
                             SelectField {
                                 id: oocSelect
@@ -358,6 +368,10 @@ Rectangle {
                 // ── Interface ─────────────────────────────────────
                 SettingsGroup {
                     title: "Интерфейс"
+                    // Все три настройки группы без читателей: QTranslator
+                    // в проекте отсутствует, ToolTip в QML нет ни одного,
+                    // проигрывания звука нет вовсе.
+                    soon: true
 
                     SettingField {
                         label: "ЯЗЫК"

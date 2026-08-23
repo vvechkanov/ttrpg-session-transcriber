@@ -252,3 +252,57 @@ class TestSessionClockReachesTheOutput:
         out = self._merged(tmp_path, "plain-text")
         assert "Вова: кидай" in out
         assert "[19:11" not in out
+
+
+def _merged_lines(qtbot, session: Path, gap_sec: float) -> list[str]:
+    """merged.txt для двух реплик одного спикера с паузой 2 секунды."""
+
+    speech = [
+        SpeechSegment(start=0.0, end=1.0, speaker="Andrey", text="первая реплика", confidence=None),
+        SpeechSegment(start=3.0, end=4.0, speaker="Andrey", text="вторая реплика", confidence=None),
+    ]
+
+    worker = MergerWorker(
+        session_dir=session,
+        speech_segments=speech,
+        chat_log_path=None,
+        total_duration=60.0,
+        gap_sec=gap_sec,
+    )
+    done: list[str] = []
+    errors: list[str] = []
+    worker.done.connect(done.append)
+    worker.error.connect(errors.append)
+
+    _run_on_thread(qtbot, worker)
+
+    assert errors == [], f"unexpected errors: {errors}"
+    text = Path(done[0]).read_text(encoding="utf-8")
+    return [line for line in text.splitlines() if "реплика" in line]
+
+
+def test_gap_sec_changes_what_lands_in_merged_txt(qtbot, tmp_path: Path) -> None:
+    """Число из настроек должно менять сам файл, а не только доехать.
+
+    Проводка «настройка → конструктор воркера» проверена в тестах
+    контроллера, но она стоит ровно столько, сколько стоит последний
+    прыжок: ``MergerWorker`` → ``ScriptMerger`` → merged.txt. Здесь он
+    и проверяется на выходе — две реплики одного спикера с паузой в две
+    секунды либо склеиваются, либо нет, в зависимости от порога.
+
+    Без этого можно было бы аккуратно передать gap_sec куда-то, где он
+    ни на что не влияет, и все проверки остались бы зелёными.
+    """
+
+    wide = tmp_path / "wide"
+    wide.mkdir()
+    narrow = tmp_path / "narrow"
+    narrow.mkdir()
+
+    glued = _merged_lines(qtbot, wide, gap_sec=5.0)
+    apart = _merged_lines(qtbot, narrow, gap_sec=0.5)
+
+    assert len(glued) < len(apart), (
+        f"порог склейки ни на что не влияет: при 5.0 получилось {glued}, "
+        f"при 0.5 — {apart}"
+    )

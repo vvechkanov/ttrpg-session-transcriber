@@ -36,7 +36,8 @@ from core.speaker_map import (
 )
 from domain.annotations import SpeechSegment
 from ui.engines.asr_worker import AsrWorker, SegmentJob
-from ui.engines.merger_worker import MergerWorker
+from ui.engines.merger_worker import DEFAULT_GUI_GAP_SEC, MergerWorker
+
 from ui.models.app_model import AppModel
 from ui.models.session import SessionMeta, TrackListModel
 
@@ -63,6 +64,11 @@ def _format_bytes(size: int) -> str:
         return f"{int(round(kb))} KB"
     mb = size / (1024 * 1024)
     return f"{mb:.1f} MB"
+
+#: Верхняя граница осмысленного порога склейки, секунды. Реплики
+#: дальше десяти минут друг от друга — это не пауза в разговоре, а
+#: другая часть сессии; всё, что выше, читается как опечатка.
+MAX_SANE_GAP_SEC = 600.0
 
 
 class PipelineController(QObject):
@@ -381,6 +387,37 @@ class PipelineController(QObject):
         self.saveSpeakerMapEntry(row, player, wire_role, list(current_chars))
 
     # ── Internals ─────────────────────────────────────────────────────
+    def _merge_gap_sec(self) -> float:
+        """Порог склейки реплик из настроек, с падением на дефолт GUI.
+
+        Поле свободнотекстовое, так что в нём может лежать что угодно, а
+        старые настройки ключа не содержат вовсе. Ни то, ни другое не
+        повод ронять мерж: обе ситуации означают «пользователь не
+        задал», то есть прежнее поведение.
+
+        Запятая принимается наравне с точкой: интерфейс русский, и
+        «2,5» — это ровно то, что человек напечатает. Отвергать её
+        молча значило бы повторить дефект, ради которого заведена
+        карточка, — поле показывает одно, мержер делает другое.
+
+        Диапазон нужен по той же причине. ``float`` честно вернёт
+        ``-3``, ``inf`` и ``nan``: первое отключает склейку, второе
+        слепляет всю сессию в один абзац, третье ломает все сравнения
+        внутри мержера. Ни одно из трёх не является осмысленной
+        настройкой, поэтому все три читаются как «не задано».
+        """
+        if self._preferences is None:
+            return DEFAULT_GUI_GAP_SEC
+        raw = str(self._preferences.mergerMaxGap or "").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_GUI_GAP_SEC
+        # NaN проваливает сравнение сам, отдельной проверки не требует.
+        if not (0.0 <= value <= MAX_SANE_GAP_SEC):
+            return DEFAULT_GUI_GAP_SEC
+        return value
+
     def _renderer_name(self) -> str:
         """Формат merged.txt из настроек, с падением на plain-text.
 
@@ -576,6 +613,7 @@ class PipelineController(QObject):
             chat_log_path=chat_log,
             total_duration=total_seconds,
             combat_log_paths=combat_logs,
+            gap_sec=self._merge_gap_sec(),
             renderer_name=self._renderer_name(),
         )
         worker.moveToThread(thread)

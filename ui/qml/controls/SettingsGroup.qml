@@ -12,8 +12,19 @@ Rectangle {
     property string description: ""
     default property alias content: inner.data
 
+    // Группа объявлена, но за ней нет ни одного читателя настройки:
+    // значение ложится в QSettings и никем не используется. Такую
+    // группу выключаем и помечаем «скоро» — молча принимать ввод в
+    // никуда хуже, чем не показывать контрол вовсе.
+    property bool soon: false
+    // Осторожно: `enabled`, выставленный на месте вызова, перебивает
+    // `enabled: !soon` отсюда. Сегодня это никому не мешает (поля
+    // чанкера гасятся своим условием и `soon` не ставят), но
+    // `soon: true` вместе со своим `enabled` тихо не сработает.
+
     Layout.fillWidth: true
     Layout.bottomMargin: 16
+    enabled: !soon
     radius: Theme.radiusLg
     color: Theme.card
     border.width: 1
@@ -26,15 +37,29 @@ Rectangle {
         anchors.margins: 20
         spacing: 0
 
-        Text {
+        RowLayout {
             Layout.fillWidth: true
             Layout.bottomMargin: root.description.length > 0 ? 2 : 12
-            text: root.title
-            color: Theme.ink
-            font.family: Theme.fontSans
-            font.pixelSize: 14
-            font.weight: Font.Bold
-            font.letterSpacing: -0.2
+            spacing: 8
+
+            Text {
+                text: root.title
+                color: Theme.ink
+                font.family: Theme.fontSans
+                font.pixelSize: 14
+                font.weight: Font.Bold
+                font.letterSpacing: -0.2
+            }
+
+            Chip {
+                visible: root.soon
+                tone: "amber"
+                text: "СКОРО"
+            }
+
+            // Только под плашку: видимая всегда, она добавляла
+            // 8px к ширине каждого поля, включая рабочие.
+            Item { visible: root.soon; Layout.fillWidth: true }
         }
 
         Text {
@@ -52,6 +77,9 @@ Rectangle {
             id: inner
             Layout.fillWidth: true
             spacing: 12
+            // Приглушаем только содержимое: заголовок с пометкой должен
+            // оставаться читаемым, иначе «скоро» тонет вместе с ним.
+            opacity: root.soon ? 0.5 : 1.0
         }
     }
 }
