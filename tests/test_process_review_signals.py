@@ -148,6 +148,13 @@ REQUIRED_CLAIMS = {
         "told apart from last night's — the per-commit bound is unenforceable "
         "unless the sha is written into the call itself",
     ),
+    "that the lookup matches the call, not just the sha": (
+        phrase("не один SHA"),
+        "the agent posts other things carrying the sha — §9's «СОСТОЯНИЕ:» "
+        "names the branch commit in its text — and matching the sha alone "
+        "would read one of those as an invocation that never happened, "
+        "costing the silent PR its only call",
+    ),
 }
 
 #: What the process document must not send the reader after, anywhere. The
