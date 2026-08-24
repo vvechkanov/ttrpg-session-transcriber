@@ -33,7 +33,7 @@ from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from core.backend_installers import models_root_path
+from core.backend_installers import BackendId, models_root_path
 from ui.models import AppModel, AppPreferences, ModelRegistry
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -65,28 +65,34 @@ def screen(tmp_path_factory):
 
     home = tmp_path_factory.mktemp("models-home")
     saved = {key: os.environ.get(key) for key in _ROOT_ENV_KEYS}
-    for key in _ROOT_ENV_KEYS:
-        os.environ[key] = str(home)
 
-    app = _ensure_app()
-    QQuickStyle.setStyle("Basic")
-    qmlRegisterSingletonType(
-        QUrl.fromLocalFile(str(_QML_ROOT / "Theme.qml")), "App.Theme", 1, 0, "Theme"
-    )
-
-    registry = ModelRegistry()
-    engine = QQmlApplicationEngine()
-    engine.addImportPath(str(_QML_ROOT))
-    ctx = engine.rootContext()
-    ctx.setContextProperty("appModel", AppModel())
-    ctx.setContextProperty("preferences", AppPreferences())
-    ctx.setContextProperty("modelRegistry", registry)
-    engine.load(QUrl.fromLocalFile(str(_MODELS_QML)))
-
-    roots = engine.rootObjects()
-    assert roots, "ModelsScreen.qml failed to parse"
-    _ALIVE.append((engine, registry))
+    # Everything that can raise lives inside the try, including the
+    # engine load: `assert roots` fires exactly when someone has broken
+    # ModelsScreen.qml, and leaking a deleted tmpdir as the data home in
+    # that moment turns one broken QML line into a cascade of unrelated
+    # failures further down the run.
     try:
+        for key in _ROOT_ENV_KEYS:
+            os.environ[key] = str(home)
+
+        app = _ensure_app()
+        QQuickStyle.setStyle("Basic")
+        qmlRegisterSingletonType(
+            QUrl.fromLocalFile(str(_QML_ROOT / "Theme.qml")), "App.Theme", 1, 0, "Theme"
+        )
+
+        registry = ModelRegistry()
+        engine = QQmlApplicationEngine()
+        engine.addImportPath(str(_QML_ROOT))
+        ctx = engine.rootContext()
+        ctx.setContextProperty("appModel", AppModel())
+        ctx.setContextProperty("preferences", AppPreferences())
+        ctx.setContextProperty("modelRegistry", registry)
+        engine.load(QUrl.fromLocalFile(str(_MODELS_QML)))
+
+        roots = engine.rootObjects()
+        assert roots, "ModelsScreen.qml failed to parse"
+        _ALIVE.append((engine, registry))
         yield roots[0], registry, app
     finally:
         for key, value in saved.items():
@@ -103,27 +109,28 @@ def _button(root) -> QQuickItem:
 
 
 @pytest.mark.gui
-def test_button_is_disabled_while_there_is_no_folder(screen):
-    """First run: nothing installed, nothing to open."""
-    _root, _registry, _app = screen
-
-    assert not models_root_path().exists()
-    assert _button(_root).property("enabled") is False
-
-
-@pytest.mark.gui
 def test_install_wakes_the_button_without_rebuilding_it(screen):
-    """The regression: the binding latched ``False`` at creation time."""
+    """The regression: the binding latched ``False`` at creation time.
+
+    Both halves live in one test on purpose. Split in two, the "disabled
+    on a fresh install" half would silently depend on running before the
+    half that creates the directory — green only while pytest happens to
+    keep declaration order, and the shared module fixture makes that
+    coupling invisible.
+    """
     root, registry, app = screen
 
     button = _button(root)  # held across the install on purpose
-    assert button.property("enabled") is False
+    assert not models_root_path().exists()
+    assert button.property("enabled") is False, "nothing installed, nothing to open"
 
-    (models_root_path() / "gigaam").mkdir(parents=True)
+    (models_root_path() / "gigaam").mkdir(parents=True, exist_ok=True)
     # The slot ``InstallWorker.done`` is wired to in ``_start_worker`` —
     # driving it here exercises the real completion path (rebuild plus
-    # ``installedStateChanged``) rather than a signal invented by the test.
-    registry._on_worker_done("gigaam-rnnt-fp32")
+    # ``installedStateChanged``) rather than a signal invented by the
+    # test. The handler ignores its argument, so the id is here to name
+    # what finished, not to be checked.
+    registry._on_worker_done(BackendId.GIGAAM_RNNT_FP32.value)
     app.processEvents()
 
     assert button.property("enabled") is True, (
@@ -140,13 +147,17 @@ def test_qml_reads_the_models_root_as_a_property_everywhere():
     the moment the user clicks — which no test above would reach, because
     clicking opens a file manager.
 
-    ``//`` comments are stripped first: a guard that trips over the
-    sentence explaining it is a guard nobody keeps.
+    Whole-line ``//`` comments are dropped first: a guard that trips over
+    the sentence explaining it is a guard nobody keeps. Only whole-line
+    ones — stripping from the first ``//`` anywhere would also swallow
+    the ``"file://"`` literals two lines below the call site, and with
+    them any forgotten call written on the same line as a URL.
     """
 
     text = "\n".join(
-        line.split("//", 1)[0]
+        line
         for line in _MODELS_QML.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("//")
     )
     assert "modelsRoot()" not in text, (
         "modelsRoot is a Property, not a method: calling it raises "
