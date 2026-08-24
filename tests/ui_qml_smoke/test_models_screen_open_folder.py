@@ -11,8 +11,20 @@ The same trap is documented twice elsewhere in the project —
 ``ui/models/session.py`` (``count``/``activeCount``) and
 ``ui/qml/screens/TimelineScreen.qml`` — where a header froze at "0 из 0".
 
-The second test holds on to the *same* QQuickItem across the install, so
-it fails if the value only ever refreshes by rebuilding the component.
+Both tests run the production path rather than a model of it:
+
+* the install goes through the public ``ModelRegistry.install`` and the
+  real ``InstallWorker`` on its real ``QThread``, with only the network
+  download (``install_backend``) stubbed, so the test still fails if
+  ``install`` stops starting a worker or ``done`` stops being connected;
+* the click goes through the button's own ``onClicked``, with the
+  ``file`` scheme intercepted via ``QDesktopServices.setUrlHandler`` so
+  the assertion reads the URL the app actually asked to open instead of
+  a file manager opening on the CI runner.
+
+The second one is what catches a half-finished migration: a leftover
+``modelsRoot()`` call parses fine and only raises ``TypeError`` when the
+handler runs, which is the moment this test reproduces.
 """
 
 from __future__ import annotations
@@ -27,8 +39,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from core.pipeline import run as _warm  # noqa: F401
 
-from PySide6.QtCore import QUrl
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import QObject, QUrl, Slot
+from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -59,9 +71,16 @@ def _ensure_app() -> QGuiApplication:
     return app
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def screen(tmp_path_factory):
-    """ModelsScreen loaded against an empty, throwaway models home."""
+    """ModelsScreen loaded against an empty, throwaway models home.
+
+    Per test, not per module: both tests below care about the state of
+    the models directory, and one of them creates it. Sharing the
+    fixture would make the "nothing installed yet" assertion depend on
+    running first — green only while pytest keeps declaration order, and
+    invisible when it stops.
+    """
 
     home = tmp_path_factory.mktemp("models-home")
     saved = {key: os.environ.get(key) for key in _ROOT_ENV_KEYS}
@@ -108,15 +127,40 @@ def _button(root) -> QQuickItem:
     return found
 
 
+def _pump(app, predicate, timeout_ms: int = 10_000) -> bool:
+    """Spin the event loop until ``predicate`` holds or time runs out."""
+
+    from PySide6.QtCore import QElapsedTimer
+
+    clock = QElapsedTimer()
+    clock.start()
+    while clock.elapsed() < timeout_ms:
+        app.processEvents()
+        if predicate():
+            return True
+    return False
+
+
+class _UrlSink(QObject):
+    """Catches what the app asked the desktop to open."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.urls: list[QUrl] = []
+
+    @Slot(QUrl)
+    def handle(self, url: QUrl) -> None:
+        self.urls.append(url)
+
+
 @pytest.mark.gui
-def test_install_wakes_the_button_without_rebuilding_it(screen):
+def test_install_wakes_the_button_without_rebuilding_it(screen, monkeypatch):
     """The regression: the binding latched ``False`` at creation time.
 
-    Both halves live in one test on purpose. Split in two, the "disabled
-    on a fresh install" half would silently depend on running before the
-    half that creates the directory — green only while pytest happens to
-    keep declaration order, and the shared module fixture makes that
-    coupling invisible.
+    Both halves live in one test on purpose — "disabled while there is
+    no folder" and "enabled after the install" are two ends of one
+    transition, and asserting them apart would only re-create the
+    ordering dependency the per-test fixture exists to remove.
     """
     root, registry, app = screen
 
@@ -124,14 +168,30 @@ def test_install_wakes_the_button_without_rebuilding_it(screen):
     assert not models_root_path().exists()
     assert button.property("enabled") is False, "nothing installed, nothing to open"
 
-    (models_root_path() / "gigaam").mkdir(parents=True, exist_ok=True)
-    # The slot ``InstallWorker.done`` is wired to in ``_start_worker`` —
-    # driving it here exercises the real completion path (rebuild plus
-    # ``installedStateChanged``) rather than a signal invented by the
-    # test. The handler ignores its argument, so the id is here to name
-    # what finished, not to be checked.
-    registry._on_worker_done(BackendId.GIGAAM_RNNT_FP32.value)
-    app.processEvents()
+    # The only thing stubbed is the several-hundred-megabyte download.
+    # Everything downstream of it is the app's own: install() → QThread →
+    # InstallWorker.run → done → _on_worker_done → installedStateChanged.
+    asked_for: list[BackendId] = []
+
+    def fake_install_backend(backend_id, progress=None):
+        asked_for.append(backend_id)
+        (models_root_path() / "gigaam").mkdir(parents=True, exist_ok=True)
+        if progress is not None:
+            progress(1.0, "готово")
+
+    monkeypatch.setattr(
+        "ui.engines.install_worker.install_backend", fake_install_backend
+    )
+
+    finished: list[int] = []
+    registry.installFinished.connect(finished.append)
+
+    row = 0
+    assert registry.entryAt(row) is not None
+    registry.install(row)
+
+    assert _pump(app, lambda: bool(finished)), "install never reported finishing"
+    assert asked_for, "install() did not reach the installer through the worker"
 
     assert button.property("enabled") is True, (
         "the button held the value it had at component creation — "
@@ -139,27 +199,32 @@ def test_install_wakes_the_button_without_rebuilding_it(screen):
     )
 
 
-def test_qml_reads_the_models_root_as_a_property_everywhere():
-    """Guard against a half-finished migration.
+@pytest.mark.gui
+def test_clicking_asks_the_desktop_to_open_the_models_folder(screen):
+    """Runs the real ``onClicked``, so a stale ``modelsRoot()`` call fails.
 
-    ``modelsRoot`` is a notifying ``Property``. A leftover ``modelsRoot()``
-    call site would keep parsing and only blow up as a runtime TypeError
-    the moment the user clicks — which no test above would reach, because
-    clicking opens a file manager.
-
-    Whole-line ``//`` comments are dropped first: a guard that trips over
-    the sentence explaining it is a guard nobody keeps. Only whole-line
-    ones — stripping from the first ``//`` anywhere would also swallow
-    the ``"file://"`` literals two lines below the call site, and with
-    them any forgotten call written on the same line as a URL.
+    A leftover call site parses fine and raises ``TypeError`` only when
+    the handler runs; then nothing is opened and ``urls`` stays empty.
     """
+    root, registry, app = screen
 
-    text = "\n".join(
-        line
-        for line in _MODELS_QML.read_text(encoding="utf-8").splitlines()
-        if not line.lstrip().startswith("//")
+    (models_root_path() / "gigaam").mkdir(parents=True, exist_ok=True)
+    registry.refresh()
+    app.processEvents()
+
+    button = _button(root)
+    assert button.property("enabled") is True
+
+    sink = _UrlSink()
+    QDesktopServices.setUrlHandler("file", sink, "handle")
+    try:
+        button.metaObject().invokeMethod(button, "clicked")
+        app.processEvents()
+    finally:
+        QDesktopServices.unsetUrlHandler("file")
+
+    assert len(sink.urls) == 1, (
+        "the click opened nothing — a leftover modelsRoot() call raises "
+        "TypeError inside onClicked and swallows the whole handler"
     )
-    assert "modelsRoot()" not in text, (
-        "modelsRoot is a Property, not a method: calling it raises "
-        "'modelsRoot is not a function' at click time"
-    )
+    assert Path(sink.urls[0].toLocalFile()) == models_root_path()
