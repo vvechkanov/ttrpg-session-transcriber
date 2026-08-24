@@ -280,13 +280,19 @@ class ModelRegistry(QAbstractListModel):
 
         self._rebuild_and_reset()
 
-    @Slot(result=str)
+    @Property(str, notify=installedStateChanged)
     def modelsRoot(self) -> str:
         """Absolute path to the directory where backends are installed.
 
         Returns ``""`` if the directory does not exist yet (first run,
         no backend ever installed). QML uses this to open the folder
         in the OS file manager — a missing directory can't be opened.
+
+        A property rather than a ``Slot`` for the same reason as
+        ``installedCount`` next to it: a QML binding over a plain method
+        latches the value at component creation and never re-evaluates,
+        so «Открыть папку моделей» stayed grey after the first install
+        until the app was restarted.
         """
 
         root = models_root_path()

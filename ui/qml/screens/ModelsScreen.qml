@@ -410,11 +410,16 @@ Rectangle {
                         }
 
                         GhostButton {
+                            objectName: "openModelsFolder"
                             sizeTag: "sm"
                             text: "Открыть папку моделей"
-                            enabled: modelRegistry.modelsRoot().length > 0
+                            // Bind to the notifying property, not to a
+                            // modelsRoot() call — a binding over a plain
+                            // method never re-evaluates and this button
+                            // stayed grey after the first install.
+                            enabled: modelRegistry.modelsRoot.length > 0
                             onClicked: {
-                                var p = modelRegistry.modelsRoot()
+                                var p = modelRegistry.modelsRoot
                                 if (p.length === 0) return
                                 var u = p.replace(/\\/g, "/")
                                 Qt.openUrlExternally(u.charAt(0) === "/"
