@@ -14,8 +14,13 @@ popover, offscreen, at the production width of 380::
     LABEL  x=17.0  y=0.0   w=335.0  h=13.0
     MA     x=0.0   y=13.0  w=0.0    h=20.0
 
-A zero-width zone cannot be hit anywhere, so the whole advanced block —
-VAD, beam size, language, punctuation — was unreachable.
+A zero-width zone cannot be hit anywhere, so the block behind the
+disclosure never opened. What that block holds is a mock-up rather than
+working settings — the VAD tags carry no handler at all, the punctuation
+checkbox is bound to nothing, and language and beam size already work
+globally from the Settings screen. So what these tests pin down is a
+control that stopped being visibly broken, not settings that came within
+reach; the block's own state is filed separately.
 
 The tests press the caption in a real window rather than reading
 geometry off the fixed item. That is deliberate and is what the mutation
@@ -298,6 +303,33 @@ def test_hit_zone_spans_the_whole_caption() -> None:
 
         assert popover.property("_advanced") is True, (
             f"the {name} of the caption is not clickable"
+        )
+
+
+@pytest.mark.gui
+def test_hit_zone_is_taller_than_the_caption_glyphs() -> None:
+    """A click just off the text still counts as a click on the row.
+
+    The caption's own row is 13px. The broken zone asked for ``height:
+    20`` and never got it; sizing the fix to the row alone would have
+    left the thinnest click target in this file — the two working zones
+    beside it are 24 and 46 tall. Pressing two pixels above and below
+    the glyph band is how a user misses a 13px line, so that is what is
+    checked here rather than the number itself.
+    """
+
+    harness = _mount()
+    popover = _open(harness)
+    label = _text_item(popover, _CAPTION)
+
+    for name, y in (("above", -2.0), ("below", label.height() + 2.0)):
+        popover.setProperty("_advanced", False)
+        harness.app.processEvents()
+
+        _click(harness, label, QPointF(label.width() / 2, y))
+
+        assert popover.property("_advanced") is True, (
+            f"a click two pixels {name} the caption missed the hit zone"
         )
 
 

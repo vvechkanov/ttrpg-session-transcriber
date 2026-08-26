@@ -267,10 +267,24 @@ Popup {
             // it was handed its implicitWidth of zero and `y: -20` was
             // replaced by the layout's own flow position, so the
             // disclosure had no clickable area anywhere. Same shape as
-            // the working one in ui/qml/timeline/CastStrip.qml:106.
+            // the working disclosure in ui/qml/timeline/CastStrip.qml.
+            //
+            // The 20 is the height the broken zone asked for and never
+            // got. The caption's own row is 13px, which would leave the
+            // thinnest click target in this file — its two working
+            // zones are 24 and 46 tall. It also keeps back most of the
+            // vertical breathing room that the broken zone used to
+            // provide by accident: sized to nothing but 20 tall, it sat
+            // in the layout as an empty 20px row under the caption.
             Item {
                 Layout.fillWidth: true
-                implicitHeight: advancedHeaderRow.implicitHeight
+                implicitHeight: Math.max(advancedHeaderRow.implicitHeight, 20)
+                // Without this the section stops contributing a width
+                // hint at all. Nothing depends on it while the popover
+                // is pinned to `width: 380`, but the caption has
+                // neither elide nor wrapMode, so it would silently
+                // squash if the popover ever became content-sized.
+                implicitWidth: advancedHeaderRow.implicitWidth
 
                 RowLayout {
                     id: advancedHeaderRow
