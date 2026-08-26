@@ -259,44 +259,71 @@ Popup {
             Layout.margins: 14
             spacing: 0
 
-            RowLayout {
+            // Header. The row is wrapped in a plain Item so the click
+            // target can anchor to it: a MouseArea is an Item, and an
+            // Item placed directly in a layout is sized by the layout,
+            // not by what it asks for. The previous zone lived straight
+            // in the ColumnLayout and requested `width: parent.width`;
+            // it was handed its implicitWidth of zero and `y: -20` was
+            // replaced by the layout's own flow position, so the
+            // disclosure had no clickable area anywhere. Same shape as
+            // the working disclosure in ui/qml/timeline/CastStrip.qml.
+            //
+            // The 20 is the height the broken zone asked for and never
+            // got. The caption's own row is 13px, which would leave the
+            // thinnest click target in this file — its two working
+            // zones are 24 and 46 tall. It also keeps back most of the
+            // vertical breathing room that the broken zone used to
+            // provide by accident: sized to nothing but 20 tall, it sat
+            // in the layout as an empty 20px row under the caption.
+            Item {
                 Layout.fillWidth: true
-                spacing: 6
+                implicitHeight: Math.max(advancedHeaderRow.implicitHeight, 20)
+                // Without this the section stops contributing a width
+                // hint at all. Nothing depends on it while the popover
+                // is pinned to `width: 380`, but the caption has
+                // neither elide nor wrapMode, so it would silently
+                // squash if the popover ever became content-sized.
+                implicitWidth: advancedHeaderRow.implicitWidth
 
-                Item {
-                    Layout.preferredWidth: 11
-                    Layout.preferredHeight: 11
+                RowLayout {
+                    id: advancedHeaderRow
+                    anchors.fill: parent
+                    spacing: 6
 
-                    SvgIcon {
-                        anchors.centerIn: parent
-                        name: "chevRight"; size: 11
-                        color: Theme.ink3
-                        strokeWidth: 1.8
+                    Item {
+                        Layout.preferredWidth: 11
+                        Layout.preferredHeight: 11
 
-                        // 90° rotation when the advanced block is open.
-                        rotation: root._advanced ? 90 : 0
-                        Behavior on rotation {
-                            NumberAnimation { duration: Theme.animFast; easing.type: Easing.OutCubic }
+                        SvgIcon {
+                            anchors.centerIn: parent
+                            name: "chevRight"; size: 11
+                            color: Theme.ink3
+                            strokeWidth: 1.8
+
+                            // 90° rotation when the advanced block is open.
+                            rotation: root._advanced ? 90 : 0
+                            Behavior on rotation {
+                                NumberAnimation { duration: Theme.animFast; easing.type: Easing.OutCubic }
+                            }
                         }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "Расширенные параметры распознавания"
+                        color: Theme.ink3
+                        font.family: Theme.fontSans
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
                     }
                 }
 
-                Text {
-                    Layout.fillWidth: true
-                    text: "Расширенные параметры распознавания"
-                    color: Theme.ink3
-                    font.family: Theme.fontSans
-                    font.pixelSize: 11
-                    font.weight: Font.DemiBold
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root._advanced = !root._advanced
                 }
-            }
-
-            MouseArea {
-                width: parent.width
-                height: 20
-                y: -20
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root._advanced = !root._advanced
             }
 
             // Advanced body — shown layout-only; persistence for per-
