@@ -267,6 +267,17 @@ EVIDENCE: dict[int, tuple[Artifact, ...]] = {
             "Чанки для LLM",
             "the UI controls exist; the status line says there are none",
         ),
+        # The controls existing is not the same as their values arriving. The
+        # GUI does not reach the chunker through `core.pipeline.run` at all —
+        # it runs its own post-step in `_maybe_chunk_output`, which is the
+        # duplication tracked separately on the board. So the CLI call site
+        # above says nothing about what feature #7 actually describes: a
+        # setting that does something when you use it.
+        Artifact(
+            "ui/engines/pipeline_controller.py",
+            "dest = chunk_text_file(",
+            "the GUI's own chunk step, the one those controls feed",
+        ),
     ),
     8: (
         Artifact(
@@ -486,7 +497,10 @@ def test_the_reliability_claim_names_its_guard_and_its_limits():
         f"{STATUS_NOTES.name} claims «{RELIABILITY_CLAIM}» without naming what "
         f"checks it; expected {GUARD_NAME} on the same line, got:\n  {claim_line}"
     )
-    unnamed = [f"#{feature}" for feature in sorted(EVIDENCE) if f"#{feature}" not in claim_line]
+    # `f"#{n}" in line` would accept `#30` as a mention of `#3`, letting the
+    # sentence name features that are not the ones being checked.
+    named = {int(n) for n in re.findall(r"#(\d+)", claim_line)}
+    unnamed = [f"#{feature}" for feature in sorted(EVIDENCE) if feature not in named]
     assert not unnamed, (
         f"{STATUS_NOTES.name} does not say which features are checked against the "
         f"code; missing {', '.join(unnamed)} from:\n  {claim_line}"
