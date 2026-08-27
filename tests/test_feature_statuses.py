@@ -54,7 +54,7 @@ STATUS_NOTES = PROJECT_ROOT / "02_Статус_и_заметки.md"
 #: name it has to carry. A claim of reliability with nothing behind it is how
 #: this document earned its reputation the first time; naming the guard in the
 #: prose means the reader can check who is keeping the promise.
-RELIABILITY_CLAIM = "статусы достоверны"
+RELIABILITY_CLAIM = "Статусы сторожит"
 GUARD_NAME = "tests/test_feature_statuses.py"
 
 #: `### #8 🔮 Combat-aware renderer` — the section heading, and the number that
@@ -149,6 +149,17 @@ class Artifact:
     check would have gone green through the whole period this test exists to
     end. The symbol is what makes the artefact evidence of the *feature*
     rather than evidence of the file.
+
+    What it is not, and the limit is worth stating rather than leaving for
+    someone to discover: presence is not wiring. `SegmentJob` can exist while
+    nothing constructs one. Naming a call site rather than a bare name buys
+    part of the distance — an import no longer vouches for a deleted call —
+    but only running the feature would close it, and that would mean this
+    guard importing PySide6 and booting Qt to read a Markdown file. It is a
+    documentation guard: it settles "the document says this does not exist,
+    and here is the thing", which is what the card asked of it, and it does
+    not certify that a feature works. The suites that do that live beside it.
+    Reaching the rest is filed separately rather than smuggled in here.
     """
 
     def __init__(self, path: str, symbol: str, why: str) -> None:
@@ -196,6 +207,15 @@ EVIDENCE: dict[int, tuple[Artifact, ...]] = {
             "core/pipeline.py",
             "game_log=game_log_entries",
             "the parsed dumps reach the Timeline instead of an empty list",
+        ),
+        # The line above is the CLI path. #3 is about the on-screen timeline,
+        # and the GUI reaches the dumps by its own route — so evidence taken
+        # only from `core/pipeline.py` would keep endorsing the ✅ after the
+        # screen stopped placing combats at all.
+        Artifact(
+            "ui/models/session.py",
+            "meta = parse_combat_file(",
+            "the GUI places combats on the axis, not only the merge does",
         ),
     ),
     4: (
@@ -274,24 +294,41 @@ EVIDENCE: dict[int, tuple[Artifact, ...]] = {
 }
 
 
-def _sections(text: str) -> dict[int, tuple[int, str, list[str]]]:
-    """Split the document into `#N` sections.
+class Section:
+    """One `### #N …` block: its number, where it starts, and what is in it."""
 
-    Returns feature number → (heading line number, heading text, body lines).
+    def __init__(self, feature: int, line: int, heading: str) -> None:
+        self.feature = feature
+        self.line = line
+        self.heading = heading
+        self.body: list[str] = []
+
+    def __repr__(self) -> str:  # pragma: no cover - test failure output only
+        return f"#{self.feature} (line {self.line}): {self.heading.strip()}"
+
+
+def _sections(text: str) -> list[Section]:
+    """Split the document into `#N` sections, in the order they appear.
+
     A section runs to the next `###` heading, so the `## 🔮 Future` divider in
     the middle of the file does not truncate it — #9 and #8 live below that
     divider and are sections like any other.
+
+    A *list*, not a dict keyed on the feature number, and that is the point: a
+    section copied or moved without deleting the original leaves two blocks
+    with the same number, and keyed insertion would silently drop the first.
+    The stale copy would stay on the page, contradicting the surviving one,
+    while every check here read only the last. Kept as a list, both copies are
+    checked and :func:`test_every_feature_section_is_found` reports the
+    duplicate.
     """
-    found: dict[int, tuple[int, str, list[str]]] = {}
-    current: int | None = None
+    found: list[Section] = []
     for number, line in enumerate(text.splitlines(), start=1):
         heading = HEADING.match(line)
         if heading:
-            current = int(heading.group(1))
-            found[current] = (number, heading.group(2), [])
-            continue
-        if current is not None:
-            found[current][2].append(line)
+            found.append(Section(int(heading.group(1)), number, heading.group(2)))
+        elif found:
+            found[-1].body.append(line)
     return found
 
 
@@ -330,7 +367,11 @@ def _unbuilt_declarations(body: list[str]) -> list[str]:
         if not status:
             continue
         verdict = status.group(1)
-        if PARTIAL_ESCAPE in verdict:
+        # The escape belongs to `⚠️` and to nothing else. The legend grants it
+        # for "written but not wired", which is what `⚠️` says; on a `❌` it
+        # would let «не реализовано (частично)» wave a shipped feature
+        # through — the exact claim this file exists to refuse.
+        if PARTIAL_ESCAPE in verdict and _marker(verdict) == "⚠️":
             continue
         if any(marker in verdict for marker in UNBUILT_MARKERS) or any(
             word in verdict for word in DECLARES_UNBUILT
@@ -339,7 +380,7 @@ def _unbuilt_declarations(body: list[str]) -> list[str]:
     return declarations
 
 
-def _document() -> dict[int, tuple[int, str, list[str]]]:
+def _document() -> list[Section]:
     return _sections(FEATURE_REQUESTS.read_text(encoding="utf-8"))
 
 
@@ -353,8 +394,8 @@ def test_a_shipped_feature_is_not_declared_unbuilt(feature):
     additionally blamed a blocker — "требует #3" — that had been cleared in
     the same file it pointed at.
     """
-    sections = _document()
-    assert feature in sections, f"FEATURE_REQUESTS.md has no section for #{feature}"
+    sections = [s for s in _document() if s.feature == feature]
+    assert sections, f"FEATURE_REQUESTS.md has no section for #{feature}"
 
     missing = [artifact for artifact in EVIDENCE[feature] if not artifact.present()]
     assert not missing, (
@@ -362,8 +403,7 @@ def test_a_shipped_feature_is_not_declared_unbuilt(feature):
         + "\n".join(f"  {artifact} — {artifact.why}" for artifact in missing)
     )
 
-    _, _, body = sections[feature]
-    declarations = _unbuilt_declarations(body)
+    declarations = [d for s in sections for d in _unbuilt_declarations(s.body)]
     assert not declarations, (
         f"#{feature} is declared unbuilt while every artefact of it exists.\n"
         f"the document says:\n"
@@ -390,16 +430,27 @@ def test_a_sections_heading_and_status_agree():
     This needs no evidence table, so unlike
     :func:`test_a_shipped_feature_is_not_declared_unbuilt` it really does
     speak for every feature in the document.
+
+    A heading with no marker at all is a failure here rather than a skip.
+    Comparing two things means having two things: treating a missing marker as
+    "nothing to compare" would let a section escape by deleting precisely the
+    mark being guarded, which is cheaper than any of the edits this catches.
     """
     contradictions = []
-    for feature, (line_number, heading, body) in sorted(_document().items()):
-        claimed = _marker(heading)
-        for verdict in _status_verdicts(body):
+    for section in _document():
+        claimed = _marker(section.heading)
+        if claimed is None:
+            contradictions.append(
+                f"{section!r}: heading carries no status marker, so there is "
+                f"nothing to compare its status against"
+            )
+            continue
+        for verdict in _status_verdicts(section.body):
             declared = _marker(verdict)
-            if claimed is not None and declared is not None and claimed != declared:
+            if declared is not None and claimed != declared:
                 contradictions.append(
-                    f"#{feature} (line {line_number}): heading says «{claimed}» "
-                    f"in «{heading.strip()}», status says «{declared}» in «{verdict}»"
+                    f"{section!r}: heading says «{claimed}», "
+                    f"status says «{declared}» in «{verdict}»"
                 )
 
     assert not contradictions, "sections that contradict themselves:\n" + "\n".join(
@@ -407,14 +458,22 @@ def test_a_sections_heading_and_status_agree():
     )
 
 
-def test_the_reliability_claim_names_its_guard():
+def test_the_reliability_claim_names_its_guard_and_its_limits():
     """`02_Статус_и_заметки.md` may promise reliable statuses only while
-    something is keeping the promise.
+    something is keeping the promise, and only as far as it is kept.
 
-    The sentence «статусы достоверны» is what makes the backlog authoritative
-    for anyone arriving without context. Naming this file next to the claim
-    turns it from an assurance into a reference: the reader can see who checks
-    it, and deleting the guard breaks the sentence that depends on it.
+    That sentence is what makes the backlog authoritative for anyone arriving
+    without context. Naming this file next to it turns an assurance into a
+    reference — the reader can see who is checking.
+
+    It also has to name *which* features are checked against code, and that is
+    not decoration: the guard reads the tree for the four in :data:`EVIDENCE`
+    and, for the other five, only checks that a section does not contradict
+    itself. Two stale-but-agreeing markers pass. A blanket «статусы
+    достоверны» over all nine would be the same kind of overclaim this whole
+    file exists to remove, one level up — so the sentence is pinned to the
+    table, and adding a feature to :data:`EVIDENCE` without saying so here
+    fails.
     """
     text = STATUS_NOTES.read_text(encoding="utf-8")
 
@@ -426,6 +485,11 @@ def test_the_reliability_claim_names_its_guard():
     assert GUARD_NAME in claim_line, (
         f"{STATUS_NOTES.name} claims «{RELIABILITY_CLAIM}» without naming what "
         f"checks it; expected {GUARD_NAME} on the same line, got:\n  {claim_line}"
+    )
+    unnamed = [f"#{feature}" for feature in sorted(EVIDENCE) if f"#{feature}" not in claim_line]
+    assert not unnamed, (
+        f"{STATUS_NOTES.name} does not say which features are checked against the "
+        f"code; missing {', '.join(unnamed)} from:\n  {claim_line}"
     )
 
 
@@ -439,14 +503,25 @@ def test_every_feature_section_is_found():
     The features are required to be a gapless run from #1 rather than the
     literal nine there are today: pinning the count would turn adding #10 into
     a failing test, and a guard that punishes growth gets deleted.
+
+    Duplicates fail here rather than being tolerated. A section copied or
+    moved without deleting the original leaves two blocks claiming the same
+    number, and the stale one goes on contradicting the live one in front of
+    every reader.
     """
     sections = _document()
+    numbers = [section.feature for section in sections]
 
-    assert len(sections) >= 9, f"expected at least nine features, found {sorted(sections)}"
-    assert sorted(sections) == list(range(1, len(sections) + 1)), (
-        f"feature numbers are not a gapless run from 1: {sorted(sections)}"
+    duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
+    assert not duplicates, (
+        f"these feature numbers have more than one section: {duplicates}\n"
+        + "\n".join(f"  {s!r}" for s in sections if s.feature in duplicates)
     )
-    assert all(body for _, _, body in sections.values()), "a section came back empty"
+    assert len(sections) >= 9, f"expected at least nine features, found {sorted(numbers)}"
+    assert sorted(numbers) == list(range(1, len(sections) + 1)), (
+        f"feature numbers are not a gapless run from 1: {sorted(numbers)}"
+    )
+    assert all(section.body for section in sections), "a section came back empty"
 
 
 def test_every_section_declares_a_status():
@@ -456,7 +531,7 @@ def test_every_section_declares_a_status():
     so a section with no status line at all is invisible to them — and
     deleting a line is easier than correcting it. #1, #5 and #9 had no status
     line, which meant
-    :func:`test_no_section_declares_both_done_and_undone` was quietly saying
+    :func:`test_a_sections_heading_and_status_agree` was quietly saying
     nothing about a third of the backlog while its own docstring claimed it
     spoke for all nine.
 
@@ -472,21 +547,21 @@ def test_every_section_declares_a_status():
     close.
     """
     problems = []
-    for feature, (line_number, heading, body) in sorted(_document().items()):
-        verdicts = _status_verdicts(body)
+    for section in _document():
+        verdicts = _status_verdicts(section.body)
         if not verdicts:
-            problems.append(f"#{feature} (line {line_number}): no **Статус:** line")
+            problems.append(f"{section!r}: no **Статус:** line")
             continue
         for verdict in verdicts:
             if not verdict:
                 problems.append(
-                    f"#{feature} (line {line_number}): **Статус:** with an empty "
-                    "verdict — the word belongs on the same line"
+                    f"{section!r}: **Статус:** with an empty verdict — the word "
+                    "belongs on the same line"
                 )
             elif _marker(verdict) is None:
                 problems.append(
-                    f"#{feature} (line {line_number}): «{verdict}» carries no "
-                    f"status marker; expected one of {' '.join(MARKERS)}"
+                    f"{section!r}: «{verdict}» carries no status marker; "
+                    f"expected one of {' '.join(MARKERS)}"
                 )
 
     assert not problems, (
@@ -590,9 +665,27 @@ def test_the_heading_parser_keeps_sections_apart():
     )
     sections = _sections(document)
 
-    assert sorted(sections) == [7, 8]
-    assert _unbuilt_declarations(sections[7][2]) == []
-    assert _unbuilt_declarations(sections[8][2]) == ["❌ не реализовано"]
+    assert [section.feature for section in sections] == [7, 8]
+    assert _unbuilt_declarations(sections[0].body) == []
+    assert _unbuilt_declarations(sections[1].body) == ["❌ не реализовано"]
+
+
+def test_a_duplicated_section_is_kept_rather_than_overwritten():
+    """A section copied without deleting the original claims a number twice.
+    Keyed on the number, the first copy would vanish from every check while
+    staying on the page, contradicting the one that survived."""
+    document = "\n".join(
+        [
+            "### #3 ✅ Первая",
+            "**Статус:** ✅ готово",
+            "### #3 ❌ Забытая копия",
+            "**Статус:** ❌ не реализовано",
+        ]
+    )
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [3, 3]
+    assert _unbuilt_declarations(sections[1].body) == ["❌ не реализовано"]
 
 
 def test_the_marker_reader_takes_the_leading_verdict():
