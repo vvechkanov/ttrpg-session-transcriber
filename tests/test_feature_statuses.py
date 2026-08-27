@@ -54,7 +54,11 @@ STATUS_NOTES = PROJECT_ROOT / "02_Статус_и_заметки.md"
 #: name it has to carry. A claim of reliability with nothing behind it is how
 #: this document earned its reputation the first time; naming the guard in the
 #: prose means the reader can check who is keeping the promise.
-RELIABILITY_CLAIM = "Статусы сторожит"
+#: The claim lives on a line of its own, and that is a requirement rather than
+#: a layout preference: the bullet above it names the backlog as «фичи #1–#9»,
+#: and a range on the same line would read to the check below as a claim that
+#: #1 and #9 are code-verified.
+RELIABILITY_CLAIM = "Чем сторожатся статусы"
 GUARD_NAME = "tests/test_feature_statuses.py"
 
 #: `### #8 🔮 Combat-aware renderer` — the section heading, and the number that
@@ -334,12 +338,22 @@ def _sections(text: str) -> list[Section]:
     duplicate.
     """
     found: list[Section] = []
+    current: Section | None = None
     for number, line in enumerate(text.splitlines(), start=1):
         heading = HEADING.match(line)
         if heading:
-            found.append(Section(int(heading.group(1)), number, heading.group(2)))
-        elif found:
-            found[-1].body.append(line)
+            current = Section(int(heading.group(1)), number, heading.group(2))
+            found.append(current)
+        elif line.startswith("### "):
+            # Any other `###` ends the block rather than being swallowed by
+            # it. Without this a feature that lost its own status would
+            # borrow the verdict of whatever `###` section came next and read
+            # as compliant. `## …` does not close anything: the
+            # `## 🔮 Future` divider sits between two features, and treating
+            # it as a boundary would truncate the ones below it.
+            current = None
+        elif current is not None:
+            current.body.append(line)
     return found
 
 
@@ -382,10 +396,17 @@ def _unbuilt_declarations(body: list[str]) -> list[str]:
         # for "written but not wired", which is what `⚠️` says; on a `❌` it
         # would let «не реализовано (частично)» wave a shipped feature
         # through — the exact claim this file exists to refuse.
-        if PARTIAL_ESCAPE in verdict and _marker(verdict) == "⚠️":
+        leading = _marker(verdict)
+        if PARTIAL_ESCAPE in verdict and leading == "⚠️":
             continue
-        if any(marker in verdict for marker in UNBUILT_MARKERS) or any(
-            word in verdict for word in DECLARES_UNBUILT
+        # The *leading* marker is the verdict, matching what :func:`_marker`
+        # already promises and what the heading comparison already does.
+        # Searching the whole string would read «✅ готово; прежний статус ⚠️
+        # частично» as a claim that the feature is unbuilt, and fail an
+        # honest historical note. Wordings are consulted only when there is
+        # no marker to go by.
+        if leading in UNBUILT_MARKERS or (
+            leading is None and any(word in verdict for word in DECLARES_UNBUILT)
         ):
             declarations.append(verdict.strip())
     return declarations
@@ -500,10 +521,14 @@ def test_the_reliability_claim_names_its_guard_and_its_limits():
     # `f"#{n}" in line` would accept `#30` as a mention of `#3`, letting the
     # sentence name features that are not the ones being checked.
     named = {int(n) for n in re.findall(r"#(\d+)", claim_line)}
-    unnamed = [f"#{feature}" for feature in sorted(EVIDENCE) if feature not in named]
-    assert not unnamed, (
-        f"{STATUS_NOTES.name} does not say which features are checked against the "
-        f"code; missing {', '.join(unnamed)} from:\n  {claim_line}"
+    # Both directions. Naming every checked feature stops the sentence from
+    # understating the guard; refusing an unchecked one stops it overstating —
+    # and overstating is the failure this whole file exists to remove. A claim
+    # that #9 is code-verified would be the old lie in a new place.
+    assert named == set(EVIDENCE), (
+        f"{STATUS_NOTES.name} must name exactly the features checked against the "
+        f"code.\n  claims: {sorted(named) or 'none'}\n  checked: {sorted(EVIDENCE)}\n"
+        f"  line: {claim_line}"
     )
 
 
@@ -682,6 +707,40 @@ def test_the_heading_parser_keeps_sections_apart():
     assert [section.feature for section in sections] == [7, 8]
     assert _unbuilt_declarations(sections[0].body) == []
     assert _unbuilt_declarations(sections[1].body) == ["❌ не реализовано"]
+
+
+def test_a_non_feature_heading_ends_the_block():
+    """Otherwise a feature that lost its own status borrows the next section's.
+
+    `## …` still does not close a block — the `## 🔮 Future` divider sits
+    between two features — but any other `###` does, exactly as the parser's
+    docstring has always claimed."""
+    document = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "какой-то текст",
+            "### Приложение",
+            "**Статус:** ✅ готово",
+        ]
+    )
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [3]
+    assert _status_verdicts(sections[0].body) == [], (
+        "#3 has no status of its own and must not inherit the appendix's"
+    )
+
+
+def test_a_historical_marker_later_in_the_line_is_not_the_verdict():
+    """`_marker` calls the leading marker authoritative; this classification
+    has to agree with it, or an honest note about what the status used to be
+    fails the evidence guard."""
+    assert _unbuilt_declarations(
+        ["**Статус:** ✅ готово; прежний статус ⚠️ частично"]
+    ) == []
+    assert _unbuilt_declarations(["**Статус:** ⚠️ ядро есть, UI нет"]) == [
+        "⚠️ ядро есть, UI нет"
+    ]
 
 
 def test_a_duplicated_section_is_kept_rather_than_overwritten():
