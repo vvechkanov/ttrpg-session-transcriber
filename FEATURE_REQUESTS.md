@@ -9,11 +9,38 @@
   или реестр есть с одним-единственным наполнением.
 - ❌ **нет** — с нуля.
 - 🅿️ **запаркована** — осознанно отложено.
+- 📋 **спроектировано** — решение принято и записано, кода ещё нет.
 - 🔮 **future** — спроектировано, делаем позже.
+
+**Статусы сторожит машина.** `tests/test_feature_statuses.py` держит три
+проверки:
+
+1. Значок в заголовке секции и значок в строке `**Статус:**` — один и тот
+   же. Не «✅ сверху и ❌ снизу нельзя», а именно равенство: иначе достаточно
+   переименовать заголовок, чтобы секция выпала из проверки.
+2. Фича не может числиться несделанной, пока в дереве лежат все названные
+   её артефакты. Артефакт — это путь **и** символ внутри него, причём
+   закомментированные строки не считаются: реестр, из которого запись
+   закомментировали, больше не доказывает ничего.
+3. Каждая секция обязана нести строку `**Статус:**`, и значок должен стоять
+   на той же строке. Иначе первые две молча её пропускают, и стереть статус
+   (или перенести его на строку ниже — markdown это склеит) оказывается
+   дешевле, чем поправить.
+
+Это тот класс расхождений, который копится сам собой: секция росла сверху —
+новый блок `> **Итерация N ✅**` приписывался к началу, — а исходная заявка
+внизу оставалась в том виде, в каком её завели, и именно её читатель встречал
+последней.
+
+Машина не выбирает между ✅ и ⚠️: это продуктовое суждение, и оно остаётся за
+человеком. Она говорит только «файл есть, а документ пишет, что его нет».
+Когда ⚠️ верен по существу — модуль написан, но его никто не зовёт, — пометь
+строку статуса словом `(частично)`, и проверка пропустит её. Это заявление, а
+не глушилка: пометка означает, что статус сверили с кодом.
 
 ---
 
-## Текущий бэклог (7 фич)
+## Текущий бэклог (8 фич)
 
 ### #1 🅿️ Инсталлер — запаркован
 
@@ -27,6 +54,8 @@ Phase 9, коммит `0930ba3`). L1+L2 uninstall — коммит `bf4713d`.
 **Правило:** при работе над другими фичами не ломать `launcher/`,
 но и не тратить время на `.exe`-сборку / смоук-тесты, пока явно
 не разморозим.
+
+**Статус:** 🅿️ запаркована — код в `launcher/` жив, сборка отстала
 
 ---
 
@@ -68,7 +97,7 @@ layout-only. См. future #9.
 
 ---
 
-### #3 ✅ Единая ось времени — итерация 3a готова
+### #3 ✅ Единая ось времени — абсолютная, открыт дефект окна (3b)
 
 > **Итерация 3a ✅** (2026-04-21) — абсолютные startPct/endPct для
 > source rows. Новый модуль `core/timeline_window.py`:
@@ -83,13 +112,15 @@ layout-only. См. future #9.
 > **51.69%**, endPct **85.11%**. Тесты: 346 passed, 5 skipped, 36
 > новых тестов.
 >
-> **Что НЕ сделано (итерация 3b, future):** `TimelineRuler.qml` всё
+> **Что НЕ сделано (на момент 3a):** `TimelineRuler.qml` всё
 > ещё в относительных минутах — нужна отдельная итерация для
 > абсолютных часов (20:00, 21:00...). Track lanes остаются
 > full-width (при одном Craig это корректно; multi-Craig — #4).
+> *Оба пункта закрыты позже — см. итерацию 3b ниже и #4.*
 
 > **Найдено 2026-08-02 — окно оси строится по дефолту, а не по реальной длине.**
-> [ui/models/session.py:1179](ui/models/session.py) вызывает `build_window(...)`
+> `SourceListModel.loadFromDir` ([ui/models/session.py](ui/models/session.py))
+> вызывает `build_window(...)`
 > с `max_track_duration=None` («tracks probe asynchronously; 3a ignores them»).
 > Окно считается один раз при открытии сессии, когда длительности ещё не
 > известны, и берёт дефолтные 4 часа. Когда `PeaksWorker` приносит настоящие
@@ -116,32 +147,41 @@ layout-only. См. future #9.
 от своего `info.txt Start time` до `Start time + duration`. Ось
 нормализована к `[min(all_starts), max(all_ends)]`.
 
-**Статус:** ⚠️ каркас готов, парсинг таймстемпов нет
-- `SourceLaneRow` уже умеет `startPct/endPct` с border + tick
-  marks ([ui/qml/timeline/SourceLaneRow.qml](ui/qml/timeline/SourceLaneRow.qml)).
-- `SourceListModel.loadFromDir` находит чат+бой и создаёт ряды,
-  **но** `startPct=0, endPct=100` захардкожены
-  ([ui/models/session.py:640](ui/models/session.py)) — комментарий
-  прямо: "precise timeline offsets require timestamp parsing that's
-  out of scope until Phase 7".
-- `TimelineRuler` получает `totalMinutes` из `SessionMeta` — сейчас
-  это max длительности трека, не реальный диапазон сессии.
-- `FvttChatSource` уже парсит chat с привязкой к `info.txt` (для
-  merged.txt), но результат не долетает до `SourceListModel`.
-- `Бой N.txt` вообще не парсится ни для UI, ни для merged
-  (`Timeline(game_log=[])` в [core/pipeline.py:123](core/pipeline.py)).
+**Статус:** ✅ ось абсолютная, бои парсятся; открыт один дефект окна
 
-**Что делать:**
-1. `CombatSource` (core) — читает `Бой N.txt`, возвращает
-   `(started_at, ended_at, encounter_name, initiative)` в UTC.
-2. `SessionMeta` расширить: `absoluteStart`, `absoluteEnd`, метод
-   `pctForTime(dt_utc) -> float`.
-3. `SourceListModel.loadFromDir` вызывает chat/combat parser'ы и
-   считает startPct/endPct через SessionMeta.
-4. `TrackListModel` rows получают `startPct/endPct` из
-   `info.txt Start time` + ffprobe duration.
-5. `TimelineRuler` показывает реальные часы (18:00, 19:00, ...)
-   вместо относительных минут.
+Пять пунктов, которыми прежний статус объяснял «каркас готов, парсинга нет»:
+- `SourceLaneRow` умеет `startPct/endPct` с border + tick marks
+  ([ui/qml/timeline/SourceLaneRow.qml](ui/qml/timeline/SourceLaneRow.qml)).
+- `SourceListModel.loadFromDir` считает проценты через
+  `TimelineWindow.pct_for`, а не константами: чат и бой получают
+  реальные границы ([ui/models/session.py](ui/models/session.py)).
+  `0.0/100.0` остались как fallback — когда окна нет, когда чат
+  распарсился пустым и когда `parse_combat_file` вернул `None` на
+  битом дампе; в последнем случае намеренно, чтобы полоса во всю
+  ширину была видна как «что-то не так».
+- `TimelineRuler` печатает абсолютные часы: режим `_wallClock`
+  сажает тики на настоящие получасы и подписывает их как `20:00`
+  ([ui/qml/timeline/TimelineRuler.qml](ui/qml/timeline/TimelineRuler.qml)).
+  Режим включается, когда офсет чат-лога разрешён надёжно; если резолвер
+  лишь угадал, `windowStartClockMinutes` отдаёт `-1`, и линейка
+  возвращается к относительным минутам.
+- Чат долетает до `SourceListModel`: `chat_timeline`
+  ([core/timeline_window.py](core/timeline_window.py)) даёт и span ряда, и
+  точки плотности, и офсет для часов линейки. Идёт он не через
+  `FvttChatSource` — тот остался на пути `merged.txt`, — а через
+  `parse_fvtt_log` и `resolve_tz_offset`, соседей по модулю; логику
+  вычитания офсета `chat_timeline` намеренно повторяет, о чём сказано в
+  его же докстринге.
+- `Бой N.txt` парсится: `CombatDumpSource`
+  ([sources/game_log/combat_dump.py](sources/game_log/combat_dump.py))
+  для merged, `parse_combat_file` для UI. В пайплайн они приходят как
+  `game_log=game_log_entries` ([core/pipeline.py](core/pipeline.py)),
+  а не пустым списком.
+
+**Осталось (итерация 3b):** дефект окна из блока выше — `build_window`
+зовётся один раз с `max_track_duration=None` и не пересчитывается, когда
+`durationReady` приносит настоящие длительности. Чисто визуальный сдвиг
+полос; на `merged.txt` не влияет.
 
 ---
 
@@ -191,15 +231,15 @@ layout-only. См. future #9.
 оба должны подхватиться как единый набор треков (с разделением
 на сегменты по времени).
 
-**Статус:** ❌ не поддерживается
-- `_iter_session_files` в [core/file_matchers.py:76](core/file_matchers.py)
-  прямо документирует "no recursion into subfolders". Откроешь
-  Сессию 6 — получишь 0 аудио-файлов.
+**Статус:** ✅ поддерживается — 4a discovery, 4b per-segment ASR и peaks
 
-**Что делать:** расширить discovery до одного уровня подпапок с
-префиксом `craig-*` / `крэйг-*`, стыковать треки одного игрока
-через Discord-канал (`sir.o.genri#0`), два Craig по `info.txt`
-Start time превращаются в два сегмента на общей оси (см. #3).
+Discovery спускается в подпапки `craig-*` / `крэйг-*`: `CraigSegment`,
+`detect_craig_segments()` и `match_speaker()` в
+[core/file_matchers.py](core/file_matchers.py). Треки одного игрока из
+разных архивов сходятся в один ряд по нормализованному имени, сегменты
+сортируются по `start_ts` и встают на общую ось через
+`TimelineWindow.pct_for` (см. #3). ASR и peaks считаются по каждому
+сегменту — итерация 4b.
 
 ---
 
@@ -238,6 +278,8 @@ player + character, один игрок может иметь несколько
 - `TrackOverridePopover` (модель ASR) и `SpeakerMapPopover`
   (player/character) — два независимых попапа на одной строке.
 
+**Статус:** ✅ готово — итерация 5b закрыта
+
 **Future (5c, если потребуется):**
 - Per-character notes/tags — schema это уже умеет (extras),
   UI пока нет.
@@ -251,7 +293,7 @@ player + character, один игрок может иметь несколько
 на локальных моделях — исправляет ASR-ошибки, склеивает реплики,
 вплетает fvtt-чат в правильные места.
 
-**Статус:** анализ ML-specialist готов (2026-04-21), реализация
+**Статус:** 📋 анализ ML-specialist готов (2026-04-21), реализация
 разбита на 3 этапа.
 
 #### Технические решения (ML-specialist)
@@ -348,15 +390,56 @@ revised.txt). Qwen2.5 7B, окно 20 мин, только задача (A).
 с каким overlap, какой размер чанка. Готовим на скармливание в
 LLM для постобработки.
 
-**Статус:** ⚠️ core есть, пайплайн не зовёт, UI нет
-- `core/chunking.py` + `scripts/chunk_text.py` существуют,
-  но `pipeline.run()` не вызывает чанкер — только рендерит merged.
-- Ни в одном QML-экране нет контролов чанкера.
+**Статус:** ✅ пайплайн зовёт, UI есть
 
-**Что делать:** либо сделать чанкер отдельным Renderer-ом
-(`"chunks"` в `RENDERERS` с параметрами), либо post-step после
-render. UI — `ChunkerSettingsGroup` в SettingsScreen или секция
-на Done-фазе TimelineScreen.
+- `core/chunking.py` + `scripts/chunk_text.py` на месте, и `pipeline.run()`
+  вызывает `chunk_text_file` post-step'ом — стадия `"chunk"` между
+  `render` и `done` ([core/pipeline.py](core/pipeline.py)). Стадия
+  условная: чанкер работает, когда `chunking.enabled`, а по умолчанию
+  выключен.
+- Контролы есть: группа «Чанки для LLM» в
+  [ui/qml/screens/SettingsScreen.qml](ui/qml/screens/SettingsScreen.qml)
+  (toggle + chunk_chars + overlap), персист через `AppPreferences` под
+  `chunking/*`.
+
+Из двух развилок «Что делать» выбрана вторая — post-step, а не отдельный
+рендерер; решение записано в блоке архитектора выше.
+
+---
+
+### #8 ✅ Combat-aware renderer
+
+> **Реализовано ✅** — три коммита `fe0a7a6` → `03e337a` → `c69203a`.
+> `CombatAwareRenderer` в [renderers/combat_aware.py](renderers/combat_aware.py)
+> потребляет `Timeline.game_log`; реестр `RENDERERS` в
+> [renderers/\_\_init\_\_.py](renderers/__init__.py) отдаёт его по ключу
+> `"combat-aware"`, `MergerWorker` резолвит рендерер через реестр с
+> fallback на `plain-text`. В `SettingsScreen` — «ФОРМАТ merged.txt»
+> с пунктом «С разметкой боёв», персист через `AppPreferences`
+> (`merger/renderer`). Вне боя вывод побайтово совпадает с `plain-text`.
+> Тесты: [tests/test_renderers_combat_aware.py](tests/test_renderers_combat_aware.py),
+> 28 проверок.
+
+**Что хотим:** альтернатива `plain-text` рендереру — формат,
+который особым образом маркирует бой в транскрипте. Внутри блока
+боя: initiative order сверху, реплики помечены раундами/ходами,
+в конце блока — результат.
+
+Пример фрагмента:
+
+```
+━━━ БОЙ 1: Мост Гоблинов ━━━  [20:15 – 21:38]
+Инициатива: Киран (28) → Дариус (24) → Бель (19) → Самум (15)
+Раунд 1 · ход Кирана
+  [20:15] Лиля (Киран): каст Fireball на центральную группу, DC 18
+  ...
+━━━ Конец боя: победа, XP +1200 ━━━
+```
+
+**Статус:** ✅ готово
+
+Блокер «требует #3» снят вместе с #3: бои парсятся и приходят в
+`Timeline` как `game_log`, а не пустым списком.
 
 ---
 
@@ -366,7 +449,7 @@ render. UI — `ChunkerSettingsGroup` в SettingsScreen или секция
 
 **Что хотим:** advanced-блок `TrackOverridePopover` (сейчас layout-only
 с захардкоженными "агрессивный" / beam `5` / "Русский" —
-[ui/qml/popovers/TrackOverridePopover.qml:303](ui/qml/popovers/TrackOverridePopover.qml))
+[ui/qml/popovers/TrackOverridePopover.qml](ui/qml/popovers/TrackOverridePopover.qml))
 привязать к реальному per-row override. Один трек — свой device/
 beam/variant, остальные берут глобальные из Settings.
 
@@ -389,35 +472,6 @@ beam/variant, остальные берут глобальные из Settings.
 `64a497c`) — для per-track достаточно добавить `merged_with` метод,
 контракт `make_source` не меняется.
 
----
-
-### #8 🔮 Combat-aware renderer
-
-**Что хотим:** альтернатива `plain-text` рендереру — формат,
-который особым образом маркирует бой в транскрипте. Внутри блока
-боя: initiative order сверху, реплики помечены раундами/ходами,
-в конце блока — результат.
-
-Пример фрагмента:
-
-```
-━━━ БОЙ 1: Мост Гоблинов ━━━  [20:15 – 21:38]
-Инициатива: Киран (28) → Дариус (24) → Бель (19) → Самум (15)
-Раунд 1 · ход Кирана
-  [20:15] Лиля (Киран): каст Fireball на центральную группу, DC 18
-  ...
-━━━ Конец боя: победа, XP +1200 ━━━
-```
-
-**Статус:** ❌ не реализовано
-- `RENDERERS` реестр есть ([core/pipeline.py:21](core/pipeline.py)),
-  но только `plain-text`.
-- **Блокер:** требует #3 (combat-aware Timeline с `game_log`,
-  а не пустым списком).
-
-**Что делать:** новый `CombatAwareRenderer` в `renderers/`,
-потребляет `Timeline.game_log` (combat events), маркирует в
-выводе. В SettingsScreen → dropdown "Рендерер": `plain-text` /
-`screenplay` / `combat-aware`.
+**Статус:** 🔮 future — поповер нарисован, проводки к per-row override нет
 
 ---
