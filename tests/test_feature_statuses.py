@@ -68,7 +68,13 @@ HEADING = re.compile(r"^###\s+#(\d+)\s+(.*)$")
 #: `**Статус:** ❌ не реализовано`. Bold, at the start of a line, because the
 #: word also appears mid-sentence in prose that is describing history rather
 #: than declaring anything.
-STATUS_LINE = re.compile(r"^\s*(?:>\s*)?\*\*Статус:\*\*\s*(.*)$")
+#: Up to three leading spaces, which is all Markdown allows before a line
+#: keeps its meaning — a fourth makes it an indented code block, and `^\s*`
+#: would read such an example as the section's real verdict.
+STATUS_LINE = re.compile(r"^ {0,3}(?:>\s*)?\*\*Статус:\*\*\s*(.*)$")
+
+#: Opening or closing fence of a code block, ``` or ~~~.
+FENCE = re.compile(r"^ {0,3}(?:```|~~~)")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
 #: marker rather than the sentence is what makes this checkable at all: the
@@ -339,7 +345,18 @@ def _sections(text: str) -> list[Section]:
     """
     found: list[Section] = []
     current: Section | None = None
+    fenced = False
     for number, line in enumerate(text.splitlines(), start=1):
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            # A fenced block is an example, not a claim. The legend added to
+            # `FEATURE_REQUESTS.md` documents how to write a status line, so
+            # the first person to show one in a code block would otherwise
+            # hand this parser a verdict — and could then delete the section's
+            # real status without any check noticing.
+            continue
         heading = HEADING.match(line)
         if heading:
             current = Section(int(heading.group(1)), number, heading.group(2))
@@ -707,6 +724,22 @@ def test_the_heading_parser_keeps_sections_apart():
     assert [section.feature for section in sections] == [7, 8]
     assert _unbuilt_declarations(sections[0].body) == []
     assert _unbuilt_declarations(sections[1].body) == ["❌ не реализовано"]
+
+
+def test_an_example_status_is_not_a_status():
+    """The legend documents how to write a status line, so the first person to
+    illustrate one in a code block would hand this parser a verdict — and
+    could then delete the section's real status with nothing noticing."""
+    fenced = "\n".join(
+        ["### #3 ✅ Ось", "Пишется так:", "```", "**Статус:** ✅ готово", "```"]
+    )
+    indented = "\n".join(["### #3 ✅ Ось", "Пишется так:", "    **Статус:** ✅ готово"])
+
+    assert _status_verdicts(_sections(fenced)[0].body) == []
+    assert _status_verdicts(_sections(indented)[0].body) == []
+    # …while a real one, at the margin, still reads.
+    real = "\n".join(["### #3 ✅ Ось", "**Статус:** ✅ готово"])
+    assert _status_verdicts(_sections(real)[0].body) == ["✅ готово"]
 
 
 def test_a_non_feature_heading_ends_the_block():
