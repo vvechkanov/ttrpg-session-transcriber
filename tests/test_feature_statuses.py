@@ -63,7 +63,12 @@ GUARD_NAME = "tests/test_feature_statuses.py"
 
 #: `### #8 🔮 Combat-aware renderer` — the section heading, and the number that
 #: identifies the feature.
-HEADING = re.compile(r"^###\s+#(\d+)\s+(.*)$")
+#: Up to three leading spaces, for the same reason :data:`STATUS_LINE` and
+#: :data:`FENCE` allow them: Markdown still renders such a line as a heading.
+#: Anchored at column zero, an indented `### #10` was folded into the previous
+#: section's body — the gapless-number check still counted #1–#9, the marker
+#: comparison never saw it, and a rendered section sat on the page unguarded.
+HEADING = re.compile(r"^ {0,3}###\s+#(\d+)\s+(.*)$")
 
 #: `**Статус:** ❌ не реализовано`. Bold, at the start of a line, because the
 #: word also appears mid-sentence in prose that is describing history rather
@@ -84,7 +89,14 @@ STATUS_LINE = re.compile(r"^ {0,3}(?:>\s*)?\*\*Статус:\*\*\s*(.*)$")
 #: Whatever follows is then read as document text, so an example
 #: `**Статус:**` becomes a real verdict and the section's actual status can be
 #: deleted with every guard here still green.
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$")
+#:
+#: The blockquote prefix is accepted for the same reason :data:`STATUS_LINE`
+#: accepts it: the two have to agree about what a line is. While they
+#: disagreed, a fenced example written inside a blockquote — the shape this
+#: document already uses for its `> **Итерация N ✅**` notes — never opened a
+#: block at all, so the `> **Статус:**` inside it was read as the section's
+#: real verdict, and the real one could then be deleted unnoticed.
+FENCE = re.compile(r"^ {0,3}(?:>\s*)?(`{3,}|~{3,})[ \t]*(.*)$")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
 #: marker rather than the sentence is what makes this checkable at all: the
@@ -422,6 +434,36 @@ def _status_verdicts(body: list[str]) -> list[str]:
         for line in body
         if (status := STATUS_LINE.match(line)) is not None
     ]
+
+
+def _self_contradicting_verdicts(body: list[str]) -> list[str]:
+    """Verdicts that lead with `✅` and then say the code is not there.
+
+    `**Статус:** ✅ не реализовано` passes every other guard in this file, and
+    that is not an oversight in any one of them — it is what happens when they
+    are combined. The heading/status comparison sees `✅` on both sides and
+    agrees. :func:`_unbuilt_declarations` consults :data:`DECLARES_UNBUILT`
+    only when there is no leading marker, so a marker being present is exactly
+    what hides the wording. And the third guard only asks that a status line
+    exist.
+
+    So the wording fallback, which reads as the file's safety net, is
+    unreachable for any real section: every verdict is separately required to
+    carry a marker. This check is that net, put back where it can catch
+    something — and it stays deliberately narrow, firing only on a `✅`, since
+    on any other marker the words and the emoji already agree.
+    """
+    contradictions = []
+    for line in body:
+        status = STATUS_LINE.match(line)
+        if not status:
+            continue
+        verdict = status.group(1)
+        if _marker(verdict) == DECLARES_BUILT and any(
+            word in verdict for word in DECLARES_UNBUILT
+        ):
+            contradictions.append(verdict.strip())
+    return contradictions
 
 
 def _unbuilt_declarations(body: list[str]) -> list[str]:
@@ -895,3 +937,75 @@ def test_designed_and_future_verdicts_declare_a_feature_unbuilt():
         ], f"{marker} no longer reads as a claim that the code is absent"
 
     assert _unbuilt_declarations(["**Статус:** ✅ готово"]) == []
+
+
+def test_no_section_says_built_and_unbuilt_in_the_same_verdict():
+    """The document itself, against the contradiction the others let through.
+
+    Run over `_document()` rather than a fixture, because this is a claim
+    about `FEATURE_REQUESTS.md` as it stands and not about the parser.
+    """
+    contradictions = {
+        section.feature: bad
+        for section in _document()
+        if (bad := _self_contradicting_verdicts(section.body))
+    }
+
+    assert not contradictions, (
+        f"a status leads with {DECLARES_BUILT} and then says the code is not "
+        f"there: {contradictions}. Every other guard reads these as agreeing."
+    )
+
+
+def test_a_built_marker_does_not_hide_unbuilt_wording():
+    """The check above can only fire if the helper classifies this shape.
+
+    Pinned separately from the document so that the guard keeps its meaning on
+    the day `FEATURE_REQUESTS.md` happens to contain no contradiction at all —
+    which is, with luck, every day.
+    """
+    assert _self_contradicting_verdicts(["**Статус:** ✅ не реализовано"]) == [
+        "✅ не реализовано"
+    ]
+    assert _self_contradicting_verdicts(["**Статус:** ✅ готово"]) == []
+    # An honest historical note mentions another *marker*, not another verdict
+    # in words, and must stay sayable — this is the case the leading-marker
+    # rule was introduced for in the first place.
+    assert _self_contradicting_verdicts(["**Статус:** ✅ готово; было ⚠️"]) == []
+
+
+def test_an_indented_heading_is_still_a_section():
+    """Markdown renders it as a heading, so the guard has to see it as one."""
+    document = "\n".join(
+        [
+            "### #9 🔮 Девятая",
+            "**Статус:** 🔮 future",
+            "   ### #10 🔮 Десятая",
+            "   **Статус:** 🔮 future",
+        ]
+    )
+
+    assert [section.feature for section in _sections(document)] == [9, 10]
+
+
+def test_a_fenced_example_inside_a_blockquote_is_not_a_verdict():
+    """`STATUS_LINE` reads through `>`, so `FENCE` has to as well.
+
+    The document writes its iteration notes as blockquotes, so this is the
+    shape an example would actually be written in — and while the two regexes
+    disagreed, such a block never opened at all.
+    """
+    document = "\n".join(
+        [
+            "### #3 ✅ Единая ось времени",
+            "**Статус:** ✅ готово",
+            "> ```",
+            "> **Статус:** ❌ не реализовано",
+            "> ```",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert _status_verdicts(sections[0].body) == ["✅ готово"]
+    assert _unbuilt_declarations(sections[0].body) == []
