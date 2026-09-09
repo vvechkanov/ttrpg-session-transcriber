@@ -401,25 +401,33 @@ def _sections(text: str) -> list[Section]:
     fence: str | None = None
     commented = False
     for number, line in enumerate(text.splitlines(), start=1):
-        if commented:
-            commented = not COMMENT_CLOSE.search(line)
-            continue
-        if COMMENT_OPEN.search(line) and not COMMENT_CLOSE.search(line):
-            commented = True
-            continue
-        if match := FENCE.match(line):
-            run, trailing = match.group(1), match.group(2)
-            if fence is None:
-                fence = run
-            elif run[0] == fence[0] and len(run) >= len(fence) and not trailing:
-                fence = None
-            continue
+        # Whichever construct opened first is the one that governs, and each
+        # is closed only by its own delimiter. Testing them in a fixed order
+        # instead — comments before fences, as this did — lets a literal
+        # `<!--` inside a fenced example switch the parser into comment mode,
+        # where it swallows the rest of the file hunting for `-->`. Markdown
+        # renders that token as code and keeps rendering everything after the
+        # closing fence, so whole sections would vanish from the guard while
+        # the gapless-count check, seeing #1-#9 intact, stayed green.
         if fence is not None:
+            if match := FENCE.match(line):
+                run, trailing = match.group(1), match.group(2)
+                if run[0] == fence[0] and len(run) >= len(fence) and not trailing:
+                    fence = None
             # A fenced block is an example, not a claim. The legend added to
             # `FEATURE_REQUESTS.md` documents how to write a status line, so
             # the first person to show one in a code block would otherwise
             # hand this parser a verdict — and could then delete the section's
             # real status without any check noticing.
+            continue
+        if commented:
+            commented = not COMMENT_CLOSE.search(line)
+            continue
+        if match := FENCE.match(line):
+            fence = match.group(1)
+            continue
+        if COMMENT_OPEN.search(line) and not COMMENT_CLOSE.search(line):
+            commented = True
             continue
         heading = HEADING.match(line)
         if heading:
@@ -1089,3 +1097,48 @@ def test_a_status_inside_an_html_comment_is_not_a_verdict():
 
     assert [section.feature for section in sections] == [3]
     assert _status_verdicts(sections[0].body) == []
+
+
+def test_a_comment_opener_inside_a_fence_does_not_swallow_the_document():
+    """Whichever construct opened first governs; each closes only on its own.
+
+    A literal `<!--` in a fenced example is code to Markdown, and everything
+    after the closing fence still renders. A parser that checks comments
+    before fences enters comment mode there and skips ahead to the next
+    `-->` — dropping whole sections while the gapless-count check, seeing the
+    surviving numbers in order, stays green.
+    """
+    document = "\n".join(
+        [
+            "### #9 🔮 Девятая",
+            "**Статус:** 🔮 future",
+            "```",
+            "<!-- пример, а не комментарий",
+            "```",
+            "### #10 🔮 Десятая",
+            "**Статус:** 🔮 future",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [9, 10]
+    assert _status_verdicts(sections[1].body) == ["🔮 future"]
+
+
+def test_a_fence_inside_a_comment_does_not_open_a_block():
+    """The mirror case, so the ordering cannot be fixed one way and broken
+    the other: a fence drawn inside an HTML comment is invisible too."""
+    document = "\n".join(
+        [
+            "### #3 ✅ Единая ось времени",
+            "<!--",
+            "```",
+            "-->",
+            "**Статус:** ✅ готово",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert _status_verdicts(sections[0].body) == ["✅ готово"]
