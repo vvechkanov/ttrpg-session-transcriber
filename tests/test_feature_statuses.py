@@ -70,6 +70,11 @@ GUARD_NAME = "tests/test_feature_statuses.py"
 #: comparison never saw it, and a rendered section sat on the page unguarded.
 HEADING = re.compile(r"^ {0,3}###\s+#(\d+)\s+(.*)$")
 
+#: Any other `###` heading — the thing that ends a feature block. Kept as a
+#: pattern rather than a `startswith` so that it cannot drift out of step with
+#: :data:`HEADING` on indentation, which is exactly how it drifted once.
+OTHER_HEADING = re.compile(r"^ {0,3}###\s")
+
 #: `**Статус:** ❌ не реализовано`. Bold, at the start of a line, because the
 #: word also appears mid-sentence in prose that is describing history rather
 #: than declaring anything.
@@ -97,6 +102,16 @@ STATUS_LINE = re.compile(r"^ {0,3}(?:>\s*)?\*\*Статус:\*\*\s*(.*)$")
 #: block at all, so the `> **Статус:**` inside it was read as the section's
 #: real verdict, and the real one could then be deleted unnoticed.
 FENCE = re.compile(r"^ {0,3}(?:>\s*)?(`{3,}|~{3,})[ \t]*(.*)$")
+
+#: Markdown HTML comments. Their contents do not render at all, so a
+#: `**Статус:**` inside one is invisible to every reader — and was, until this
+#: existed, perfectly visible to the parser. An editor could delete a
+#: section's real verdict, leave a commented-out example behind, and the page
+#: would declare no status while all three guards stayed green. Same family as
+#: the fenced-block hole, one layer further out: the parser tracked code but
+#: not comments.
+COMMENT_OPEN = re.compile(r"<!--")
+COMMENT_CLOSE = re.compile(r"-->")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
 #: marker rather than the sentence is what makes this checkable at all: the
@@ -384,7 +399,14 @@ def _sections(text: str) -> list[Section]:
     #: Kept rather than a boolean so that only a fence Markdown would accept
     #: as closing this block actually closes it.
     fence: str | None = None
+    commented = False
     for number, line in enumerate(text.splitlines(), start=1):
+        if commented:
+            commented = not COMMENT_CLOSE.search(line)
+            continue
+        if COMMENT_OPEN.search(line) and not COMMENT_CLOSE.search(line):
+            commented = True
+            continue
         if match := FENCE.match(line):
             run, trailing = match.group(1), match.group(2)
             if fence is None:
@@ -403,9 +425,13 @@ def _sections(text: str) -> list[Section]:
         if heading:
             current = Section(int(heading.group(1)), number, heading.group(2))
             found.append(current)
-        elif line.startswith("### "):
+        elif OTHER_HEADING.match(line):
             # Any other `###` ends the block rather than being swallowed by
-            # it. Without this a feature that lost its own status would
+            # it. Indentation is allowed here for the same reason
+            # :data:`HEADING` allows it, and keeping the two in step is not
+            # cosmetic: while this one demanded column zero, an indented
+            # `   ### Приложение` stayed inside the preceding feature, and a
+            # feature that had lost its own status borrowed the appendix's. Without this a feature that lost its own status would
             # borrow the verdict of whatever `###` section came next and read
             # as compliant. `## …` does not close anything: the
             # `## 🔮 Future` divider sits between two features, and treating
@@ -602,7 +628,18 @@ def test_the_reliability_claim_names_its_guard_and_its_limits():
         f"{STATUS_NOTES.name} no longer claims the statuses are reliable — if that "
         "claim was dropped on purpose, this test goes with it"
     )
-    claim_line = next(line for line in text.splitlines() if RELIABILITY_CLAIM in line)
+    claim_lines = [line for line in text.splitlines() if RELIABILITY_CLAIM in line]
+    # Every occurrence, not the first. `next(...)` validated one line and left
+    # any later copy unchecked — so a second, contradictory note claiming more
+    # features than the table holds would sit on the page behind a compliant
+    # first sentence. Checking all of them makes a duplicate either correct or
+    # a failure, never invisible.
+    assert len(claim_lines) == 1, (
+        f"{STATUS_NOTES.name} carries {len(claim_lines)} lines claiming "
+        f"«{RELIABILITY_CLAIM}»; one of them is the promise and the rest are "
+        f"unchecked copies of it:\n  " + "\n  ".join(claim_lines)
+    )
+    claim_line = claim_lines[0]
     assert GUARD_NAME in claim_line, (
         f"{STATUS_NOTES.name} claims «{RELIABILITY_CLAIM}» without naming what "
         f"checks it; expected {GUARD_NAME} on the same line, got:\n  {claim_line}"
@@ -1009,3 +1046,46 @@ def test_a_fenced_example_inside_a_blockquote_is_not_a_verdict():
 
     assert _status_verdicts(sections[0].body) == ["✅ готово"]
     assert _unbuilt_declarations(sections[0].body) == []
+
+
+def test_an_indented_non_feature_heading_still_ends_a_section():
+    """The block boundary follows the same indentation rule as the heading.
+
+    While the two disagreed, `   ### Приложение` stayed inside the preceding
+    feature — so a feature that had lost its own status borrowed the
+    appendix's verdict and read as compliant.
+    """
+    document = "\n".join(
+        [
+            "### #3 ✅ Единая ось времени",
+            "   ### Приложение",
+            "**Статус:** ✅ готово",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [3]
+    assert _status_verdicts(sections[0].body) == []
+
+
+def test_a_status_inside_an_html_comment_is_not_a_verdict():
+    """A commented-out line renders as nothing, so it declares nothing.
+
+    Same shape as the fenced-block hole one layer out: delete the real status,
+    leave a commented example, and the page shows no verdict while the guards
+    read one.
+    """
+    document = "\n".join(
+        [
+            "### #3 ✅ Единая ось времени",
+            "<!--",
+            "**Статус:** ✅ готово",
+            "-->",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [3]
+    assert _status_verdicts(sections[0].body) == []
