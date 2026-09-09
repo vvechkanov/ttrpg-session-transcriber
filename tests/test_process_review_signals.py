@@ -206,9 +206,18 @@ UNOBSERVABLE_SIGNS = {
 #: the explanation and leave the next editor with a document full of MCP calls
 #: and no reason for them — which is precisely the state that invites someone
 #: to "finish the migration" in the wrong direction.
+#: Matched as a *command form* — `gh` followed by any ASCII word — rather
+#: than as a list of subcommands. The first version enumerated eight, and an
+#: enumeration is the wrong shape for this: `gh status` and `gh release` are
+#: every bit as unrunnable here and sailed straight through it. The CLI's
+#: subcommand set belongs to GitHub and grows without asking this file.
+#:
+#: An ASCII word is what separates a call from an explanation. The document
+#: has to keep naming `gh` in prose to say why it must not return, and in
+#: Russian prose the next word is Cyrillic or punctuation — never `[a-z]`.
 BANNED_TOOL_CALLS = {
-    r"`?\bgh\s+(?:pr|api|auth|run|repo|issue|workflow|browse)\b": (
-        "a `gh` subcommand prescribed to the agent. The binary is not in the "
+    r"`?\bgh\s+[a-z][a-z-]*": (
+        "a `gh` command prescribed to the agent. The binary is not in the "
         "image and its API answers 403 — an instruction to run it is an "
         "instruction to fail, and §6 used to turn that failure into a "
         "stopped night"
@@ -274,7 +283,47 @@ HALTING_PHRASES = {
 #: and the next editor, finding no rule, would have no reason not to write the
 #: gate back. Pinning the sentence keeps the reasoning in the file that has to
 #: carry it.
-GATE_LESSON = phrase("само по себе ночь не останавливает")
+SECTION_6_CLAIMS = {
+    "that a missing tool is not itself a reason to stop": (
+        phrase("само по себе ночь не останавливает"),
+        "a ban on the halting phrases is satisfied by deleting the paragraph "
+        "that teaches the lesson, leaving a document with no position on the "
+        "question — and the next editor, finding none, has no reason not to "
+        "write the gate back",
+    ),
+    "that the work is still committed and pushed when MCP is down": (
+        phrase("встать\n     ровно перед `create_pull_request`"),
+        "step 9 is commit, push and open-PR, and only the last needs MCP. A "
+        "fallback that skips the whole step leaves the night's work in a "
+        "container that is gone by morning and takes from §6 step 2 the one "
+        "thing it recovers state from — the branch on origin",
+    ),
+}
+
+#: What §6's audit has to be able to *call*, on the same reasoning as
+#: :data:`CALL_SITES` in §5: removing `gh` left holes, and a hole reads as a
+#: finished document right up until an agent stands on it.
+#:
+#: The workflow-run lookup is the one that hurts. §6 builds its whole
+#: three-way classification — green / red / no answer — on a run object, and
+#: after the migration nothing prescribed a call that returns one:
+#: `list_workflow_jobs` needs a run id it had no way to obtain. An audit that
+#: cannot fetch the run cannot classify it, so «красный master останавливает
+#: всё» is either skipped or stuck reading "no answer" forever — the safety
+#: gate of the entire night, quietly disarmed.
+#:
+#: `head_sha` is here as a spelling, not a call: `headSha` is what the removed
+#: CLI printed, and the field the MCP response actually carries is
+#: `head_sha`. Comparing against a key that is never present makes every run
+#: look like it belongs to some other commit, which reads as "no run on this
+#: SHA" and re-dispatches CI on every audit.
+AUDIT_CALLS = {
+    "actions_list method=list_workflow_runs": (
+        "fetching the master CI run that the three-way classification reads"
+    ),
+    "list_pull_requests": "probing that GitHub is reachable at all",
+    "head_sha": "the field that run is matched to master by",
+}
 
 
 @pytest.fixture(scope="module")
@@ -451,15 +500,35 @@ def test_no_section_halts_the_night_over_tooling(
     )
 
 
-def test_the_audit_keeps_the_lesson_that_replaced_the_gate(section_6: str) -> None:
-    """The rule survives, not merely the absence of the old one.
+@pytest.mark.parametrize(("call", "job"), sorted(AUDIT_CALLS.items()))
+def test_the_audit_prescribes_the_calls_it_runs_on(
+    section_6: str, call: str, job: str
+) -> None:
+    """§6 names a call for every lookup its own rules depend on.
 
-    Banning the halting phrases is satisfied by deleting the paragraph
-    outright, which leaves a document with no position on the question — and
-    the next editor, finding none, has no reason not to restore the gate.
+    The gate this change removed was one failure mode; this is the opposite
+    one, and it arrives silently. An audit that describes a comparison without
+    naming the call that fetches its operand looks complete on the page and
+    strands the agent at the first line that needs it — with the difference
+    that a missing gate stops the night loudly, and a missing call makes the
+    night's most important check quietly unanswerable.
     """
-    assert GATE_LESSON.search(section_6), (
-        "§6 no longer states that a missing tool does not by itself stop the "
-        "night. Without the rule written down, the gate has nothing standing "
-        "against it being written back."
+    assert call in section_6, (
+        f"§6 no longer names `{call}`, needed for {job}. Its own rules read a "
+        "value nothing in the document fetches."
     )
+
+
+@pytest.mark.parametrize(
+    ("claim", "pattern", "why"),
+    [(name, pattern, why) for name, (pattern, why) in SECTION_6_CLAIMS.items()],
+)
+def test_section_6_states_the_rules_that_replaced_the_gate(
+    section_6: str, claim: str, pattern: re.Pattern[str], why: str
+) -> None:
+    """The rules survive, not merely the absence of the old one.
+
+    Both are positive pins, and both exist because a ban alone is satisfied by
+    saying nothing at all.
+    """
+    assert pattern.search(section_6), f"§6 no longer states {claim}: {why}"
