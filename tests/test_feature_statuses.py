@@ -73,8 +73,18 @@ HEADING = re.compile(r"^###\s+#(\d+)\s+(.*)$")
 #: would read such an example as the section's real verdict.
 STATUS_LINE = re.compile(r"^ {0,3}(?:>\s*)?\*\*Статус:\*\*\s*(.*)$")
 
-#: Opening or closing fence of a code block, ``` or ~~~.
-FENCE = re.compile(r"^ {0,3}(?:```|~~~)")
+#: Opening or closing fence of a code block. Group 1 is the delimiter run
+#: itself, group 2 whatever follows it on the line.
+#:
+#: Both are captured because a fence is not closed by any fence: Markdown ends
+#: a block only on a run of the *same character*, *at least as long* as the
+#: one that opened it, and carrying nothing after it. An unconditional toggle
+#: therefore ends a backtick block on a `~~~` line inside it — or a four-tick
+#: block on a three-tick line — while Markdown still renders those as code.
+#: Whatever follows is then read as document text, so an example
+#: `**Статус:**` becomes a real verdict and the section's actual status can be
+#: deleted with every guard here still green.
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
 #: marker rather than the sentence is what makes this checkable at all: the
@@ -86,7 +96,20 @@ FENCE = re.compile(r"^ {0,3}(?:```|~~~)")
 #: `⚠️` counts alongside `❌` deliberately. Both of the split sections this
 #: file was written for — #3 and #7 — used `⚠️`, not `❌`; a rule that only
 #: read `❌` would have called them clean.
-UNBUILT_MARKERS = ("❌", "⚠️")
+#:
+#: `🔮` and `📋` count for the same reason, one step further out. The legend
+#: in `FEATURE_REQUESTS.md` defines them as absent code in so many words —
+#: «решение принято и записано, кода ещё нет» and «спроектировано, делаем
+#: позже» — so a shipped feature relabelled `🔮` says exactly what a `❌` says.
+#: Left out, they were the way around this whole file: change both of #8's
+#: markers to `🔮` and the heading agrees with the status, every artefact is
+#: still in the tree, and all three guards pass while the backlog once again
+#: declares a feature absent that a user can select from a dropdown.
+#:
+#: Harmless for the two sections that legitimately carry them: `EVIDENCE` has
+#: entries only for #3, #4, #7 and #8, and #6 (`📋`) and #9 (`🔮`) have none,
+#: so nothing here claims their code exists.
+UNBUILT_MARKERS = ("❌", "⚠️", "🔮", "📋")
 
 #: Wordings that declare a feature unbuilt without an emoji to introduce them.
 #: Kept narrow on purpose: prose is full of qualified negatives ("парсинг
@@ -345,12 +368,19 @@ def _sections(text: str) -> list[Section]:
     """
     found: list[Section] = []
     current: Section | None = None
-    fenced = False
+    #: The delimiter run that opened the current block, or `None` outside one.
+    #: Kept rather than a boolean so that only a fence Markdown would accept
+    #: as closing this block actually closes it.
+    fence: str | None = None
     for number, line in enumerate(text.splitlines(), start=1):
-        if FENCE.match(line):
-            fenced = not fenced
+        if match := FENCE.match(line):
+            run, trailing = match.group(1), match.group(2)
+            if fence is None:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not trailing:
+                fence = None
             continue
-        if fenced:
+        if fence is not None:
             # A fenced block is an example, not a claim. The legend added to
             # `FEATURE_REQUESTS.md` documents how to write a status line, so
             # the first person to show one in a code block would otherwise
@@ -814,3 +844,54 @@ def test_a_verdict_on_the_next_line_is_not_a_verdict():
     assert _status_verdicts(split) == [""]
     assert _unbuilt_declarations(split) == []
     assert _marker("") is None
+
+
+def test_only_a_matching_delimiter_closes_a_fenced_block():
+    """A fence is closed by its own delimiter, not by any fence at all.
+
+    Markdown ends a block on a run of the same character, at least as long as
+    the opener, with nothing after it. A parser that toggles on every fence
+    line leaves the block early — and everything after the false close is read
+    as document text, so an example status becomes the section's verdict and
+    its real one can be deleted with every check here still green.
+
+    Both spellings of the mistake are pinned: a `~~~` line inside a backtick
+    block, and a short run inside a longer one.
+    """
+    document = "\n".join(
+        [
+            "### #3 ✅ Единая ось времени",
+            "**Статус:** ✅ готово",
+            "````",
+            "Пример того, как писать статус:",
+            "```",
+            "**Статус:** ❌ не реализовано",
+            "````",
+            "~~~",
+            "**Статус:** ❌ тоже пример",
+            "~~~",
+        ]
+    )
+
+    sections = _sections(document)
+
+    assert [section.feature for section in sections] == [3]
+    assert _status_verdicts(sections[0].body) == ["✅ готово"]
+    assert _unbuilt_declarations(sections[0].body) == []
+
+
+def test_designed_and_future_verdicts_declare_a_feature_unbuilt():
+    """The legend defines `🔮` and `📋` as absent code in so many words, so a
+    shipped feature relabelled either says what a `❌` says.
+
+    Left out of the tuple, they were the way around this whole file: both of a
+    section's markers changed to `🔮` agree with each other, every artefact
+    stays in the tree, and the backlog goes back to declaring a feature absent
+    that a user can select from a dropdown.
+    """
+    for marker in ("🔮", "📋", "❌", "⚠️"):
+        assert _unbuilt_declarations([f"**Статус:** {marker} пока нет"]) == [
+            f"{marker} пока нет"
+        ], f"{marker} no longer reads as a claim that the code is absent"
+
+    assert _unbuilt_declarations(["**Статус:** ✅ готово"]) == []
