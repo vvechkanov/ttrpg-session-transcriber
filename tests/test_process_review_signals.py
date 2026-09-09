@@ -50,6 +50,10 @@ def phrase(text: str) -> re.Pattern[str]:
 #: failure here instead of a silently empty match.
 SECTION_5 = re.compile(r"^## 5\..*?(?=^## 6\.)", re.MULTILINE | re.DOTALL)
 
+#: §6 likewise. The audit step lives here, and it is the half of this file's
+#: subject that decides whether the night runs at all.
+SECTION_6 = re.compile(r"^## 6\..*?(?=^## 7\.)", re.MULTILINE | re.DOTALL)
+
 #: The two channels, each as (opening phrase, where the paragraph ends, the
 #: call it must prescribe). Checking the call inside its own paragraph is what
 #: makes this a guard rather than a bag of tokens: both method names appear in
@@ -181,6 +185,72 @@ UNOBSERVABLE_SIGNS = {
     "reaction": "the same rule reached for in English, including /reactions",
 }
 
+#: The other tool the cloud agent cannot reach, and the reason this file grew a
+#: second half.
+#:
+#: `gh` is absent from the runner image, and installing it does not help: the
+#: session's GitHub credentials serve only a pinned set of PR-review
+#: operations, so `gh pr list`, `gh pr checks` and `gh api` all answer 403.
+#: That is a property of the platform, not of this repository — nothing an
+#: editor writes here can make the CLI work again.
+#:
+#: §6's audit used to gate the whole night on `gh` being functional, and for
+#: thirteen consecutive nights it did exactly what it said: the run stopped at
+#: the first check and produced nothing. The gate was not wrong when written —
+#: `gh` worked then. It became a rule that spent the night to protect an
+#: ability the night no longer needed.
+#:
+#: Banned as a command form rather than as a bare word, and that split is
+#: deliberate: the document still has to be able to *name* `gh` in order to
+#: explain why it must not come back. A ban on the token alone would forbid
+#: the explanation and leave the next editor with a document full of MCP calls
+#: and no reason for them — which is precisely the state that invites someone
+#: to "finish the migration" in the wrong direction.
+BANNED_TOOL_CALLS = {
+    r"`?\bgh\s+(?:pr|api|auth|run|repo|issue|workflow|browse)\b": (
+        "a `gh` subcommand prescribed to the agent. The binary is not in the "
+        "image and its API answers 403 — an instruction to run it is an "
+        "instruction to fail, and §6 used to turn that failure into a "
+        "stopped night"
+    ),
+}
+
+#: The replacements, each pinned to the *step* that has to prescribe it.
+#:
+#: Scoped to a region rather than to §5 as a whole, and that is not fussiness:
+#: the first version of this guard asked only whether each name appeared
+#: somewhere in §5, and a mutation that deleted the fetch from the merge
+#: recipe left it green — the prose two hundred lines below still mentioned
+#: the command while explaining why it is plain git. A presence check cannot
+#: tell a prescription from a reminiscence, and the step, not the section, is
+#: what the agent executes.
+#:
+#: `git fetch origin pull/` is the odd one out — plain git, not MCP — because
+#: fetching a PR head needs no API at all. It is pinned here so that a future
+#: editor who sees three MCP calls and one git command does not "tidy" it into
+#: a fourth MCP call that does not exist.
+CALL_SITES = {
+    "opening the PR (step 9)": (
+        "9. **Закоммитить, запушить, открыть PR.**",
+        "10. **Цикл ревью.**",
+        ("create_pull_request",),
+    ),
+    "closing the iteration (step 10.2)": (
+        "2. Замечаний нет,",
+        "3. Замечания понятны",
+        (
+            "pull_request_read method=get_check_runs",
+            "merge_pull_request",
+            "git fetch origin pull/",
+        ),
+    ),
+}
+
+#: What §6's audit must no longer do. The phrase is the operative half of the
+#: old gate — the sentence that turned a missing tool into a night spent doing
+#: nothing.
+HALTING_PHRASE = "дальше не идти"
+
 
 @pytest.fixture(scope="module")
 def process_doc() -> str:
@@ -197,6 +267,14 @@ def section_5(process_doc: str) -> str:
     """
     match = SECTION_5.search(process_doc)
     assert match, "docs/process.md has no §5 between the §5 and §6 headings"
+    return match.group(0)
+
+
+@pytest.fixture(scope="module")
+def section_6(process_doc: str) -> str:
+    """§6 as text, on the same terms as §5: read, never restated."""
+    match = SECTION_6.search(process_doc)
+    assert match, "docs/process.md has no §6 between the §6 and §7 headings"
     return match.group(0)
 
 
@@ -270,4 +348,63 @@ def test_the_document_does_not_send_the_reader_after_reactions(
     assert token.casefold() not in process_doc.casefold(), (
         f"docs/process.md still mentions {token!r}: {why}. "
         "A sign the agent cannot observe makes it wait instead of act."
+    )
+
+
+@pytest.mark.parametrize(("pattern", "why"), sorted(BANNED_TOOL_CALLS.items()))
+def test_the_document_prescribes_no_tool_the_agent_cannot_run(
+    process_doc: str, pattern: str, why: str
+) -> None:
+    """No step tells the agent to run a command that cannot succeed.
+
+    Whole-document rather than §5-only, and for the same reason the reaction
+    ban is: §6 reads first and sends the agent into §5's loop, so a `gh` call
+    parked in the audit would be obeyed just as readily as one in §5.
+    """
+    found = re.findall(pattern, process_doc)
+    assert not found, (
+        f"docs/process.md still prescribes {len(found)} `gh` call(s): {why}."
+    )
+
+
+@pytest.mark.parametrize(("site", "spec"), sorted(CALL_SITES.items()))
+def test_each_step_prescribes_the_calls_it_needs(
+    section_5: str, site: str, spec: tuple[str, str, tuple[str, ...]]
+) -> None:
+    """Removing `gh` left four holes; each has to be filled, not just emptied.
+
+    A document that deletes the unusable commands without naming replacements
+    reads as complete and strands the agent at the first step that needs one —
+    the same night-shaped failure as the gate, arriving later.
+    """
+    opening, closing, expected = spec
+    start = section_5.find(opening)
+    assert start != -1, f"§5 no longer opens {site} with {opening!r}"
+    end = section_5.find(closing, start + 1)
+    assert end != -1, f"{site} no longer ends at {closing!r}"
+
+    step = section_5[start:end]
+    missing = [call for call in expected if call not in step]
+    assert not missing, (
+        f"{site} does not prescribe {missing}. Deleting `gh` without naming "
+        "what replaces it leaves the step with no call at all — and a mention "
+        "elsewhere in §5 does not help the agent standing on this step."
+    )
+
+
+def test_the_audit_does_not_halt_the_night_over_tooling(section_6: str) -> None:
+    """§6's audit no longer spends the night on a tool it cannot have.
+
+    This is the assertion the whole change exists for. The gate read «не
+    работает gh — дальше не идти», and it was obeyed literally on thirteen
+    consecutive nights: audit, report, exit, nothing built. The base was green
+    throughout — what stopped was the process, over an ability the night had
+    already stopped needing.
+
+    Pinned to the operative phrase rather than to the word `gh`, so that
+    re-gating the night on the next unavailable tool fails here too.
+    """
+    assert HALTING_PHRASE not in section_6, (
+        f"§6 still tells the run to stop dead ({HALTING_PHRASE!r}). A missing "
+        "tool is a fact for the summary, not a reason to spend the night."
     )
