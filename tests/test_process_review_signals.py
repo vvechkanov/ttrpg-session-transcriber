@@ -229,11 +229,19 @@ BANNED_TOOL_CALLS = {
 #: fetching a PR head needs no API at all. It is pinned here so that a future
 #: editor who sees three MCP calls and one git command does not "tidy" it into
 #: a fourth MCP call that does not exist.
+#: Each entry is matched against the *prescription*, not against any mention
+#: of the same name inside the step. That distinction is the difference
+#: between a guard and a decoration, and it cost two rounds to learn: the
+#: first version pinned bare `create_pull_request`, which occurs twice inside
+#: step 9 — once in the fenced call and once in the sentence explaining why an
+#: unpushed branch is refused. Deleting the fence outright left the guard
+#: green and the step with no call at all. The trailing `(owner=` is what
+#: makes the match reach the fence and nothing else.
 CALL_SITES = {
     "opening the PR (step 9)": (
         "9. **Закоммитить, запушить, открыть PR.**",
         "10. **Цикл ревью.**",
-        ("create_pull_request",),
+        ("create_pull_request(owner=",),
     ),
     "closing the iteration (step 10.2)": (
         "2. Замечаний нет,",
@@ -242,14 +250,31 @@ CALL_SITES = {
             "pull_request_read method=get_check_runs",
             "merge_pull_request",
             "git fetch origin pull/",
+            "git checkout -B <ветка PR> FETCH_HEAD",
         ),
     ),
 }
 
-#: What §6's audit must no longer do. The phrase is the operative half of the
-#: old gate — the sentence that turned a missing tool into a night spent doing
-#: nothing.
-HALTING_PHRASE = "дальше не идти"
+#: What the document must no longer say, and what it must keep saying. The
+#: gate needs both halves, because either alone is trivially defeated.
+#:
+#: The bans are the operative wordings of the old rule. They are checked
+#: against the whole document rather than §6 for the reason the reaction ban
+#: is: §6 step 3 delegates the entire review loop into §5, so a halt parked in
+#: §5 is reached just as surely as one in the audit. Two spellings are listed
+#: because the rule survives rephrasing — «остановиться» carries it without
+#: the word «дальше» anywhere in sight.
+HALTING_PHRASES = {
+    "дальше не идти": "the original gate, verbatim",
+    "на этом остановиться": "the same rule with the halt spelled the other way",
+}
+
+#: The positive half. A ban alone is satisfied by deleting the paragraph that
+#: teaches the lesson — the document would then simply fall silent about it,
+#: and the next editor, finding no rule, would have no reason not to write the
+#: gate back. Pinning the sentence keeps the reasoning in the file that has to
+#: carry it.
+GATE_LESSON = phrase("само по себе ночь не останавливает")
 
 
 @pytest.fixture(scope="module")
@@ -392,8 +417,23 @@ def test_each_step_prescribes_the_calls_it_needs(
     )
 
 
-def test_the_audit_does_not_halt_the_night_over_tooling(section_6: str) -> None:
-    """§6's audit no longer spends the night on a tool it cannot have.
+def test_section_6_is_actually_there(section_6: str) -> None:
+    """Non-vacuity for §6, on the same terms §5 has it.
+
+    The bans below are `not in`, and that is true of the empty string. Without
+    this, renumbering the sections — or any edit that makes the §6/§7 pair stop
+    matching — would turn the gate guard into a test that asserts nothing while
+    still reporting green.
+    """
+    assert "**Аудит.**" in section_6, "§6 no longer contains the audit step"
+    assert len(section_6.splitlines()) > 90, "§6 lost a substantial part"
+
+
+@pytest.mark.parametrize(("halt", "why"), sorted(HALTING_PHRASES.items()))
+def test_no_section_halts_the_night_over_tooling(
+    process_doc: str, halt: str, why: str
+) -> None:
+    """No section spends the night on a tool it cannot have.
 
     This is the assertion the whole change exists for. The gate read «не
     работает gh — дальше не идти», and it was obeyed literally on thirteen
@@ -401,10 +441,25 @@ def test_the_audit_does_not_halt_the_night_over_tooling(section_6: str) -> None:
     throughout — what stopped was the process, over an ability the night had
     already stopped needing.
 
-    Pinned to the operative phrase rather than to the word `gh`, so that
-    re-gating the night on the next unavailable tool fails here too.
+    Whole-document rather than §6-scoped: §6 step 3 delegates the review loop
+    into §5, so a halt written into §5 stops the night just as effectively.
     """
-    assert HALTING_PHRASE not in section_6, (
-        f"§6 still tells the run to stop dead ({HALTING_PHRASE!r}). A missing "
-        "tool is a fact for the summary, not a reason to spend the night."
+    assert halt not in process_doc, (
+        f"docs/process.md still tells the run to stop dead ({halt!r}: {why}). "
+        "A missing tool is a fact for the summary, not a reason to spend the "
+        "night."
+    )
+
+
+def test_the_audit_keeps_the_lesson_that_replaced_the_gate(section_6: str) -> None:
+    """The rule survives, not merely the absence of the old one.
+
+    Banning the halting phrases is satisfied by deleting the paragraph
+    outright, which leaves a document with no position on the question — and
+    the next editor, finding none, has no reason not to restore the gate.
+    """
+    assert GATE_LESSON.search(section_6), (
+        "§6 no longer states that a missing tool does not by itself stop the "
+        "night. Without the rule written down, the gate has nothing standing "
+        "against it being written back."
     )
