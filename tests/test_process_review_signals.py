@@ -50,6 +50,10 @@ def phrase(text: str) -> re.Pattern[str]:
 #: failure here instead of a silently empty match.
 SECTION_5 = re.compile(r"^## 5\..*?(?=^## 6\.)", re.MULTILINE | re.DOTALL)
 
+#: §6 likewise. The audit step lives here, and it is the half of this file's
+#: subject that decides whether the night runs at all.
+SECTION_6 = re.compile(r"^## 6\..*?(?=^## 7\.)", re.MULTILINE | re.DOTALL)
+
 #: The two channels, each as (opening phrase, where the paragraph ends, the
 #: call it must prescribe). Checking the call inside its own paragraph is what
 #: makes this a guard rather than a bag of tokens: both method names appear in
@@ -181,6 +185,146 @@ UNOBSERVABLE_SIGNS = {
     "reaction": "the same rule reached for in English, including /reactions",
 }
 
+#: The other tool the cloud agent cannot reach, and the reason this file grew a
+#: second half.
+#:
+#: `gh` is absent from the runner image, and installing it does not help: the
+#: session's GitHub credentials serve only a pinned set of PR-review
+#: operations, so `gh pr list`, `gh pr checks` and `gh api` all answer 403.
+#: That is a property of the platform, not of this repository — nothing an
+#: editor writes here can make the CLI work again.
+#:
+#: §6's audit used to gate the whole night on `gh` being functional, and for
+#: thirteen consecutive nights it did exactly what it said: the run stopped at
+#: the first check and produced nothing. The gate was not wrong when written —
+#: `gh` worked then. It became a rule that spent the night to protect an
+#: ability the night no longer needed.
+#:
+#: Banned as a command form rather than as a bare word, and that split is
+#: deliberate: the document still has to be able to *name* `gh` in order to
+#: explain why it must not come back. A ban on the token alone would forbid
+#: the explanation and leave the next editor with a document full of MCP calls
+#: and no reason for them — which is precisely the state that invites someone
+#: to "finish the migration" in the wrong direction.
+#: Matched as a *command form* — `gh` followed by any ASCII word — rather
+#: than as a list of subcommands. The first version enumerated eight, and an
+#: enumeration is the wrong shape for this: `gh status` and `gh release` are
+#: every bit as unrunnable here and sailed straight through it. The CLI's
+#: subcommand set belongs to GitHub and grows without asking this file.
+#:
+#: An ASCII word is what separates a call from an explanation. The document
+#: has to keep naming `gh` in prose to say why it must not return, and in
+#: Russian prose the next word is Cyrillic or punctuation — never `[a-z]`.
+BANNED_TOOL_CALLS = {
+    r"`?\bgh\s+[a-z][a-z-]*": (
+        "a `gh` command prescribed to the agent. The binary is not in the "
+        "image and its API answers 403 — an instruction to run it is an "
+        "instruction to fail, and §6 used to turn that failure into a "
+        "stopped night"
+    ),
+}
+
+#: The replacements, each pinned to the *step* that has to prescribe it.
+#:
+#: Scoped to a region rather than to §5 as a whole, and that is not fussiness:
+#: the first version of this guard asked only whether each name appeared
+#: somewhere in §5, and a mutation that deleted the fetch from the merge
+#: recipe left it green — the prose two hundred lines below still mentioned
+#: the command while explaining why it is plain git. A presence check cannot
+#: tell a prescription from a reminiscence, and the step, not the section, is
+#: what the agent executes.
+#:
+#: `git fetch origin pull/` is the odd one out — plain git, not MCP — because
+#: fetching a PR head needs no API at all. It is pinned here so that a future
+#: editor who sees three MCP calls and one git command does not "tidy" it into
+#: a fourth MCP call that does not exist.
+#: Each entry is matched against the *prescription*, not against any mention
+#: of the same name inside the step. That distinction is the difference
+#: between a guard and a decoration, and it cost two rounds to learn: the
+#: first version pinned bare `create_pull_request`, which occurs twice inside
+#: step 9 — once in the fenced call and once in the sentence explaining why an
+#: unpushed branch is refused. Deleting the fence outright left the guard
+#: green and the step with no call at all. The trailing `(owner=` is what
+#: makes the match reach the fence and nothing else.
+CALL_SITES = {
+    "opening the PR (step 9)": (
+        "9. **Закоммитить, запушить, открыть PR.**",
+        "10. **Цикл ревью.**",
+        ("create_pull_request(owner=",),
+    ),
+    "closing the iteration (step 10.2)": (
+        "2. Замечаний нет,",
+        "3. Замечания понятны",
+        (
+            "pull_request_read method=get_check_runs",
+            "merge_pull_request",
+            "git fetch origin pull/",
+            "git checkout -B <ветка PR> FETCH_HEAD",
+        ),
+    ),
+}
+
+#: What the document must no longer say, and what it must keep saying. The
+#: gate needs both halves, because either alone is trivially defeated.
+#:
+#: The bans are the operative wordings of the old rule. They are checked
+#: against the whole document rather than §6 for the reason the reaction ban
+#: is: §6 step 3 delegates the entire review loop into §5, so a halt parked in
+#: §5 is reached just as surely as one in the audit. Two spellings are listed
+#: because the rule survives rephrasing — «остановиться» carries it without
+#: the word «дальше» anywhere in sight.
+HALTING_PHRASES = {
+    "дальше не идти": "the original gate, verbatim",
+    "на этом остановиться": "the same rule with the halt spelled the other way",
+}
+
+#: The positive half. A ban alone is satisfied by deleting the paragraph that
+#: teaches the lesson — the document would then simply fall silent about it,
+#: and the next editor, finding no rule, would have no reason not to write the
+#: gate back. Pinning the sentence keeps the reasoning in the file that has to
+#: carry it.
+SECTION_6_CLAIMS = {
+    "that a missing tool is not itself a reason to stop": (
+        phrase("само по себе ночь не останавливает"),
+        "a ban on the halting phrases is satisfied by deleting the paragraph "
+        "that teaches the lesson, leaving a document with no position on the "
+        "question — and the next editor, finding none, has no reason not to "
+        "write the gate back",
+    ),
+    "that the work is still committed and pushed when MCP is down": (
+        phrase("встать\n     ровно перед `create_pull_request`"),
+        "step 9 is commit, push and open-PR, and only the last needs MCP. A "
+        "fallback that skips the whole step leaves the night's work in a "
+        "container that is gone by morning and takes from §6 step 2 the one "
+        "thing it recovers state from — the branch on origin",
+    ),
+}
+
+#: What §6's audit has to be able to *call*, on the same reasoning as
+#: :data:`CALL_SITES` in §5: removing `gh` left holes, and a hole reads as a
+#: finished document right up until an agent stands on it.
+#:
+#: The workflow-run lookup is the one that hurts. §6 builds its whole
+#: three-way classification — green / red / no answer — on a run object, and
+#: after the migration nothing prescribed a call that returns one:
+#: `list_workflow_jobs` needs a run id it had no way to obtain. An audit that
+#: cannot fetch the run cannot classify it, so «красный master останавливает
+#: всё» is either skipped or stuck reading "no answer" forever — the safety
+#: gate of the entire night, quietly disarmed.
+#:
+#: `head_sha` is here as a spelling, not a call: `headSha` is what the removed
+#: CLI printed, and the field the MCP response actually carries is
+#: `head_sha`. Comparing against a key that is never present makes every run
+#: look like it belongs to some other commit, which reads as "no run on this
+#: SHA" and re-dispatches CI on every audit.
+AUDIT_CALLS = {
+    "actions_list method=list_workflow_runs": (
+        "fetching the master CI run that the three-way classification reads"
+    ),
+    "list_pull_requests": "probing that GitHub is reachable at all",
+    "head_sha": "the field that run is matched to master by",
+}
+
 
 @pytest.fixture(scope="module")
 def process_doc() -> str:
@@ -197,6 +341,14 @@ def section_5(process_doc: str) -> str:
     """
     match = SECTION_5.search(process_doc)
     assert match, "docs/process.md has no §5 between the §5 and §6 headings"
+    return match.group(0)
+
+
+@pytest.fixture(scope="module")
+def section_6(process_doc: str) -> str:
+    """§6 as text, on the same terms as §5: read, never restated."""
+    match = SECTION_6.search(process_doc)
+    assert match, "docs/process.md has no §6 between the §6 and §7 headings"
     return match.group(0)
 
 
@@ -271,3 +423,112 @@ def test_the_document_does_not_send_the_reader_after_reactions(
         f"docs/process.md still mentions {token!r}: {why}. "
         "A sign the agent cannot observe makes it wait instead of act."
     )
+
+
+@pytest.mark.parametrize(("pattern", "why"), sorted(BANNED_TOOL_CALLS.items()))
+def test_the_document_prescribes_no_tool_the_agent_cannot_run(
+    process_doc: str, pattern: str, why: str
+) -> None:
+    """No step tells the agent to run a command that cannot succeed.
+
+    Whole-document rather than §5-only, and for the same reason the reaction
+    ban is: §6 reads first and sends the agent into §5's loop, so a `gh` call
+    parked in the audit would be obeyed just as readily as one in §5.
+    """
+    found = re.findall(pattern, process_doc)
+    assert not found, (
+        f"docs/process.md still prescribes {len(found)} `gh` call(s): {why}."
+    )
+
+
+@pytest.mark.parametrize(("site", "spec"), sorted(CALL_SITES.items()))
+def test_each_step_prescribes_the_calls_it_needs(
+    section_5: str, site: str, spec: tuple[str, str, tuple[str, ...]]
+) -> None:
+    """Removing `gh` left four holes; each has to be filled, not just emptied.
+
+    A document that deletes the unusable commands without naming replacements
+    reads as complete and strands the agent at the first step that needs one —
+    the same night-shaped failure as the gate, arriving later.
+    """
+    opening, closing, expected = spec
+    start = section_5.find(opening)
+    assert start != -1, f"§5 no longer opens {site} with {opening!r}"
+    end = section_5.find(closing, start + 1)
+    assert end != -1, f"{site} no longer ends at {closing!r}"
+
+    step = section_5[start:end]
+    missing = [call for call in expected if call not in step]
+    assert not missing, (
+        f"{site} does not prescribe {missing}. Deleting `gh` without naming "
+        "what replaces it leaves the step with no call at all — and a mention "
+        "elsewhere in §5 does not help the agent standing on this step."
+    )
+
+
+def test_section_6_is_actually_there(section_6: str) -> None:
+    """Non-vacuity for §6, on the same terms §5 has it.
+
+    The bans below are `not in`, and that is true of the empty string. Without
+    this, renumbering the sections — or any edit that makes the §6/§7 pair stop
+    matching — would turn the gate guard into a test that asserts nothing while
+    still reporting green.
+    """
+    assert "**Аудит.**" in section_6, "§6 no longer contains the audit step"
+    assert len(section_6.splitlines()) > 90, "§6 lost a substantial part"
+
+
+@pytest.mark.parametrize(("halt", "why"), sorted(HALTING_PHRASES.items()))
+def test_no_section_halts_the_night_over_tooling(
+    process_doc: str, halt: str, why: str
+) -> None:
+    """No section spends the night on a tool it cannot have.
+
+    This is the assertion the whole change exists for. The gate read «не
+    работает gh — дальше не идти», and it was obeyed literally on thirteen
+    consecutive nights: audit, report, exit, nothing built. The base was green
+    throughout — what stopped was the process, over an ability the night had
+    already stopped needing.
+
+    Whole-document rather than §6-scoped: §6 step 3 delegates the review loop
+    into §5, so a halt written into §5 stops the night just as effectively.
+    """
+    assert halt not in process_doc, (
+        f"docs/process.md still tells the run to stop dead ({halt!r}: {why}). "
+        "A missing tool is a fact for the summary, not a reason to spend the "
+        "night."
+    )
+
+
+@pytest.mark.parametrize(("call", "job"), sorted(AUDIT_CALLS.items()))
+def test_the_audit_prescribes_the_calls_it_runs_on(
+    section_6: str, call: str, job: str
+) -> None:
+    """§6 names a call for every lookup its own rules depend on.
+
+    The gate this change removed was one failure mode; this is the opposite
+    one, and it arrives silently. An audit that describes a comparison without
+    naming the call that fetches its operand looks complete on the page and
+    strands the agent at the first line that needs it — with the difference
+    that a missing gate stops the night loudly, and a missing call makes the
+    night's most important check quietly unanswerable.
+    """
+    assert call in section_6, (
+        f"§6 no longer names `{call}`, needed for {job}. Its own rules read a "
+        "value nothing in the document fetches."
+    )
+
+
+@pytest.mark.parametrize(
+    ("claim", "pattern", "why"),
+    [(name, pattern, why) for name, (pattern, why) in SECTION_6_CLAIMS.items()],
+)
+def test_section_6_states_the_rules_that_replaced_the_gate(
+    section_6: str, claim: str, pattern: re.Pattern[str], why: str
+) -> None:
+    """The rules survive, not merely the absence of the old one.
+
+    Both are positive pins, and both exist because a ban alone is satisfied by
+    saying nothing at all.
+    """
+    assert pattern.search(section_6), f"§6 no longer states {claim}: {why}"
