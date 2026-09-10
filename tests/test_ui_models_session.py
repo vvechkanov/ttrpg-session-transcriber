@@ -1065,3 +1065,150 @@ class TestTheAxisGrowsWhenTrackDurationsArrive:
 
         assert meta.totalMinutes == 300
         assert meta.windowMinutes >= meta.totalMinutes
+
+
+class TestSourceRowsWithoutASessionMeta:
+    """`SourceListModel` is used bare, and has to render rows that way.
+
+    Three tests boot the QML shell with a `SourceListModel` that never
+    gets `setSessionMeta`, and the model is a QML singleton that could be
+    reached before wiring in production too. With no meta there is no
+    `timelineWindowChanged` to rebuild on, so `loadFromDir` rebuilding
+    rows explicitly is the only thing that puts them there — deleting
+    that call left every such session showing an empty lane list, and
+    nothing failed.
+    """
+
+    def test_rows_appear_without_any_meta_attached(self, tmp_path: Path) -> None:
+        _ensure_app()
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z",
+            "2026-04-09T22:50:00.000Z",
+        )
+
+        model = SourceListModel()  # deliberately no setSessionMeta
+        model.loadFromDir(str(session))
+
+        assert model.rowCount() == 1
+        # No window can exist without a meta to publish it into, so the
+        # row falls back to the full-width legacy layout rather than
+        # vanishing.
+        assert model.data(model.index(0), SourceListModel.StartRole) == (
+            pytest.approx(0.0)
+        )
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(100.0)
+        )
+
+    def test_opening_a_second_session_does_not_show_the_first_ones_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """The ordering invariant inside `loadFromDir`.
+
+        Publishing the window emits `timelineWindowChanged`, which
+        rebuilds rows — so the times behind them must already be the new
+        session's. Assign them after publishing instead and the rebuild
+        runs against the previous folder's sources, naming files that are
+        no longer open.
+        """
+        _ensure_app()
+        first = tmp_path / "one"
+        first.mkdir()
+        _write_info(first, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            first, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z", "2026-04-09T20:00:00.000Z",
+        )
+        second = tmp_path / "two"
+        second.mkdir()
+        _write_info(second, "2026-04-10T18:35:00.000Z")
+        _write_combat(
+            second, "Бой 7.txt",
+            "2026-04-10T19:00:00.000Z", "2026-04-10T20:00:00.000Z",
+        )
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+
+        model.loadFromDir(str(first))
+        assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 1.txt"
+
+        seen: list[str] = []
+        model.modelReset.connect(
+            lambda: seen.extend(
+                model.data(model.index(r), SourceListModel.FileRole)
+                for r in range(model.rowCount())
+            )
+        )
+        model.loadFromDir(str(second))
+
+        assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 7.txt"
+        assert "Бой 1.txt" not in seen, (
+            "a rebuild ran against the previous session's sources"
+        )
+
+
+def test_track_lanes_are_told_when_the_axis_grows(tmp_path: Path) -> None:
+    """The ruler and the lanes underneath it must move together.
+
+    `_segments_payload` reads the window at `data()` time, so track
+    percentages are never stale in storage — but "computed on read" is
+    only worth anything if something asks for a re-read. When the axis
+    grows on a track duration, `SessionMeta` emits and the ruler widens
+    immediately; without a matching `dataChanged` the lanes below keep
+    drawing against the old, shorter axis until that row's `setPeaks`
+    happens to arrive, which for a Craig FLAC is minutes of decoding. For
+    that whole span the two halves of the screen describe different
+    timelines.
+
+    This cannot regress silently on master's behaviour, because on master
+    the window never moved after load — the inconsistency is only
+    reachable now that it does.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    craig = session / "craig-1"
+    craig.mkdir()
+    _write_flac_stub(craig / "1-alice.flac")
+    # Two speakers, not one: with a single row the "every lane" assertion
+    # below cannot tell a full-range notification from a row-0-only one.
+    _write_flac_stub(craig / "2-bob.flac")
+    _write_info(craig, "2026-04-09T18:35:00Z")
+    _write_info(session, "2026-04-09T18:35:00.000Z")
+    _write_combat(
+        session, "Бой 1.txt",
+        "2026-04-09T19:00:00.000Z",
+        "2026-04-09T22:50:00.000Z",
+    )
+
+    meta = SessionMeta()
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+    assert tracks.rowCount() >= 1
+
+    notified: list[tuple[int, int]] = []
+    tracks.dataChanged.connect(
+        lambda tl, br, roles: notified.append((tl.row(), br.row()))
+    )
+
+    meta.setTotalSeconds(5 * 3600)  # axis grows 22:50 → 23:35
+
+    assert notified, (
+        "the axis moved and no track lane was told to re-read its segments"
+    )
+    assert notified[0] == (0, tracks.rowCount() - 1), (
+        "every lane is drawn against the axis, so every lane needs telling"
+    )

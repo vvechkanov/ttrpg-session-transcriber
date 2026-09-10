@@ -693,3 +693,38 @@ class TestWindowDoesNotRunAway:
             combats=[],
         )
         assert window.t0 == chat_first
+
+
+class TestExtendingReturnsTheSameObjectWhenNothingMoves:
+    """Identity is the contract `SessionMeta._grow_window_for_track` reads.
+
+    It decides whether to emit `timelineWindowChanged` by asking whether
+    `extended_for_track` handed back the same object. An equal-but-new
+    window therefore costs a signal, and that signal costs every source
+    lane a full model reset — for an axis that did not move.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 18, 35, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=(
+                datetime(2026, 4, 9, 18, 40, 0, tzinfo=timezone.utc),
+                datetime(2026, 4, 9, 22, 50, 0, tzinfo=timezone.utc),
+            ),
+            combats=[],
+        )
+
+    def test_a_track_ending_exactly_on_the_edge_changes_nothing(self):
+        """The boundary case: `<=`, not `<`.
+
+        A recording that ends exactly where the chat did is not a
+        contrived input — it is what a session looks like when the last
+        message is sent as the recording stops."""
+        window = self._window()
+        exact = (window.t_end - window.recording_start).total_seconds()
+
+        assert window.extended_for_track(exact) is window
+        # …and one second more does move it, so the boundary is the only
+        # thing being asserted here.
+        assert window.extended_for_track(exact + 1) is not window

@@ -565,6 +565,27 @@ class TrackListModel(QAbstractListModel):
         """
 
         self._session_meta = session_meta
+        # Segment percentages are computed live in `_segments_payload`,
+        # so they are never *stale* — but "computed on read" only helps
+        # if something asks for a re-read. The window grows once track
+        # durations land, and until this connect existed nothing told QML
+        # to re-query: the ruler above had already widened while every
+        # lane below still drew against the old, shorter axis. It healed
+        # by accident, per row, when that row's `setPeaks` arrived — and
+        # a Craig FLAC takes minutes to decode, so the two halves of the
+        # screen disagreed for that whole span.
+        session_meta.timelineWindowChanged.connect(self._on_window_changed)
+
+    def _on_window_changed(self) -> None:
+        """Re-deliver every row's segments after the axis moved."""
+
+        if not self._rows:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(len(self._rows) - 1, 0),
+            [TrackListModel.SegmentsRole],
+        )
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -1498,7 +1519,8 @@ class SourceListModel(QAbstractListModel):
             self._session_meta.setTimelineWindow(window)
             self._session_meta.setDisplayOffset(display_offset)
 
-        # Explicitly, not only via the signal above: the meta may be
-        # absent, and `setTimelineWindow` skips the emit when the window
-        # it is handed is the one it already holds.
+        # Explicitly, and not only via the signal above: without a
+        # `SessionMeta` there is no signal at all, and this model is used
+        # that way — three tests boot the QML shell with a bare
+        # `SourceListModel`. Skip this and those sessions render no rows.
         self._rebuild_rows()
