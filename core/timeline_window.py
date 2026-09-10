@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
@@ -84,6 +84,45 @@ class TimelineWindow:
     def covers_time_before_recording(self) -> bool:
         """``True``, если в окне есть что-то до старта записи."""
         return self.recording_start_pct > 0.0
+
+    def extended_for_track(self, duration_seconds: float) -> "TimelineWindow":
+        """This window, widened to the right so a track of that length fits.
+
+        Track lengths are not known when :func:`build_window` runs: they
+        come from ``ffprobe`` on a worker thread, one at a time, well
+        after the folder is open. So the window is first built without
+        them, and the right edge lands on whatever else was available —
+        the chat's last message, a combat's end, or the default-hours
+        floor. On a session where the players stop typing before they
+        stop talking, that edge falls *inside* the recording: the tail is
+        not squeezed into the last pixel, it is cut off the axis, and
+        every waveform peak is drawn at a wall-clock time it never
+        happened at, because the whole track is stretched across a window
+        shorter than itself.
+
+        Only ``t_end`` moves. ``t0`` is the zero point that
+        ``ui/engines/asr_worker`` measures every speech segment against,
+        so shifting it would move transcribed speech in time — a change
+        to merge output smuggled inside a drawing fix. ``recording_start``
+        comes from ``info.txt`` and is not ours to revise either.
+
+        Returns ``self`` when nothing needs to change, which is the
+        common case: durations arrive per track, and only the longest one
+        can widen anything. Identity is the signal the caller uses to
+        decide whether the axis actually moved.
+        """
+
+        if self.recording_start is None:
+            # Nothing anchors the audio in absolute time — placing a
+            # duration would mean inventing a recording start, and a
+            # guess here draws sound at a moment it was not recorded.
+            return self
+        if duration_seconds <= 0:
+            return self
+        candidate = self.recording_start + timedelta(seconds=duration_seconds)
+        if candidate <= self.t_end:
+            return self
+        return replace(self, t_end=candidate)
 
     def pct_for(self, ts: datetime) -> float:
         """Map an absolute UTC timestamp to a 0..100 position.

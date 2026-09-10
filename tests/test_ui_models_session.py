@@ -957,3 +957,111 @@ class TestRulerClock:
         assert meta.recordingStartPct == 0.0
         assert meta.windowStartClockMinutes == -1
         assert meta.hasTimeBeforeRecording is False
+
+
+class TestTheAxisGrowsWhenTrackDurationsArrive:
+    """Feature #3, iteration 3b — the right edge stops belonging to the chat.
+
+    Track lengths are probed asynchronously, so `loadFromDir` builds the
+    window before any of them exists and the right edge lands on the last
+    thing that *was* known: a chat message, a combat end, or the
+    default-hours floor. When the recording outlasts all of those — the
+    normal case, since people stop typing before they stop talking — the
+    tail of the audio falls off the axis and every lane ends flush against
+    the edge, which is what the session screen was reported showing.
+
+    These go through the real signal handlers `PeaksWorker` calls
+    (`SessionMeta.setTotalSeconds`, wired in `ui/app_qml.py`), not through
+    a private helper, so removing that wiring fails them.
+    """
+
+    def _session(self, tmp_path: Path) -> Path:
+        """Recording starts 18:35; the last combat ends 22:50."""
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z",
+            "2026-04-09T22:50:00.000Z",
+        )
+        return session
+
+    def _loaded(self, tmp_path: Path):
+        _ensure_app()
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        model.loadFromDir(str(session))
+        return meta, model
+
+    def test_the_window_ends_at_the_chat_until_a_duration_lands(self, tmp_path):
+        """The defect itself, pinned so it cannot come back quietly."""
+        meta, model = self._loaded(tmp_path)
+
+        window = meta.timelineWindow()
+        assert window is not None
+        assert window.t_end.hour == 22 and window.t_end.minute == 50
+        # The combat is the thing that set the edge, so it sits on it.
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(100.0)
+        )
+
+    def test_a_five_hour_track_pushes_the_edge_past_the_chat(self, tmp_path):
+        meta, model = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)  # recording runs 18:35 → 23:35
+
+        window = meta.timelineWindow()
+        assert window is not None
+        assert (window.t_end.hour, window.t_end.minute) == (23, 35), (
+            "the axis has to reach the end of the recording"
+        )
+
+    def test_the_rows_move_with_the_edge_instead_of_staying_flush(self, tmp_path):
+        """Percentages are cached on the row, so the edge moving is not enough.
+
+        `SourceEntry` stores `startPct`/`endPct` computed against the
+        window that existed when the folder was opened. Widen the window
+        and leave the rows alone, and the combat keeps claiming 100% — the
+        lane still ends flush against an edge that has moved, which is the
+        symptom the card is about, now merely relocated.
+        """
+        meta, model = self._loaded(tmp_path)
+        before = model.data(model.index(0), SourceListModel.EndRole)
+
+        meta.setTotalSeconds(5 * 3600)
+
+        after = model.data(model.index(0), SourceListModel.EndRole)
+        assert before == pytest.approx(100.0)
+        # 18:35 → 22:50 is 255 min of a 300-min axis.
+        assert after == pytest.approx(85.0, abs=0.5)
+
+    def test_a_short_track_does_not_pull_the_edge_back(self, tmp_path):
+        """Durations arrive per track, in no order; the axis only grows."""
+        meta, model = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)
+        meta.setTotalSeconds(600)
+
+        window = meta.timelineWindow()
+        assert (window.t_end.hour, window.t_end.minute) == (23, 35)
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(85.0, abs=0.5)
+        )
+
+    def test_the_ruler_and_the_caption_stop_disagreeing(self, tmp_path):
+        """`windowMinutes` drives the ruler, `totalMinutes` the header.
+
+        Before the axis grew with the audio these two described different
+        sessions — 255 minutes of ruler under a caption announcing 300 —
+        so the screen contradicted itself in two places a reader can see
+        at once.
+        """
+        meta, _ = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)
+
+        assert meta.totalMinutes == 300
+        assert meta.windowMinutes >= meta.totalMinutes

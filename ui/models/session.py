@@ -283,6 +283,36 @@ class SessionMeta(QObject):
         self.timelineWindowChanged.emit()
         self.sessionOpened.emit(str(path))
 
+    def _grow_window_for_track(self, seconds: float) -> None:
+        """Widen the axis so a track of ``seconds`` fits on it.
+
+        The window is built by :meth:`SourceListModel.loadFromDir` before
+        any track length is known — ``ffprobe`` runs on a worker thread —
+        so its right edge lands on the chat, a combat, or the
+        default-hours floor. Whenever the recording outlasts those, the
+        axis used to stay where it was: the tail of the audio was cut off
+        the ruler, every lane ended flush against the edge, and the
+        waveform was stretched across a window shorter than the sound it
+        was drawing, putting every peak at a wall-clock time it never
+        happened at.
+
+        The growing is delegated to
+        :meth:`TimelineWindow.extended_for_track`, which moves only
+        ``t_end`` — see there for why ``t0`` must not move.
+        """
+
+        window = self._timeline_window
+        if window is None:
+            return
+        grown = window.extended_for_track(seconds)
+        if grown is window:
+            return
+        self._timeline_window = grown
+        # Everything positioned against the axis has to be told: the
+        # ruler reads `windowMinutes` off this signal, and
+        # `SourceListModel` recomputes its cached row percentages.
+        self.timelineWindowChanged.emit()
+
     def timelineWindow(self) -> TimelineWindow | None:
         """Return the absolute-time window for this session, or ``None``.
 
@@ -320,6 +350,10 @@ class SessionMeta(QObject):
 
         if seconds <= 0:
             return
+        # Before the rounding below, and before the early return it can
+        # take: the axis is measured in seconds, and a track that adds
+        # less than half a minute to the session still has to fit on it.
+        self._grow_window_for_track(seconds)
         total_min = max(1, int(round(seconds / 60.0)))
         if total_min <= self._total_min:
             return
@@ -1232,6 +1266,31 @@ class SourceEntry:
     density: tuple[float, ...] = ()
 
 
+@dataclass(frozen=True)
+class _SourceTimes:
+    """A source row's absolute times, kept so its row can be recomputed.
+
+    :class:`SourceEntry` stores percentages, and a percentage is only
+    meaningful against the window that produced it. The window grows once
+    track durations land (:meth:`SessionMeta._grow_window_for_track`), and
+    rows holding percentages from the old one would go on claiming the
+    edge they no longer touch. Keeping the timestamps means the rows can
+    be recomputed rather than re-parsed — re-reading the chat log on every
+    duration that arrives would be several file reads per session for a
+    number we already have.
+
+    ``span`` is ``None`` when the file could not be placed in time at all
+    (unparsable combat dump, chat log with no readable moments); such a
+    row renders full-width, exactly as it did before.
+    """
+
+    parser_id: str
+    label: str
+    file_name: str
+    span: tuple[datetime, datetime] | None
+    events: tuple[datetime, ...] = ()
+
+
 #: SourceListModel also starts empty — populated only after folder drop.
 _SOURCE_ROWS: list[SourceEntry] = []
 
@@ -1261,6 +1320,9 @@ class SourceListModel(QAbstractListModel):
         #: When present, :meth:`loadFromDir` publishes the timeline
         #: window it builds so other consumers can read it back.
         self._session_meta: SessionMeta | None = None
+        #: Absolute times behind :attr:`_rows`, so the percentages can be
+        #: recomputed when the axis moves. See :class:`_SourceTimes`.
+        self._row_times: list[_SourceTimes] = []
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -1292,6 +1354,49 @@ class SourceListModel(QAbstractListModel):
         """
 
         self._session_meta = session_meta
+        # The axis can move after the rows are built — track durations
+        # arrive late and widen it — and a cached percentage outlives the
+        # window it was computed against. Rebuilding on the signal keeps
+        # the lanes on the ruler they are drawn under.
+        session_meta.timelineWindowChanged.connect(self._rebuild_rows)
+
+    def _rebuild_rows(self) -> None:
+        """Recompute every row's percentages against the current window.
+
+        Cheap and idempotent: no file is re-read, only arithmetic over
+        timestamps already in hand. Called both by :meth:`loadFromDir`
+        and by :attr:`SessionMeta.timelineWindowChanged`.
+        """
+
+        window = (
+            self._session_meta.timelineWindow()
+            if self._session_meta is not None
+            else None
+        )
+        new_rows: list[SourceEntry] = []
+        for times in self._row_times:
+            if window is not None and times.span is not None:
+                start_pct = window.pct_for(times.span[0])
+                end_pct = window.pct_for(times.span[1])
+                density = tuple(window.pct_for(m) for m in times.events)
+            else:
+                # No window, or a file we could not place in time: the
+                # legacy full-width row, which is what this drew before
+                # absolute time existed.
+                start_pct, end_pct = 0.0, 100.0
+                density = ()
+            new_rows.append(SourceEntry(
+                parser_id=times.parser_id,
+                label=times.label,
+                file_name=times.file_name,
+                start_pct=start_pct,
+                end_pct=end_pct,
+                density=density,
+            ))
+
+        self.beginResetModel()
+        self._rows = new_rows
+        self.endResetModel()
 
     @Slot(str)
     def loadFromDir(self, session_dir_str: str) -> None:
@@ -1357,29 +1462,19 @@ class SourceListModel(QAbstractListModel):
             combats=combat_metas,
         )
 
-        # Publish the window back to SessionMeta so other Python-side
-        # consumers (tests, future ruler widgets) can read it.
-        if self._session_meta is not None:
-            self._session_meta.setTimelineWindow(window)
-            self._session_meta.setDisplayOffset(display_offset)
-
-        new_rows: list[SourceEntry] = []
+        # The absolute times behind each row, gathered before the window
+        # is published: publishing emits `timelineWindowChanged`, which
+        # rebuilds the rows from exactly this list, and it must not still
+        # be holding the previous session's sources when that happens.
+        row_times: list[_SourceTimes] = []
         for path in chat_paths:
             moments = chat_moments.get(path, ())
-            if window is not None and moments:
-                start_pct = window.pct_for(moments[0])
-                end_pct = window.pct_for(moments[-1])
-                density = tuple(window.pct_for(m) for m in moments)
-            else:
-                start_pct, end_pct = 0.0, 100.0
-                density = ()
-            new_rows.append(SourceEntry(
+            row_times.append(_SourceTimes(
                 parser_id="foundry-chat",
                 label="Foundry чат",
                 file_name=path.name,
-                start_pct=start_pct,
-                end_pct=end_pct,
-                density=density,
+                span=(moments[0], moments[-1]) if moments else None,
+                events=tuple(moments),
             ))
 
         # Re-parse each combat file so row order matches ``combat_paths``
@@ -1388,22 +1483,22 @@ class SourceListModel(QAbstractListModel):
         # user can tell something's off.
         for path in combat_paths:
             meta = parse_combat_file(path)
-            if window is not None and meta is not None:
-                start_pct = window.pct_for(meta.started_at)
-                end_pct = window.pct_for(meta.ended_at)
-                density = tuple(window.pct_for(m) for m in meta.events)
-            else:
-                start_pct, end_pct = 0.0, 100.0
-                density = ()
-            new_rows.append(SourceEntry(
+            row_times.append(_SourceTimes(
                 parser_id="combat-log",
                 label="Боевой лог",
                 file_name=path.name,
-                start_pct=start_pct,
-                end_pct=end_pct,
-                density=density,
+                span=(meta.started_at, meta.ended_at) if meta is not None else None,
+                events=tuple(meta.events) if meta is not None else (),
             ))
+        self._row_times = row_times
 
-        self.beginResetModel()
-        self._rows = new_rows
-        self.endResetModel()
+        # Publish the window back to SessionMeta so other Python-side
+        # consumers (tests, future ruler widgets) can read it.
+        if self._session_meta is not None:
+            self._session_meta.setTimelineWindow(window)
+            self._session_meta.setDisplayOffset(display_offset)
+
+        # Explicitly, not only via the signal above: the meta may be
+        # absent, and `setTimelineWindow` skips the emit when the window
+        # it is handed is the one it already holds.
+        self._rebuild_rows()
