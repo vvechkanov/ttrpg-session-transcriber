@@ -1283,3 +1283,109 @@ def test_a_restarted_recording_grows_the_axis_to_its_last_archive(
     assert payload[1]["endPct"] < 100.0 or window.t_end == datetime(
         2026, 4, 9, 23, 0, tzinfo=dt_timezone.utc
     ), "the second archive's tail is still clamped against the edge"
+
+
+class TestTheWorkerActuallyReachesTheAxis:
+    """The seam between `PeaksWorker` and the window, wired as the shell wires it.
+
+    Everything else in this file hands `SessionMeta` a duration directly,
+    which tests the growth but not the delivery. Here the real worker runs
+    over a stubbed probe and its real signals are connected exactly as
+    `ui/app_qml.py` connects them, so a worker that stopped emitting — or
+    a signal renamed on either side — fails.
+
+    What this still does not cover is the literal `connect` lines in
+    `ui/app_qml.py`: they live inside `main()`'s closure, and deleting one
+    leaves this class green. Said plainly rather than implied, because a
+    test that names a path it does not exercise is worse than no test.
+    """
+
+    def _session(self, tmp_path: Path) -> Path:
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        craig = session / "craig-1"
+        craig.mkdir()
+        _write_flac_stub(craig / "1-alice.flac")
+        _write_info(craig, "2026-04-09T18:35:00Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z", "2026-04-09T22:50:00.000Z",
+        )
+        return session
+
+    def test_a_probed_duration_travels_from_the_worker_to_the_window(
+        self, tmp_path, monkeypatch
+    ):
+        _ensure_app()
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+        import ui.engines.peaks_worker as pw
+
+        monkeypatch.setattr(pw, "probe_duration", lambda _p: 5 * 3600.0)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
+
+        before = meta.timelineWindow()
+        assert before is not None
+
+        worker = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        # The same two connections `ui/app_qml.py` makes.
+        worker.durationReady.connect(meta.setTotalSeconds)
+        worker.segmentDurationReady.connect(tracks.setSegmentDuration)
+        worker.run()
+
+        after = meta.timelineWindow()
+        assert after.t_end > before.t_end, (
+            "the worker probed a five-hour track and the axis did not move"
+        )
+        assert (after.t_end.hour, after.t_end.minute) == (23, 35)
+
+    def test_a_silenced_worker_cannot_touch_the_next_session(
+        self, tmp_path, monkeypatch
+    ):
+        """Opening a second folder must not inherit the first one's duration.
+
+        `cancel()` is checked before each probe, so a worker already inside
+        `ffprobe` still emits what it is holding, queued to the UI thread
+        and delivered after the new session is open. The axis only grows,
+        so such a late arrival is permanent. The teardown in
+        `ui/app_qml.py` therefore disconnects the worker as well as
+        cancelling it, and this pins the half that behaviour rests on: a
+        disconnected worker reaches nothing.
+        """
+        _ensure_app()
+        from ui.engines.peaks_worker import PeaksWorker
+        import ui.engines.peaks_worker as pw
+
+        monkeypatch.setattr(pw, "probe_duration", lambda _p: 9 * 3600.0)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        edge = meta.timelineWindow().t_end
+
+        stale = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        stale.durationReady.connect(meta.setTotalSeconds)
+        stale.cancel()
+        # The same teardown `ui/app_qml.py` performs. Per-signal, because
+        # PySide6 has no zero-argument `QObject.disconnect()` — the
+        # tidier-looking call raises `TypeError`, which on a session
+        # switch would surface as a crash rather than a stale axis.
+        stale.durationReady.disconnect()
+        stale.run()
+
+        assert meta.timelineWindow().t_end == edge, (
+            "a torn-down worker still moved the axis of the next session"
+        )

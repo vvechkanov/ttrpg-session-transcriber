@@ -143,6 +143,24 @@ def build_shell(app: QGuiApplication) -> Shell:
             prev_worker = _peaks_state.get("worker")
             if isinstance(prev_worker, PeaksWorker):
                 prev_worker.cancel()
+                # Cancellation is checked *before* each probe, so a worker
+                # already inside `ffprobe` still emits the result it is
+                # holding. Those emissions are queued to this thread and
+                # arrive after the new session is open — carrying the old
+                # recording's duration into a window that only ever grows,
+                # and the old track's peaks into the new track model.
+                # Silencing the worker is what makes the teardown a
+                # teardown; `cancel()` alone only stops the next probe.
+                for signal in (
+                    prev_worker.durationReady,
+                    prev_worker.segmentDurationReady,
+                    prev_worker.peaksReady,
+                ):
+                    try:
+                        signal.disconnect()
+                    except (RuntimeError, TypeError):
+                        # Nothing was connected to that one.
+                        pass
             prev_thread.quit()
             prev_thread.wait()
 
