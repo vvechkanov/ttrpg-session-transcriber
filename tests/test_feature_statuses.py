@@ -522,6 +522,20 @@ def _status_verdicts(body: list[str]) -> list[str]:
     ]
 
 
+def _current_status_lines(body: list[str]) -> list[str]:
+    """The `**Статус:**` lines a section declares *about today*.
+
+    Quoted ones are excluded: :data:`STATUS_LINE` reads through `> ` on
+    purpose, and a line inside a blockquote is this document's way of recording
+    what a status used to be. See :data:`BLOCKQUOTED`.
+    """
+    return [
+        line
+        for line in body
+        if STATUS_LINE.match(line) and not BLOCKQUOTED.match(line)
+    ]
+
+
 def _extra_status_lines(body: list[str]) -> list[str]:
     """Every `**Статус:**` line in a section beyond the one it is allowed.
 
@@ -546,12 +560,37 @@ def _extra_status_lines(body: list[str]) -> list[str]:
     today; quoted ones are history, which is what :func:`_unbuilt_declarations`
     already says about the same blockquotes.
     """
-    current = [
-        line
-        for line in body
-        if STATUS_LINE.match(line) and not BLOCKQUOTED.match(line)
-    ]
-    return _status_verdicts(current[1:])
+    return _status_verdicts(_current_status_lines(body)[1:])
+
+
+def _declaration_problems(section: "Section") -> list[str]:
+    """Why a section's status declaration is unreadable, or an empty list.
+
+    Kept apart from the test that runs it over the document so the rule can be
+    pinned on a section built for the purpose. Read straight from
+    :func:`_document`, it is only ever exercised by whatever the real file
+    happens to contain today — and a rule the real file does not currently
+    violate is a rule that can be deleted with every test still green.
+    """
+    problems = []
+    verdicts = _status_verdicts(_current_status_lines(section.body))
+    if not verdicts:
+        return [
+            f"{section!r}: no unquoted **Статус:** line — a quoted one is "
+            "history, not this section's current verdict"
+        ]
+    for verdict in verdicts:
+        if not verdict:
+            problems.append(
+                f"{section!r}: **Статус:** with an empty verdict — the word "
+                "belongs on the same line"
+            )
+        elif _marker(verdict) is None:
+            problems.append(
+                f"{section!r}: «{verdict}» carries no status marker; "
+                f"expected one of {' '.join(MARKERS)}"
+            )
+    return problems
 
 
 def _self_contradicting_verdicts(body: list[str]) -> list[str]:
@@ -803,28 +842,24 @@ def test_every_section_declares_a_status():
     exemption as deleting the line, which is the hole this test exists to
     close.
 
+    The line has to be *unquoted*, and that is not a detail. A quoted
+    `> **Статус:** ✅ было готово` is history — :func:`_extra_status_lines`
+    treats it as such — so a section left holding only that one renders with
+    no current verdict at all while satisfying a check that merely asked for
+    a `**Статус:**` line somewhere. Counting quoted lines here and discounting
+    them there would be the file holding two answers to one question, so both
+    read :func:`_current_status_lines`.
+
     That a section declares no *more* than one verdict is the other half of
     the same rule, and it lives in
     :func:`test_the_one_verdict_rule_reaches_the_document` rather than here,
     so that one rule has one home.
     """
-    problems = []
-    for section in _document():
-        verdicts = _status_verdicts(section.body)
-        if not verdicts:
-            problems.append(f"{section!r}: no **Статус:** line")
-            continue
-        for verdict in verdicts:
-            if not verdict:
-                problems.append(
-                    f"{section!r}: **Статус:** with an empty verdict — the word "
-                    "belongs on the same line"
-                )
-            elif _marker(verdict) is None:
-                problems.append(
-                    f"{section!r}: «{verdict}» carries no status marker; "
-                    f"expected one of {' '.join(MARKERS)}"
-                )
+    problems = [
+        problem
+        for section in _document()
+        for problem in _declaration_problems(section)
+    ]
 
     assert not problems, (
         "every section has to declare a status the checks above can read:\n"
@@ -1125,6 +1160,27 @@ def test_the_one_verdict_rule_reaches_the_document():
         ]
     )
     assert _extra_status_lines(_sections(honest)[0].body) == []
+
+    # The other end of the same rule: history alone is not a verdict. Left to
+    # `_status_verdicts`, a section holding only a quoted line looked like it
+    # declared something, while `_extra_status_lines` agreed it had no current
+    # one — the file answering one question two ways.
+    history_only = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "> **Статус:** ✅ было готово",
+        ]
+    )
+    orphan = _sections(history_only)[0]
+    assert _status_verdicts(orphan.body) == ["✅ было готово"]
+    assert _current_status_lines(orphan.body) == []
+    assert _declaration_problems(orphan), (
+        "a section holding only a quoted status declares no current verdict "
+        "and must be reported as such"
+    )
+    # …and a section that declares one properly is not reported.
+    proper = _sections("### #3 ✅ Ось\n**Статус:** ✅ готово")[0]
+    assert _declaration_problems(proper) == []
 
     # And the real document obeys it, which is the claim that goes stale.
     for real in _document():
