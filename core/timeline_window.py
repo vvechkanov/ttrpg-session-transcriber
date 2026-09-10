@@ -27,6 +27,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -85,6 +86,45 @@ class TimelineWindow:
         """``True``, если в окне есть что-то до старта записи."""
         return self.recording_start_pct > 0.0
 
+    def extended_to(self, moment: datetime) -> "TimelineWindow":
+        """This window, widened to the right so ``moment`` falls inside it.
+
+        Takes an absolute time rather than a length because the audio does
+        not necessarily start where the recording did. Craig restarts, and
+        a restarted session arrives as several archives, each with its own
+        ``info.txt`` and its own start (feature #4). The sound then ends at
+        ``max(segment.start_ts + duration)`` — a moment no single duration
+        can name, and one that anchoring on :attr:`recording_start` gets
+        wrong by however long the gap between archives was.
+
+        Capped: see :const:`_MAX_HOURS_AFTER_RECORDING`.
+        """
+
+        if moment.tzinfo is None:
+            raise ValueError(
+                "TimelineWindow.extended_to requires a timezone-aware "
+                "datetime; got naive datetime — pass UTC explicitly."
+            )
+        candidate = min(moment.astimezone(timezone.utc), self._right_limit())
+        if candidate <= self.t_end:
+            return self
+        return replace(self, t_end=candidate)
+
+    def _right_limit(self) -> datetime:
+        """The furthest right the axis may ever go.
+
+        The left edge has been bounded since a Foundry "export whole chat
+        log" put the earliest message a week before the session and gave
+        the ruler tens of thousands of minutes. Durations arrive from
+        ``core.peaks.probe_duration``, which is ``float()`` over ffprobe's
+        stdout with no sanity bound, so a corrupt header can hand the axis
+        any number at all — and until the window started growing, none of
+        them reached it.
+        """
+
+        anchor = self.recording_start or self.t0
+        return anchor + timedelta(hours=_MAX_HOURS_AFTER_RECORDING)
+
     def extended_for_track(self, duration_seconds: float) -> "TimelineWindow":
         """This window, widened to the right so a track of that length fits.
 
@@ -117,12 +157,14 @@ class TimelineWindow:
             # duration would mean inventing a recording start, and a
             # guess here draws sound at a moment it was not recorded.
             return self
-        if duration_seconds <= 0:
+        if not math.isfinite(duration_seconds) or duration_seconds <= 0:
             return self
-        candidate = self.recording_start + timedelta(seconds=duration_seconds)
-        if candidate <= self.t_end:
-            return self
-        return replace(self, t_end=candidate)
+        # Clamped before the arithmetic, not after: `timedelta` raises
+        # OverflowError well before `datetime.max`, and this runs inside a
+        # `@Slot` called from the peaks thread, where an exception has
+        # nowhere to go.
+        capped = min(duration_seconds, _MAX_HOURS_AFTER_RECORDING * 3600.0)
+        return self.extended_to(self.recording_start + timedelta(seconds=capped))
 
     def pct_for(self, ts: datetime) -> float:
         """Map an absolute UTC timestamp to a 0..100 position.
@@ -442,6 +484,16 @@ _MIN_WINDOW_SECONDS = 600.0
 #: Двенадцать часов с запасом накрывают «пришли за час, расставили
 #: фишки, начали» и при этом отсекают выгруженный целиком лог кампании.
 _MAX_HOURS_BEFORE_RECORDING = 12.0
+
+#: И не бесконечно вправо. Длительности приходят из
+#: ``core.peaks.probe_duration`` — это ``float()`` над выводом ffprobe
+#: без единой проверки, поэтому битый заголовок способен отдать любое
+#: число. Пока окно не росло, такое число до оси не доходило вовсе; с
+#: ростом дошло, и 1e9 секунд превращались в шестнадцать миллионов
+#: минут линейки, а 1e12 — в OverflowError внутри слота, вызванного из
+#: потока пиков. Сутки выбраны с запасом: самая длинная сессия проекта
+#: короче пяти часов.
+_MAX_HOURS_AFTER_RECORDING = 24.0
 
 
 #: Default window length when no chat / combat data is available.

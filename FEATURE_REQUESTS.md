@@ -102,7 +102,7 @@ layout-only. См. future #9.
 
 ---
 
-### #3 ✅ Единая ось времени — абсолютная, открыт дефект окна (3b)
+### #3 ✅ Единая ось времени — абсолютная, окно растёт под запись (3b)
 
 > **Итерация 3a ✅** (2026-04-21) — абсолютные startPct/endPct для
 > source rows. Новый модуль `core/timeline_window.py`:
@@ -155,7 +155,7 @@ layout-only. См. future #9.
 
 Оффсеты больше не fake: `SourceListModel.loadFromDir` зовёт `build_window`,
 и `startPct`/`endPct` считаются по фактическому времени. Класс именно
-`SourceListModel` (`ui/models/session.py:1239`): у `TrackListModel` есть свой
+`SourceListModel` (`ui/models/session.py:1349`): у `TrackListModel` есть свой
 `loadFromDir`, и он `build_window` не зовёт. Абзац выше оставлен как запись
 исходной заявки — он описывает 21.04, а не сегодняшний код.
 
@@ -170,7 +170,7 @@ layout-only. См. future #9.
 
 Известное ограничение: если в папке сессии лежит **несколько** чат-логов,
 на ось попадает только первый. `SourceListModel.loadFromDir` строит
-`chat_range` из `chat_paths[0]` (`ui/models/session.py:1342-1345`), и это
+`chat_range` из `chat_paths[0]` (`ui/models/session.py:1514-1517`), и это
 сознательное решение, записанное там же в комментарии. Мерж берёт первый
 по той же причине: `find_fvtt_chat_log` (`core/discovery.py:8`) возвращает
 `matches[0]`. Значит сообщения из второго лога не попадут ни в окно, ни в

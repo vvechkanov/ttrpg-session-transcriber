@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from core.timeline_window import (
+    _MAX_HOURS_AFTER_RECORDING,
     CombatMeta,
     TimelineWindow,
     build_window,
@@ -728,3 +729,92 @@ class TestExtendingReturnsTheSameObjectWhenNothingMoves:
         # …and one second more does move it, so the boundary is the only
         # thing being asserted here.
         assert window.extended_for_track(exact + 1) is not window
+
+
+class TestExtendingToAnAbsoluteMoment:
+    """`extended_to` — growing the axis to cover a moment, whatever anchors it.
+
+    `extended_for_track` measures from `recording_start`, which is right
+    only while the recording is one continuous run. Craig restarts, and a
+    restarted session is several archives with their own `info.txt` and
+    their own start times (feature #4), so the audio ends at
+    `max(segment.start_ts + duration)` — a moment no single duration can
+    name on its own.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=None,
+            combats=[],
+        )  # 17:00 → 21:00 by the four-hour floor
+
+    def test_a_later_moment_moves_the_end(self):
+        window = self._window()
+        # Second Craig archive: starts 20:00, runs three hours.
+        grown = window.extended_to(datetime(2026, 4, 9, 23, 0, tzinfo=timezone.utc))
+
+        assert grown.t_end == datetime(2026, 4, 9, 23, 0, tzinfo=timezone.utc)
+        assert grown.t0 == window.t0
+        assert grown.recording_start == window.recording_start
+
+    def test_a_moment_already_covered_changes_nothing(self):
+        window = self._window()
+        assert window.extended_to(window.t_end) is window
+        assert window.extended_to(window.t0) is window
+
+    def test_a_naive_moment_is_refused(self):
+        """Same rule as `pct_for`: a naive datetime is a bug, not a default."""
+        window = self._window()
+        with pytest.raises(ValueError, match="timezone-aware"):
+            window.extended_to(datetime(2026, 4, 9, 23, 0))
+
+
+class TestTheAxisCannotRunAwayRight:
+    """A duration comes from `ffprobe` output parsed as a bare float.
+
+    `core.peaks.probe_duration` does `float(out.strip())` with no sanity
+    bound, and until this change no such number reached the axis at all —
+    `build_window` is always called with `max_track_duration=None`. A
+    corrupt header therefore had one new way to matter: the left edge has
+    been capped since the Foundry "export whole campaign" incident, and
+    the right edge was uncapped.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=None,
+            combats=[],
+        )
+
+    def test_an_absurd_duration_is_capped_not_obeyed(self):
+        window = self._window()
+        grown = window.extended_for_track(1e9)  # ~31 years
+
+        span_hours = (grown.t_end - grown.t0).total_seconds() / 3600.0
+        assert span_hours <= _MAX_HOURS_AFTER_RECORDING + 1, (
+            "a bogus ffprobe reading must not become millions of ruler ticks"
+        )
+
+    def test_a_duration_that_would_overflow_datetime_does_not_raise(self):
+        """`timedelta(seconds=1e12)` overflows on add and the exception
+        would escape a `@Slot` invoked from the worker thread."""
+        window = self._window()
+        grown = window.extended_for_track(1e12)
+        assert (grown.t_end - grown.t0).total_seconds() / 3600.0 <= (
+            _MAX_HOURS_AFTER_RECORDING + 1
+        )
+
+    def test_nonfinite_durations_are_ignored(self):
+        window = self._window()
+        assert window.extended_for_track(float("nan")) is window
+        assert window.extended_for_track(float("inf")) is window
+
+    def test_a_realistic_long_session_is_not_capped(self):
+        """The cap must sit above any session someone actually records."""
+        window = self._window()
+        grown = window.extended_for_track(11 * 3600)
+        assert grown.t_end == window.recording_start + timedelta(hours=11)

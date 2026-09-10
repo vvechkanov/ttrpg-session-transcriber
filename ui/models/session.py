@@ -301,11 +301,29 @@ class SessionMeta(QObject):
         ``t_end`` — see there for why ``t0`` must not move.
         """
 
-        window = self._timeline_window
-        if window is None:
+        self._adopt_window(
+            self._timeline_window.extended_for_track(seconds)
+            if self._timeline_window is not None
+            else None
+        )
+
+    def growWindowTo(self, moment: datetime) -> None:
+        """Widen the axis so ``moment`` falls inside it.
+
+        The accurate entry point, used by
+        :meth:`TrackListModel.setSegmentDuration`, which knows where its
+        segment actually starts. :meth:`_grow_window_for_track` is the
+        approximation available to the scalar `durationReady` signal; it
+        can only under-reach, never over-reach, so the two coexist.
+        """
+
+        if self._timeline_window is None:
             return
-        grown = window.extended_for_track(seconds)
-        if grown is window:
+        self._adopt_window(self._timeline_window.extended_to(moment))
+
+    def _adopt_window(self, grown: TimelineWindow | None) -> None:
+        window = self._timeline_window
+        if grown is None or grown is window:
             return
         self._timeline_window = grown
         # Everything positioned against the axis has to be told: the
@@ -1266,6 +1284,18 @@ class TrackListModel(QAbstractListModel):
         updated = list(entry.segments)
         updated[seg_idx] = replace(segment, duration_sec=seconds)
         entry.segments = tuple(updated)
+        # This — and not `SessionMeta.setTotalSeconds` — is where the axis
+        # can be grown correctly. A duration on its own says how *long* a
+        # segment is, not when it ends, and `setTotalSeconds` receives
+        # only the scalar. Craig restarts, and a restarted session is
+        # several archives with their own `info.txt` (feature #4), so the
+        # audio ends at `max(start_ts + duration)`. Anchoring on the first
+        # archive's start left the second one's tail off the axis by the
+        # length of the gap between them.
+        if self._session_meta is not None and segment.start_ts is not None:
+            self._session_meta.growWindowTo(
+                segment.start_ts + timedelta(seconds=seconds)
+            )
         idx = self.index(row, 0)
         self.dataChanged.emit(idx, idx, [TrackListModel.SegmentsRole])
 
@@ -1344,6 +1374,9 @@ class SourceListModel(QAbstractListModel):
         #: Absolute times behind :attr:`_rows`, so the percentages can be
         #: recomputed when the axis moves. See :class:`_SourceTimes`.
         self._row_times: list[_SourceTimes] = []
+        #: Which folder :attr:`_row_times` describes, so a rebuild arriving
+        #: during a session switch can tell it is holding stale sources.
+        self._row_session_dir: str = ""
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
@@ -1394,6 +1427,19 @@ class SourceListModel(QAbstractListModel):
             if self._session_meta is not None
             else None
         )
+        if (
+            self._session_meta is not None
+            and self._session_meta.sessionDir() != self._row_session_dir
+        ):
+            # `openSession` clears the window and announces it *before* it
+            # emits `sessionOpened`, so this runs once per session switch
+            # while `_row_times` still describes the folder being left.
+            # Rebuilding then republishes the previous session's files, and
+            # `loadFromDir` has not yet been called to correct it. Compared
+            # by folder rather than by "is the window None", because a
+            # session that legitimately has no window — no `info.txt` — must
+            # still render its rows full-width.
+            self._row_times = []
         new_rows: list[SourceEntry] = []
         for times in self._row_times:
             if window is not None and times.span is not None:
@@ -1512,6 +1558,11 @@ class SourceListModel(QAbstractListModel):
                 events=tuple(meta.events) if meta is not None else (),
             ))
         self._row_times = row_times
+        self._row_session_dir = (
+            self._session_meta.sessionDir()
+            if self._session_meta is not None
+            else str(session_dir)
+        )
 
         # Publish the window back to SessionMeta so other Python-side
         # consumers (tests, future ruler widgets) can read it.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
 import pytest
@@ -970,13 +971,19 @@ class TestTheAxisGrowsWhenTrackDurationsArrive:
     tail of the audio falls off the axis and every lane ends flush against
     the edge, which is what the session screen was reported showing.
 
-    These go through the real signal handlers `PeaksWorker` calls
-    (`SessionMeta.setTotalSeconds`, wired in `ui/app_qml.py`), not through
-    a private helper, so removing that wiring fails them.
+    These call `SessionMeta.setTotalSeconds` — the public slot
+    `PeaksWorker.durationReady` is connected to — rather than the private
+    helper behind it, so the growth is exercised through the same door the
+    app uses. They do *not* cover the connection itself: deleting
+    `worker.durationReady.connect(...)` in `ui/app_qml.py` leaves this file
+    green, which was measured, not assumed. Covering that would mean
+    booting the real worker against real audio.
     """
 
     def _session(self, tmp_path: Path) -> Path:
-        """Recording starts 18:35; the last combat ends 22:50."""
+        """Recording starts 18:35; the last combat ends 22:50.
+
+        No chat log — the combat is what sets the right edge here."""
         session = tmp_path / "sess"
         session.mkdir()
         _write_info(session, "2026-04-09T18:35:00.000Z")
@@ -1008,7 +1015,7 @@ class TestTheAxisGrowsWhenTrackDurationsArrive:
             pytest.approx(100.0)
         )
 
-    def test_a_five_hour_track_pushes_the_edge_past_the_chat(self, tmp_path):
+    def test_a_five_hour_track_pushes_the_edge_past_the_combat(self, tmp_path):
         meta, model = self._loaded(tmp_path)
 
         meta.setTotalSeconds(5 * 3600)  # recording runs 18:35 → 23:35
@@ -1059,7 +1066,7 @@ class TestTheAxisGrowsWhenTrackDurationsArrive:
         so the screen contradicted itself in two places a reader can see
         at once.
         """
-        meta, _ = self._loaded(tmp_path)
+        meta, _model = self._loaded(tmp_path)
 
         meta.setTotalSeconds(5 * 3600)
 
@@ -1135,7 +1142,8 @@ class TestSourceRowsWithoutASessionMeta:
         model = SourceListModel()
         model.setSessionMeta(meta)
 
-        model.loadFromDir(str(first))
+        meta.sessionOpened.connect(model.loadFromDir)
+        meta.openSession(str(first))
         assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 1.txt"
 
         seen: list[str] = []
@@ -1145,7 +1153,11 @@ class TestSourceRowsWithoutASessionMeta:
                 for r in range(model.rowCount())
             )
         )
-        model.loadFromDir(str(second))
+        # Through `openSession`, the way `ui/app_qml.py` wires it — not
+        # `loadFromDir` directly. The window is cleared and announced
+        # *before* `sessionOpened` fires, so the rebuild that announcement
+        # triggers is the one that can republish the previous folder.
+        meta.openSession(str(second))
 
         assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 7.txt"
         assert "Бой 1.txt" not in seen, (
@@ -1212,3 +1224,62 @@ def test_track_lanes_are_told_when_the_axis_grows(tmp_path: Path) -> None:
     assert notified[0] == (0, tracks.rowCount() - 1), (
         "every lane is drawn against the axis, so every lane needs telling"
     )
+
+
+def test_a_restarted_recording_grows_the_axis_to_its_last_archive(
+    tmp_path: Path,
+) -> None:
+    """Craig restarts, and the axis has to reach the end of the *last* archive.
+
+    A duration says how long a segment is, not when it ends. Anchoring
+    every duration on the session's first `info.txt` — which is all the
+    scalar `durationReady` signal allows — leaves the second archive's
+    tail off the axis by however long the gap between recordings was. The
+    per-segment signal carries the address, so the growth is anchored on
+    the segment's own start.
+
+    Session shape here is one the project supports and tests elsewhere
+    (feature #4, multi-Craig): craig-1 runs 17:00–18:30, крэйг-2 runs
+    20:00–23:00, so the sound ends at 23:00 while the first archive plus
+    the longest duration would say 20:00.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_info(session, "2026-04-09T17:00:00.000Z")
+    craig1 = session / "craig-1"
+    craig1.mkdir()
+    _write_flac_stub(craig1 / "1-alice.flac")
+    _write_info(craig1, "2026-04-09T17:00:00Z")
+    craig2 = session / "крэйг-2"
+    craig2.mkdir()
+    _write_flac_stub(craig2 / "1-alice.flac")
+    _write_info(craig2, "2026-04-09T20:00:00Z")
+
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+    assert tracks.rowCount() == 1
+    assert len(tracks._rows[0].segments) == 2
+
+    # Durations land per segment, exactly as PeaksWorker emits them.
+    tracks.setSegmentDuration(0, 0, 90 * 60)    # craig-1: 17:00 → 18:30
+    tracks.setSegmentDuration(0, 1, 180 * 60)   # крэйг-2: 20:00 → 23:00
+
+    window = meta.timelineWindow()
+    assert window is not None
+    assert window.t_end >= datetime(2026, 4, 9, 23, 0, tzinfo=dt_timezone.utc), (
+        f"axis ends at {window.t_end}, before the last archive's audio does"
+    )
+
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert payload[1]["endPct"] < 100.0 or window.t_end == datetime(
+        2026, 4, 9, 23, 0, tzinfo=dt_timezone.utc
+    ), "the second archive's tail is still clamped against the edge"
