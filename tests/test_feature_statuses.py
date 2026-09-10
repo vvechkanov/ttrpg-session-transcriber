@@ -70,10 +70,34 @@ GUARD_NAME = "tests/test_feature_statuses.py"
 #: comparison never saw it, and a rendered section sat on the page unguarded.
 HEADING = re.compile(r"^ {0,3}###\s+#(\d+)\s+(.*)$")
 
-#: Any other `###` heading — the thing that ends a feature block. Kept as a
-#: pattern rather than a `startswith` so that it cannot drift out of step with
-#: :data:`HEADING` on indentation, which is exactly how it drifted once.
-OTHER_HEADING = re.compile(r"^ {0,3}###\s")
+#: An **ATX** heading of level 1 to 3 written at the start of its own line —
+#: the thing that ends a feature block. Kept as a pattern rather than a
+#: `startswith` so that it cannot drift out of step with :data:`HEADING` on
+#: indentation, which is exactly how it drifted once.
+#:
+#: `#{1,3}`, not `###`. While this read `###` alone, a `##` between features
+#: did not close the block, so a feature that had lost its own status borrowed
+#: the verdict of the `##` section below it and the heading comparison —
+#: seeing a marker on both sides — agreed. The exclusion carried a
+#: justification, that closing on `##` would truncate the features under the
+#: `## 🔮 Future` divider, and it was false: those features carry their own
+#: `###` headings and open sections of their own regardless. Levels 1 and 2
+#: are taken together rather than listed one by one, so a `#` added later
+#: needs no further patch; `####` and deeper stay inside the feature, which is
+#: what a subsection of it should do.
+#:
+#: Two shapes Markdown also renders as a heading are **not** matched, and
+#: saying so is the point of writing this out: a setext heading (text
+#: underlined by `---` or `===`) and a heading inside a blockquote
+#: (`> ## …`) — :data:`STATUS_LINE` and :data:`FENCE` read through `> `, this
+#: does not. Both therefore still let a feature borrow the next section's
+#: verdict. They are left open deliberately rather than overlooked: they
+#: belong to the family of unmodelled Markdown constructs this parser keeps
+#: losing ground to, and what to do about that family is an open question
+#: (https://trello.com/c/2v3yYpeO) rather than one more patch. The rule this
+#: expression really states is about ATX syntax, which is what it can check —
+#: not about heading level in general, which it cannot.
+OTHER_HEADING = re.compile(r"^ {0,3}#{1,3}\s")
 
 #: `**Статус:** ❌ не реализовано`. Bold, at the start of a line, because the
 #: word also appears mid-sentence in prose that is describing history rather
@@ -112,6 +136,29 @@ FENCE = re.compile(r"^ {0,3}(?:>\s*)?(`{3,}|~{3,})[ \t]*(.*)$")
 #: not comments.
 COMMENT_OPEN = re.compile(r"<!--")
 COMMENT_CLOSE = re.compile(r"-->")
+
+#: A line carried inside a blockquote. :data:`STATUS_LINE` deliberately reads
+#: through `> `, so a status *quoted* there matches it — and the document's own
+#: idiom, described at the top of this module, is to append a
+#: `> **Итерация N ✅**` note carrying the status it used to hold. That note is
+#: a claim about the past, which is exactly what
+#: :func:`_unbuilt_declarations` says about the history blockquotes it must not
+#: read as verdicts. Only :func:`_extra_status_lines` needs to tell the two
+#: apart, so the distinction lives here rather than in `STATUS_LINE`.
+#:
+#: Which leaves the file holding two notions of what a quoted status line is,
+#: and that is worth stating rather than discovering later:
+#: :func:`_extra_status_lines` reads it as history, while
+#: :func:`test_a_sections_heading_and_status_agree` reads it as a live claim
+#: and fails the section when its marker differs from the heading's — so a
+#: `> **Статус:** было ❌ …` note under a `🅿️` heading is refused today.
+#: Nothing in `FEATURE_REQUESTS.md` writes one (its history notes are
+#: `> **Итерация N ✅**`, which is not a `**Статус:**` line at all), so no
+#: section is affected; reconciling the two is filed rather than done here
+#: (https://trello.com/c/w0Ibd2gy), because it changes a rule this guard has
+#: already been reviewed on and is not what the two remarks behind this change
+#: were about.
+BLOCKQUOTED = re.compile(r"^ {0,3}>")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
 #: marker rather than the sentence is what makes this checkable at all: the
@@ -381,9 +428,12 @@ class Section:
 def _sections(text: str) -> list[Section]:
     """Split the document into `#N` sections, in the order they appear.
 
-    A section runs to the next `###` heading, so the `## 🔮 Future` divider in
-    the middle of the file does not truncate it — #9 and #8 live below that
-    divider and are sections like any other.
+    A section runs to the next ATX heading of level 1 to 3 — see
+    :data:`OTHER_HEADING`, which also records the two heading shapes it does
+    not recognise. The `## 🔮 Future` divider in the middle of the file
+    therefore closes the feature above it and costs nothing to the ones below:
+    #8 and #9 carry their own `###` headings and open sections like any other.
+    A `####` subsection belongs to the feature and does not end it.
 
     A *list*, not a dict keyed on the feature number, and that is the point: a
     section copied or moved without deleting the original leaves two blocks
@@ -434,16 +484,18 @@ def _sections(text: str) -> list[Section]:
             current = Section(int(heading.group(1)), number, heading.group(2))
             found.append(current)
         elif OTHER_HEADING.match(line):
-            # Any other `###` ends the block rather than being swallowed by
-            # it. Indentation is allowed here for the same reason
-            # :data:`HEADING` allows it, and keeping the two in step is not
-            # cosmetic: while this one demanded column zero, an indented
-            # `   ### Приложение` stayed inside the preceding feature, and a
-            # feature that had lost its own status borrowed the appendix's. Without this a feature that lost its own status would
-            # borrow the verdict of whatever `###` section came next and read
-            # as compliant. `## …` does not close anything: the
-            # `## 🔮 Future` divider sits between two features, and treating
-            # it as a boundary would truncate the ones below it.
+            # An ATX heading of level 1-3 ends the block rather than being
+            # swallowed by it. Without this a feature that lost its own status
+            # borrows the verdict of whatever section came next and reads as
+            # compliant — which is what `##` did while only `###` was matched.
+            # Setext and blockquoted headings are not recognised and can still
+            # do it; :data:`OTHER_HEADING` says why that is left standing.
+            # Indentation is allowed here for
+            # the same reason :data:`HEADING` allows it, and keeping the two in
+            # step is not cosmetic: while this one demanded column zero, an
+            # indented `   ### Приложение` stayed inside the preceding feature,
+            # and a feature that had lost its own status borrowed the
+            # appendix's.
             current = None
         elif current is not None:
             current.body.append(line)
@@ -468,6 +520,38 @@ def _status_verdicts(body: list[str]) -> list[str]:
         for line in body
         if (status := STATUS_LINE.match(line)) is not None
     ]
+
+
+def _extra_status_lines(body: list[str]) -> list[str]:
+    """Every `**Статус:**` line in a section beyond the one it is allowed.
+
+    A section declares one *current* verdict. A second one is not a parsing
+    accident — Markdown renders both, and a reader sees two live statuses with
+    no way to tell which is today's. Nothing else here can see that: the
+    heading comparison (:func:`test_a_sections_heading_and_status_agree`)
+    reads a marker per line and agrees when they match, and
+    :func:`_unbuilt_declarations` iterates the list and is content as long as
+    no entry declares the feature unbuilt. So «✅ готово» followed by
+    «✅ готово, но только на Linux» clears both.
+
+    Quoted lines do not count, and that is the whole subtlety. This file's
+    other readers take every `**Статус:**` line equally — none of them assumes
+    anything about order — so "all but the first" would have been the wrong
+    rule rather than a stricter one. :data:`STATUS_LINE` reads through `> `,
+    and the document's documented habit is to append a `> **Итерация N ✅**`
+    blockquote recording the status a feature *used to* hold. That note lands
+    above the live status, so counting from the top would call the historical
+    line the verdict and report the real one as the duplicate — pointing the
+    failure at precisely the correct line. Unquoted lines are claims about
+    today; quoted ones are history, which is what :func:`_unbuilt_declarations`
+    already says about the same blockquotes.
+    """
+    current = [
+        line
+        for line in body
+        if STATUS_LINE.match(line) and not BLOCKQUOTED.match(line)
+    ]
+    return _status_verdicts(current[1:])
 
 
 def _self_contradicting_verdicts(body: list[str]) -> list[str]:
@@ -718,6 +802,11 @@ def test_every_section_declares_a_status():
     above as "nothing declared here". One newline would otherwise buy the same
     exemption as deleting the line, which is the hole this test exists to
     close.
+
+    That a section declares no *more* than one verdict is the other half of
+    the same rule, and it lives in
+    :func:`test_the_one_verdict_rule_reaches_the_document` rather than here,
+    so that one rule has one home.
     """
     problems = []
     for section in _document():
@@ -824,9 +913,14 @@ def test_the_escape_is_documented_where_readers_meet_it():
 
 
 def test_the_heading_parser_keeps_sections_apart():
-    """Sections end at the next `###`, not at the `## 🔮 Future` divider that
-    sits between #7 and #9 — otherwise the two features below it would inherit
-    each other's bodies, and #8's status would be read out of #9's section."""
+    """Each feature owns its own body and borrows nobody else's.
+
+    Sections end at the next ATX heading of level 1 to 3, the `## 🔮 Future`
+    divider between #8 and #9 included. That divider used not to close
+    anything, on the since-disproved grounds that closing on it would truncate
+    the features below — they carry their own `###` and open sections
+    regardless, so all it ever did was let a feature with no status of its own
+    inherit the next `##` section's verdict."""
     document = "\n".join(
         [
             "### #7 ✅ Chunker",
@@ -862,9 +956,8 @@ def test_an_example_status_is_not_a_status():
 def test_a_non_feature_heading_ends_the_block():
     """Otherwise a feature that lost its own status borrows the next section's.
 
-    `## …` still does not close a block — the `## 🔮 Future` divider sits
-    between two features — but any other `###` does, exactly as the parser's
-    docstring has always claimed."""
+    Any heading at or above a section's own level closes it, exactly as the
+    parser's docstring claims."""
     document = "\n".join(
         [
             "### #3 ✅ Ось",
@@ -879,6 +972,165 @@ def test_a_non_feature_heading_ends_the_block():
     assert _status_verdicts(sections[0].body) == [], (
         "#3 has no status of its own and must not inherit the appendix's"
     )
+
+
+def test_a_shallower_heading_ends_the_block_too():
+    """`##` closes a `###` section, and excluding it was a rule wrong on its
+    own terms rather than one more Markdown construct left unmodelled.
+
+    The exclusion carried its own justification — that closing on `##` would
+    truncate the features under the `## 🔮 Future` divider — and that
+    justification is false: the features below the divider carry their own
+    `###` headings, so each opens a section of its own whether or not the
+    divider closed the previous one. Meanwhile the exclusion did exactly what
+    the `###` case was written to prevent: a feature that had lost its status
+    borrowed the verdict of the next `##` block, and the heading comparison,
+    seeing a marker on both sides, agreed.
+
+    Stated as "at or above its own level" rather than as a list, so that a `#`
+    someone adds later needs no further patch — while `####`, a subsection of
+    the feature, keeps belonging to it."""
+    borrowed = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "какой-то текст",
+            "## Приложение",
+            "**Статус:** ✅ готово",
+        ]
+    )
+    sections = _sections(borrowed)
+    assert [section.feature for section in sections] == [3]
+    assert _status_verdicts(sections[0].body) == [], (
+        "#3 has no status of its own and must not inherit the appendix's"
+    )
+
+    # The divider this exclusion was written to protect: closing on `##` does
+    # not cost the features below it, because each opens its own `###`.
+    divider = "\n".join(
+        [
+            "### #1 ✅ Альфа",
+            "**Статус:** ✅ готово",
+            "## 🔮 Future (делаем позже)",
+            "### #8 🔮 Бой",
+            "**Статус:** 🔮 спроектировано",
+        ]
+    )
+    below = _sections(divider)
+    assert [section.feature for section in below] == [1, 8]
+    assert _status_verdicts(below[1].body) == ["🔮 спроектировано"]
+
+    # A `#` closes it too. The rule is written as a span of levels rather than
+    # as `##`, and this is the half of that choice nothing else pins: with
+    # `#{2,3}` every other assertion here still passes.
+    top = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "какой-то текст",
+            "# Приложение",
+            "**Статус:** ✅ готово",
+        ]
+    )
+    assert _status_verdicts(_sections(top)[0].body) == []
+
+    # A deeper heading is part of the feature, not a boundary.
+    nested = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "#### Как проверить",
+            "**Статус:** ✅ готово",
+        ]
+    )
+    assert _status_verdicts(_sections(nested)[0].body) == ["✅ готово"]
+
+
+def test_a_section_declares_one_status_and_not_two():
+    """Two `**Статус:**` lines in one section is two current verdicts.
+
+    Not a parsing question at all — the document may render both perfectly —
+    but an invariant about what a section is allowed to say. Nothing above
+    catches it: the heading comparison reads a marker from each and agrees
+    when they match, while the evidence guard iterates the list and is happy
+    as long as no entry declares the feature unbuilt. So a second line with
+    the same marker and a contradicting caveat («✅ готово» /
+    «✅ готово, но только на Linux») passes everything, and a reader has no
+    way to tell which one is today's."""
+    doubled = [
+        "**Статус:** ✅ готово, всё работает",
+        "**Статус:** ✅ готово, но только на Linux",
+    ]
+    assert _status_verdicts(doubled) == [
+        "✅ готово, всё работает",
+        "✅ готово, но только на Linux",
+    ]
+    assert _extra_status_lines(doubled) == ["✅ готово, но только на Linux"]
+    # One verdict, and a mention of the word inside it, are not two.
+    assert _extra_status_lines(["**Статус:** ✅ готово; **Статус:** был ❌"]) == []
+    assert _extra_status_lines(["**Статус:** ✅ готово"]) == []
+
+
+def test_a_quoted_status_is_history_and_not_a_second_verdict():
+    """The document records what a status *used to* be, and says so by quoting.
+
+    `STATUS_LINE` reads through `> ` on purpose, so a `> **Итерация N ✅**`
+    note carrying its old status matches it like any other line — and that
+    note is appended *above* the live one. Counting verdicts from the top of
+    the section would therefore call the historical line today's verdict and
+    report the real `**Статус:**` as the duplicate, failing the document for
+    using the very idiom this module's own docstring describes, and pointing
+    the failure at the correct line.
+
+    Two quoted notes are not two verdicts either — a feature may have been
+    through several iterations."""
+    with_history = [
+        "> **Итерация 3b ✅**",
+        "> **Статус:** был ❌ не реализовано до итерации 3b",
+        "",
+        "**Статус:** ✅ готово",
+    ]
+    assert _extra_status_lines(with_history) == []
+    assert _extra_status_lines(["> **Статус:** ❌ было", "> **Статус:** ⚠️ стало"]) == []
+    # …while two live ones are still two, history above them or not.
+    assert _extra_status_lines(with_history + ["**Статус:** ⚠️ и ещё один"]) == [
+        "⚠️ и ещё один"
+    ]
+
+
+def test_the_one_verdict_rule_reaches_the_document():
+    """The rule has to run over parsed sections, not only over a list of lines.
+
+    Every other substantive guard here is wired twice — a helper test on bare
+    strings and a pass over :func:`_document` — and the second is what fails
+    when someone edits the real file. Without an equivalent, the reporting
+    loop in :func:`test_every_section_declares_a_status` could be deleted
+    outright with every test in this file still green, which is exactly the
+    silent exemption the rest of the module exists to refuse. A synthetic
+    document rather than the real one, so the check is pinned to behaviour
+    instead of to today's contents."""
+    doubled = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "**Статус:** ✅ готово",
+            "**Статус:** ✅ готово, но только на Linux",
+        ]
+    )
+    section = _sections(doubled)[0]
+    assert _extra_status_lines(section.body) == ["✅ готово, но только на Linux"]
+
+    honest = "\n".join(
+        [
+            "### #3 ✅ Ось",
+            "> **Итерация 3b ✅**",
+            "> **Статус:** был ⚠️ каркас готов",
+            "**Статус:** ✅ готово",
+        ]
+    )
+    assert _extra_status_lines(_sections(honest)[0].body) == []
+
+    # And the real document obeys it, which is the claim that goes stale.
+    for real in _document():
+        assert _extra_status_lines(real.body) == [], (
+            f"{real!r} declares more than one current status"
+        )
 
 
 def test_a_historical_marker_later_in_the_line_is_not_the_verdict():
