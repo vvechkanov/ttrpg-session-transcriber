@@ -143,21 +143,20 @@ COMMENT_CLOSE = re.compile(r"-->")
 #: `> **Итерация N ✅**` note carrying the status it used to hold. That note is
 #: a claim about the past, which is exactly what
 #: :func:`_unbuilt_declarations` says about the history blockquotes it must not
-#: read as verdicts. Only :func:`_extra_status_lines` needs to tell the two
-#: apart, so the distinction lives here rather than in `STATUS_LINE`.
+#: read as verdicts. `STATUS_LINE` itself keeps reading through `> `, because
+#: :func:`_sections` still has to see those lines; telling history from a live
+#: claim is a separate question, and it is answered here.
 #:
-#: Which leaves the file holding two notions of what a quoted status line is,
-#: and that is worth stating rather than discovering later:
-#: :func:`_extra_status_lines` reads it as history, while
-#: :func:`test_a_sections_heading_and_status_agree` reads it as a live claim
-#: and fails the section when its marker differs from the heading's — so a
-#: `> **Статус:** было ❌ …` note under a `🅿️` heading is refused today.
-#: Nothing in `FEATURE_REQUESTS.md` writes one (its history notes are
-#: `> **Итерация N ✅**`, which is not a `**Статус:**` line at all), so no
-#: section is affected; reconciling the two is filed rather than done here
-#: (https://trello.com/c/w0Ibd2gy), because it changes a rule this guard has
-#: already been reviewed on and is not what the two remarks behind this change
-#: were about.
+#: Every reader of status lines asks it, through
+#: :func:`_current_status_lines`, and that uniformity is load-bearing rather
+#: than tidy. The rule arrived one reader at a time — first the duplicate
+#: check, then the required-status check, then the unbuilt classifier and the
+#: two contradiction checks — and each partial state was its own defect: while
+#: one reader called a quoted line history and another called it today's
+#: verdict, a section could hold a verdict that one guard refused and another
+#: required. Twice that gap was found in review rather than in writing, so it
+#: is worth saying plainly: a new reader of `**Статус:**` lines goes through
+#: :func:`_current_status_lines`, not through :data:`STATUS_LINE` directly.
 BLOCKQUOTED = re.compile(r"^ {0,3}>")
 
 #: The verdict markers that mean "not built, or not built yet". Reading the
@@ -593,6 +592,30 @@ def _declaration_problems(section: "Section") -> list[str]:
     return problems
 
 
+def _heading_contradictions(section: "Section") -> list[str]:
+    """Where a section's heading marker and its current verdicts disagree.
+
+    Kept apart from the test that runs it over the document for the same
+    reason as :func:`_declaration_problems`: a rule read straight from the
+    real file is only ever exercised by what that file contains today.
+    """
+    claimed = _marker(section.heading)
+    if claimed is None:
+        return [
+            f"{section!r}: heading carries no status marker, so there is "
+            f"nothing to compare its status against"
+        ]
+    contradictions = []
+    for verdict in _status_verdicts(_current_status_lines(section.body)):
+        declared = _marker(verdict)
+        if declared is not None and claimed != declared:
+            contradictions.append(
+                f"{section!r}: heading says «{claimed}», "
+                f"status says «{declared}» in «{verdict}»"
+            )
+    return contradictions
+
+
 def _self_contradicting_verdicts(body: list[str]) -> list[str]:
     """Verdicts that lead with `✅` and then say the code is not there.
 
@@ -609,9 +632,13 @@ def _self_contradicting_verdicts(body: list[str]) -> list[str]:
     carry a marker. This check is that net, put back where it can catch
     something — and it stays deliberately narrow, firing only on a `✅`, since
     on any other marker the words and the emoji already agree.
+
+    Quoted lines are skipped here too: a recorded past verdict is history, and
+    every reader of status lines in this file agrees on that through
+    :func:`_current_status_lines`.
     """
     contradictions = []
-    for line in body:
+    for line in _current_status_lines(body):
         status = STATUS_LINE.match(line)
         if not status:
             continue
@@ -626,14 +653,22 @@ def _self_contradicting_verdicts(body: list[str]) -> list[str]:
 def _unbuilt_declarations(body: list[str]) -> list[str]:
     """Status lines in a section body that declare the feature unbuilt.
 
-    Only a `**Статус:**` line is a verdict. The same markers and the same
-    words appear in the history blockquotes above it — «Что НЕ сделано
-    (итерация 3b, future)» is a note about the past, not a claim about today —
-    and reading those as verdicts would make every honest caveat in the file
-    fire this check.
+    Only an *unquoted* `**Статус:**` line is a verdict. The same markers and
+    the same words appear in the history blockquotes above it — «Что НЕ
+    сделано (итерация 3b, future)» is a note about the past, not a claim about
+    today — and reading those as verdicts would make every honest caveat in
+    the file fire this check.
+
+    That last sentence was here before the code did it. The line filter caught
+    prose like `> **Что НЕ сделано:**` because it is not a `**Статус:**` line
+    at all, but a *quoted status* — `> **Статус:** ❌ не реализовано до 2025`
+    kept next to a live `✅` — matched :data:`STATUS_LINE`, which reads through
+    `> ` on purpose, and was reported as a claim about today. A shipped
+    section failed the guard for recording its own history. Reading
+    :func:`_current_status_lines` is what the docstring already promised.
     """
     declarations = []
-    for line in body:
+    for line in _current_status_lines(body):
         status = STATUS_LINE.match(line)
         if not status:
             continue
@@ -713,27 +748,49 @@ def test_a_sections_heading_and_status_agree():
     Comparing two things means having two things: treating a missing marker as
     "nothing to compare" would let a section escape by deleting precisely the
     mark being guarded, which is cheaper than any of the edits this catches.
+
+    Quoted lines are history and are not compared, the same as everywhere else
+    in this file — a heading is a claim about today, and demanding that a
+    recorded past verdict carry today's marker would refuse the document for
+    keeping an accurate record. Nothing is lost by skipping them:
+    :func:`_declaration_problems` already requires every section to carry an
+    unquoted verdict, so there is always something here to compare against.
     """
-    contradictions = []
-    for section in _document():
-        claimed = _marker(section.heading)
-        if claimed is None:
-            contradictions.append(
-                f"{section!r}: heading carries no status marker, so there is "
-                f"nothing to compare its status against"
-            )
-            continue
-        for verdict in _status_verdicts(section.body):
-            declared = _marker(verdict)
-            if declared is not None and claimed != declared:
-                contradictions.append(
-                    f"{section!r}: heading says «{claimed}», "
-                    f"status says «{declared}» in «{verdict}»"
-                )
+    contradictions = [
+        contradiction
+        for section in _document()
+        for contradiction in _heading_contradictions(section)
+    ]
 
     assert not contradictions, "sections that contradict themselves:\n" + "\n".join(
         contradictions
     )
+
+
+def test_the_heading_comparison_reads_today_and_not_the_record():
+    """Pinning the rule on sections built for it, not on today's document.
+
+    Read straight from :func:`_document`, this rule is exercised only by what
+    the real file happens to contain — and the file contains no quoted status
+    line at all, so whether quoted history is compared or skipped made no
+    difference to any test. That is the shape of a rule that can be changed
+    back without anything going red, which is how the same gap survived two
+    reviews here already."""
+    live = _sections("### #3 ✅ Ось\n**Статус:** ⚠️ каркас готов")[0]
+    assert _heading_contradictions(live), "a live verdict must match its heading"
+
+    agreeing = _sections("### #3 ✅ Ось\n**Статус:** ✅ готово")[0]
+    assert _heading_contradictions(agreeing) == []
+
+    # History carries the marker it had when it was written; requiring it to
+    # carry today's would refuse the document for keeping an accurate record.
+    with_history = _sections(
+        "### #3 ✅ Ось\n> **Статус:** ⚠️ было каркасом\n**Статус:** ✅ готово"
+    )[0]
+    assert _heading_contradictions(with_history) == []
+
+    unmarked = _sections("### #3 Ось без значка\n**Статус:** ✅ готово")[0]
+    assert _heading_contradictions(unmarked), "a heading with no marker is a failure"
 
 
 def test_the_reliability_claim_names_its_guard_and_its_limits():
@@ -892,6 +949,13 @@ def test_the_status_extractor_reads_a_declaration():
     assert _unbuilt_declarations(["**Статус:** ✅ готово"]) == []
     assert _unbuilt_declarations(["> **Что НЕ сделано:** ❌ отложено"]) == []
     assert _unbuilt_declarations(["прежде было ❌ не реализовано, теперь нет"]) == []
+    # A *quoted* `**Статус:**` is history too, and this docstring has always
+    # said so. It read them anyway: a shipped section recording its old
+    # verdict alongside the live one failed the evidence guard for being
+    # honest about its own past.
+    assert _unbuilt_declarations(
+        ["> **Статус:** ❌ не реализовано до 2025", "**Статус:** ✅ готово"]
+    ) == []
 
 
 def test_a_partial_status_may_stand_when_it_says_so():
