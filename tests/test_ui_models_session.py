@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 
 import pytest
@@ -957,3 +958,566 @@ class TestRulerClock:
         assert meta.recordingStartPct == 0.0
         assert meta.windowStartClockMinutes == -1
         assert meta.hasTimeBeforeRecording is False
+
+
+class TestTheAxisGrowsWhenTrackDurationsArrive:
+    """Feature #3, iteration 3b — the right edge stops belonging to the chat.
+
+    Track lengths are probed asynchronously, so `loadFromDir` builds the
+    window before any of them exists and the right edge lands on the last
+    thing that *was* known: a chat message, a combat end, or the
+    default-hours floor. When the recording outlasts all of those — the
+    normal case, since people stop typing before they stop talking — the
+    tail of the audio falls off the axis and every lane ends flush against
+    the edge, which is what the session screen was reported showing.
+
+    These call `SessionMeta.setTotalSeconds` — the public slot
+    `PeaksWorker.durationReady` is connected to — rather than the private
+    helper behind it, so the growth is exercised through the same door the
+    app uses. They do *not* cover the connection itself: deleting
+    `worker.durationReady.connect(...)` in `ui/app_qml.py` leaves this file
+    green, which was measured, not assumed. Covering that would mean
+    booting the real worker against real audio.
+    """
+
+    def _session(self, tmp_path: Path) -> Path:
+        """Recording starts 18:35; the last combat ends 22:50.
+
+        No chat log — the combat is what sets the right edge here."""
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z",
+            "2026-04-09T22:50:00.000Z",
+        )
+        return session
+
+    def _loaded(self, tmp_path: Path):
+        _ensure_app()
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        model.loadFromDir(str(session))
+        return meta, model
+
+    def test_the_window_ends_at_the_chat_until_a_duration_lands(self, tmp_path):
+        """The defect itself, pinned so it cannot come back quietly."""
+        meta, model = self._loaded(tmp_path)
+
+        window = meta.timelineWindow()
+        assert window is not None
+        assert window.t_end.hour == 22 and window.t_end.minute == 50
+        # The combat is the thing that set the edge, so it sits on it.
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(100.0)
+        )
+
+    def test_a_five_hour_track_pushes_the_edge_past_the_combat(self, tmp_path):
+        meta, model = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)  # recording runs 18:35 → 23:35
+
+        window = meta.timelineWindow()
+        assert window is not None
+        assert (window.t_end.hour, window.t_end.minute) == (23, 35), (
+            "the axis has to reach the end of the recording"
+        )
+
+    def test_the_rows_move_with_the_edge_instead_of_staying_flush(self, tmp_path):
+        """Percentages are cached on the row, so the edge moving is not enough.
+
+        `SourceEntry` stores `startPct`/`endPct` computed against the
+        window that existed when the folder was opened. Widen the window
+        and leave the rows alone, and the combat keeps claiming 100% — the
+        lane still ends flush against an edge that has moved, which is the
+        symptom the card is about, now merely relocated.
+        """
+        meta, model = self._loaded(tmp_path)
+        before = model.data(model.index(0), SourceListModel.EndRole)
+
+        meta.setTotalSeconds(5 * 3600)
+
+        after = model.data(model.index(0), SourceListModel.EndRole)
+        assert before == pytest.approx(100.0)
+        # 18:35 → 22:50 is 255 min of a 300-min axis.
+        assert after == pytest.approx(85.0, abs=0.5)
+
+    def test_a_short_track_does_not_pull_the_edge_back(self, tmp_path):
+        """Durations arrive per track, in no order; the axis only grows."""
+        meta, model = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)
+        meta.setTotalSeconds(600)
+
+        window = meta.timelineWindow()
+        assert (window.t_end.hour, window.t_end.minute) == (23, 35)
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(85.0, abs=0.5)
+        )
+
+    def test_the_ruler_and_the_caption_stop_disagreeing(self, tmp_path):
+        """`windowMinutes` drives the ruler, `totalMinutes` the header.
+
+        Before the axis grew with the audio these two described different
+        sessions — 255 minutes of ruler under a caption announcing 300 —
+        so the screen contradicted itself in two places a reader can see
+        at once.
+        """
+        meta, _model = self._loaded(tmp_path)
+
+        meta.setTotalSeconds(5 * 3600)
+
+        assert meta.totalMinutes == 300
+        assert meta.windowMinutes >= meta.totalMinutes
+
+
+class TestSourceRowsWithoutASessionMeta:
+    """`SourceListModel` is used bare, and has to render rows that way.
+
+    Three tests boot the QML shell with a `SourceListModel` that never
+    gets `setSessionMeta`, and the model is a QML singleton that could be
+    reached before wiring in production too. With no meta there is no
+    `timelineWindowChanged` to rebuild on, so `loadFromDir` rebuilding
+    rows explicitly is the only thing that puts them there — deleting
+    that call left every such session showing an empty lane list, and
+    nothing failed.
+    """
+
+    def test_rows_appear_without_any_meta_attached(self, tmp_path: Path) -> None:
+        _ensure_app()
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z",
+            "2026-04-09T22:50:00.000Z",
+        )
+
+        model = SourceListModel()  # deliberately no setSessionMeta
+        model.loadFromDir(str(session))
+
+        assert model.rowCount() == 1
+        # No window can exist without a meta to publish it into, so the
+        # row falls back to the full-width legacy layout rather than
+        # vanishing.
+        assert model.data(model.index(0), SourceListModel.StartRole) == (
+            pytest.approx(0.0)
+        )
+        assert model.data(model.index(0), SourceListModel.EndRole) == (
+            pytest.approx(100.0)
+        )
+
+    def test_opening_a_second_session_does_not_show_the_first_ones_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """The ordering invariant inside `loadFromDir`.
+
+        Publishing the window emits `timelineWindowChanged`, which
+        rebuilds rows — so the times behind them must already be the new
+        session's. Assign them after publishing instead and the rebuild
+        runs against the previous folder's sources, naming files that are
+        no longer open.
+        """
+        _ensure_app()
+        first = tmp_path / "one"
+        first.mkdir()
+        _write_info(first, "2026-04-09T18:35:00.000Z")
+        _write_combat(
+            first, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z", "2026-04-09T20:00:00.000Z",
+        )
+        second = tmp_path / "two"
+        second.mkdir()
+        _write_info(second, "2026-04-10T18:35:00.000Z")
+        _write_combat(
+            second, "Бой 7.txt",
+            "2026-04-10T19:00:00.000Z", "2026-04-10T20:00:00.000Z",
+        )
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+
+        meta.sessionOpened.connect(model.loadFromDir)
+        meta.openSession(str(first))
+        assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 1.txt"
+
+        seen: list[str] = []
+        model.modelReset.connect(
+            lambda: seen.extend(
+                model.data(model.index(r), SourceListModel.FileRole)
+                for r in range(model.rowCount())
+            )
+        )
+        # Through `openSession`, the way `ui/app_qml.py` wires it — not
+        # `loadFromDir` directly. The window is cleared and announced
+        # *before* `sessionOpened` fires, so the rebuild that announcement
+        # triggers is the one that can republish the previous folder.
+        meta.openSession(str(second))
+
+        assert model.data(model.index(0), SourceListModel.FileRole) == "Бой 7.txt"
+        assert "Бой 1.txt" not in seen, (
+            "a rebuild ran against the previous session's sources"
+        )
+
+
+def test_track_lanes_are_told_when_the_axis_grows(tmp_path: Path) -> None:
+    """The ruler and the lanes underneath it must move together.
+
+    `_segments_payload` reads the window at `data()` time, so track
+    percentages are never stale in storage — but "computed on read" is
+    only worth anything if something asks for a re-read. When the axis
+    grows on a track duration, `SessionMeta` emits and the ruler widens
+    immediately; without a matching `dataChanged` the lanes below keep
+    drawing against the old, shorter axis until that row's `setPeaks`
+    happens to arrive, which for a Craig FLAC is minutes of decoding. For
+    that whole span the two halves of the screen describe different
+    timelines.
+
+    This cannot regress silently on master's behaviour, because on master
+    the window never moved after load — the inconsistency is only
+    reachable now that it does.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    craig = session / "craig-1"
+    craig.mkdir()
+    _write_flac_stub(craig / "1-alice.flac")
+    # Two speakers, not one: with a single row the "every lane" assertion
+    # below cannot tell a full-range notification from a row-0-only one.
+    _write_flac_stub(craig / "2-bob.flac")
+    _write_info(craig, "2026-04-09T18:35:00Z")
+    _write_info(session, "2026-04-09T18:35:00.000Z")
+    _write_combat(
+        session, "Бой 1.txt",
+        "2026-04-09T19:00:00.000Z",
+        "2026-04-09T22:50:00.000Z",
+    )
+
+    meta = SessionMeta()
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+    assert tracks.rowCount() >= 1
+
+    notified: list[tuple[int, int]] = []
+    tracks.dataChanged.connect(
+        lambda tl, br, roles: notified.append((tl.row(), br.row()))
+    )
+
+    meta.setTotalSeconds(5 * 3600)  # axis grows 22:50 → 23:35
+
+    assert notified, (
+        "the axis moved and no track lane was told to re-read its segments"
+    )
+    assert notified[0] == (0, tracks.rowCount() - 1), (
+        "every lane is drawn against the axis, so every lane needs telling"
+    )
+
+
+def test_a_restarted_recording_grows_the_axis_to_its_last_archive(
+    tmp_path: Path,
+) -> None:
+    """Craig restarts, and the axis has to reach the end of the *last* archive.
+
+    A duration says how long a segment is, not when it ends. Anchoring
+    every duration on the session's first `info.txt` — which is all the
+    scalar `durationReady` signal allows — leaves the second archive's
+    tail off the axis by however long the gap between recordings was. The
+    per-segment signal carries the address, so the growth is anchored on
+    the segment's own start.
+
+    Session shape here is one the project supports and tests elsewhere
+    (feature #4, multi-Craig): craig-1 runs 17:00–18:30, крэйг-2 runs
+    20:00–23:00, so the sound ends at 23:00 while the first archive plus
+    the longest duration would say 20:00.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_info(session, "2026-04-09T17:00:00.000Z")
+    craig1 = session / "craig-1"
+    craig1.mkdir()
+    _write_flac_stub(craig1 / "1-alice.flac")
+    _write_info(craig1, "2026-04-09T17:00:00Z")
+    craig2 = session / "крэйг-2"
+    craig2.mkdir()
+    _write_flac_stub(craig2 / "1-alice.flac")
+    _write_info(craig2, "2026-04-09T20:00:00Z")
+
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+    assert tracks.rowCount() == 1
+    assert len(tracks._rows[0].segments) == 2
+
+    # Durations land per segment, exactly as PeaksWorker emits them.
+    tracks.setSegmentDuration(0, 0, 90 * 60)    # craig-1: 17:00 → 18:30
+    tracks.setSegmentDuration(0, 1, 180 * 60)   # крэйг-2: 20:00 → 23:00
+
+    window = meta.timelineWindow()
+    assert window is not None
+    assert window.t_end >= datetime(2026, 4, 9, 23, 0, tzinfo=dt_timezone.utc), (
+        f"axis ends at {window.t_end}, before the last archive's audio does"
+    )
+
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert payload[1]["endPct"] < 100.0 or window.t_end == datetime(
+        2026, 4, 9, 23, 0, tzinfo=dt_timezone.utc
+    ), "the second archive's tail is still clamped against the edge"
+
+
+class TestTheWorkerActuallyReachesTheAxis:
+    """The seam between `PeaksWorker` and the window, wired as the shell wires it.
+
+    Everything else in this file hands `SessionMeta` a duration directly,
+    which tests the growth but not the delivery. Here the real worker runs
+    over a stubbed probe and its real signals are connected exactly as
+    `ui/app_qml.py` connects them, so a worker that stopped emitting — or
+    a signal renamed on either side — fails.
+
+    What this still does not cover is the literal `connect` lines in
+    `ui/app_qml.py`: they live inside `main()`'s closure, and deleting one
+    leaves this class green. Said plainly rather than implied, because a
+    test that names a path it does not exercise is worse than no test.
+    """
+
+    def _session(self, tmp_path: Path) -> Path:
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T18:35:00.000Z")
+        craig = session / "craig-1"
+        craig.mkdir()
+        _write_flac_stub(craig / "1-alice.flac")
+        _write_info(craig, "2026-04-09T18:35:00Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z", "2026-04-09T22:50:00.000Z",
+        )
+        return session
+
+    def test_a_probed_duration_travels_from_the_worker_to_the_window(
+        self, tmp_path, monkeypatch
+    ):
+        _ensure_app()
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+        import ui.engines.peaks_worker as pw
+
+        monkeypatch.setattr(pw, "probe_duration", lambda _p: 5 * 3600.0)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
+
+        before = meta.timelineWindow()
+        assert before is not None
+
+        worker = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        # The same two connections `ui/app_qml.py` makes.
+        worker.durationReady.connect(meta.setTotalSeconds)
+        worker.segmentDurationReady.connect(tracks.setSegmentDuration)
+        worker.run()
+
+        after = meta.timelineWindow()
+        assert after.t_end > before.t_end, (
+            "the worker probed a five-hour track and the axis did not move"
+        )
+        assert (after.t_end.hour, after.t_end.minute) == (23, 35)
+
+    def test_a_late_delivery_from_a_superseded_worker_is_dropped(
+        self, tmp_path, monkeypatch
+    ):
+        """The real race, driven from a real worker thread.
+
+        Two earlier versions of this test proved nothing. The first called
+        `cancel()` before `run()`, and a cancelled worker returns at its
+        pre-probe check without emitting at all. The second emitted from
+        the test thread, so the receiver ran synchronously and
+        `processEvents()` had no cross-thread delivery to drain — it
+        checked an identity comparison and neither the threading nor the
+        teardown ordering.
+
+        Here the worker runs on its own `QThread` over a probe stubbed to
+        block until released, so the emission is genuinely in flight while
+        the session is switched.
+        """
+        import threading
+        from PySide6.QtCore import QCoreApplication, QThread
+        from ui.app_qml import connect_peaks_worker
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+        import ui.engines.peaks_worker as pw
+
+        _ensure_app()
+        released = threading.Event()
+        probed = threading.Event()
+
+        def _blocking_probe(_path):
+            probed.set()
+            released.wait(5)
+            return 9 * 3600.0
+
+        monkeypatch.setattr(pw, "probe_duration", _blocking_probe)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
+        edge = meta.timelineWindow().t_end
+
+        stale = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        state: dict = {"worker": stale}
+        relay = connect_peaks_worker(stale, state, meta, tracks)
+        assert relay is not None
+
+        thread = QThread()
+        stale.moveToThread(thread)
+        thread.started.connect(stale.run)
+        thread.start()
+        assert probed.wait(5), "the stubbed probe never ran"
+
+        # The user opens another folder: a new worker becomes current
+        # while the old one is still inside ffprobe.
+        state["worker"] = object()
+        released.set()
+        stale.allDone.connect(thread.quit)
+        thread.quit()
+        assert thread.wait(5000)
+        # Now drain what the old worker queued while it was being replaced.
+        QCoreApplication.processEvents()
+
+        assert meta.timelineWindow().t_end == edge, (
+            "a nine-hour duration from the previous session moved the new "
+            "session's axis"
+        )
+
+    def test_the_relay_lives_on_the_receiving_thread(self, tmp_path):
+        """Connections must be queued, not direct.
+
+        Qt picks a queued connection when the receiver is a `QObject` in
+        another thread; a lambda has no receiver and is called inline —
+        in the worker's thread — which would let the models be mutated
+        concurrently with QML. Measured directly: a bound `QObject` method
+        ran on the main thread where the equivalent lambda did not.
+        """
+        from PySide6.QtCore import QThread
+        from ui.app_qml import connect_peaks_worker
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+
+        _ensure_app()
+        meta = SessionMeta()
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        worker = PeaksWorker([])
+        relay = connect_peaks_worker(worker, {"worker": worker}, meta, tracks)
+
+        assert relay.thread() is meta.thread(), (
+            "the relay has to live where the models live"
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        assert relay.thread() is not worker.thread(), (
+            "receiver and sender in one thread means a direct call"
+        )
+
+    def test_a_delivery_from_the_current_worker_still_arrives(
+        self, tmp_path, monkeypatch
+    ):
+        """The guard must drop only what is stale, not everything."""
+        from PySide6.QtCore import QCoreApplication
+        from ui.app_qml import connect_peaks_worker
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+        import ui.engines.peaks_worker as pw
+
+        _ensure_app()
+        monkeypatch.setattr(pw, "probe_duration", lambda _p: 5 * 3600.0)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
+        edge = meta.timelineWindow().t_end
+
+        worker = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        connect_peaks_worker(worker, {"worker": worker}, meta, tracks)
+        worker.durationReady.emit(5 * 3600.0)
+        QCoreApplication.processEvents()
+
+        assert meta.timelineWindow().t_end > edge
+
+
+def test_a_corrupt_segment_duration_cannot_overflow_the_axis(tmp_path: Path) -> None:
+    """`ffprobe` output is parsed as a bare float, and it reaches two doors.
+
+    `TimelineWindow.extended_for_track` caps the scalar path, but the
+    per-segment path adds the duration to the segment's own `start_ts`,
+    and `1e12` seconds overflows a `datetime` there — on the UI thread,
+    where the exception escapes a queued slot. Worse, the raw value would
+    be *stored*, so every later `SegmentsRole` read raises again and the
+    lane cannot be drawn at all.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_info(session, "2026-04-09T18:35:00.000Z")
+    craig = session / "craig-1"
+    craig.mkdir()
+    _write_flac_stub(craig / "1-alice.flac")
+    _write_info(craig, "2026-04-09T18:35:00Z")
+
+    meta = SessionMeta()
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+
+    tracks.setSegmentDuration(0, 0, 1e12)  # must not raise
+
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert payload, "the lane still has to render after a nonsense duration"
+    window = meta.timelineWindow()
+    assert (window.t_end - window.t0).total_seconds() / 3600.0 <= 25.0, (
+        "a corrupt header must not become a month of ruler"
+    )

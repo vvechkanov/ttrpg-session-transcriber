@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QUrl
+from PySide6.QtCore import QObject, QThread, QUrl, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -76,6 +76,76 @@ class Shell:
 
         roots = self.engine.rootObjects()
         return roots[0] if roots else None
+
+
+class PeaksRelay(QObject):
+    """Receives one :class:`PeaksWorker`'s signals on the UI thread.
+
+    A relay object rather than lambdas, and that is the whole point of it.
+    Qt picks a queued connection when the receiver is a ``QObject`` living
+    in another thread; a plain lambda has no receiver, so Qt calls it
+    directly — in the worker thread. Connecting the models' slots through
+    lambdas therefore let ``setPeaks``, ``setSegmentDuration`` and
+    ``setTotalSeconds`` mutate UI-affined objects concurrently with QML.
+    Measured: a bound ``QObject`` method ran on the main thread, the
+    equivalent lambda on the worker's.
+
+    Parented to ``session_meta``, so it lives where the models live and
+    stays alive as long as they do.
+
+    Every delivery is gated on the worker still being the current one.
+    Tearing the previous worker down cannot be done by disconnecting it:
+    ``cancel()`` is only checked *before* each probe, so a worker already
+    inside ``ffprobe`` still emits what it holds, and ``disconnect()``
+    does not retract a call already queued (measured: emit, disconnect,
+    then ``processEvents`` still runs the slot). The queue drains after
+    ``openSession`` installed the new window, so an old recording's
+    duration would land on it — permanently, because the axis only grows.
+    """
+
+    def __init__(self, worker, peaks_state, session_meta, tracks_model) -> None:
+        super().__init__(session_meta)
+        self._worker = worker
+        self._peaks_state = peaks_state
+        self._session_meta = session_meta
+        self._tracks_model = tracks_model
+
+    def _superseded(self) -> bool:
+        return self._peaks_state.get("worker") is not self._worker
+
+    @Slot(int, int, list)
+    def onPeaks(self, row: int, seg_idx: int, peaks: list) -> None:
+        if self._superseded():
+            return
+        self._tracks_model.setPeaks(row, seg_idx, peaks)
+
+    @Slot(float)
+    def onDuration(self, seconds: float) -> None:
+        if self._superseded():
+            return
+        self._session_meta.setTotalSeconds(seconds)
+
+    @Slot(int, int, float)
+    def onSegmentDuration(self, row: int, seg_idx: int, seconds: float) -> None:
+        if self._superseded():
+            return
+        self._tracks_model.setSegmentDuration(row, seg_idx, seconds)
+
+
+def connect_peaks_worker(worker, peaks_state, session_meta, tracks_model):
+    """Wire one :class:`PeaksWorker` and return the relay doing it.
+
+    Lives out of ``build_shell``'s closure so it can be tested: these
+    connections are the only route by which a probed duration reaches the
+    timeline axis, and while they sat inside the closure deleting one of
+    them failed nothing.
+    """
+
+    relay = PeaksRelay(worker, peaks_state, session_meta, tracks_model)
+    worker.peaksReady.connect(relay.onPeaks)
+    worker.durationReady.connect(relay.onDuration)
+    worker.segmentDurationReady.connect(relay.onSegmentDuration)
+    return relay
 
 
 def build_shell(app: QGuiApplication) -> Shell:
@@ -143,6 +213,14 @@ def build_shell(app: QGuiApplication) -> Shell:
             prev_worker = _peaks_state.get("worker")
             if isinstance(prev_worker, PeaksWorker):
                 prev_worker.cancel()
+                # Cancellation is checked *before* each probe, so a worker
+                # already inside `ffprobe` still emits the result it is
+                # holding. Those emissions are queued to this thread and
+                # arrive after the new session is open — carrying the old
+                # recording's duration into a window that only ever grows,
+                # and the old track's peaks into the new track model.
+                # Silencing the worker is what makes the teardown a
+                # teardown; `cancel()` alone only stops the next probe.
             prev_thread.quit()
             prev_thread.wait()
 
@@ -155,14 +233,14 @@ def build_shell(app: QGuiApplication) -> Shell:
         worker = PeaksWorker(paths)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.peaksReady.connect(tracks_model.setPeaks)
-        # Per-track duration grows SessionMeta's total_minutes so the
-        # timeline ruler reflects the longest track. Runs here rather
-        # than in SessionMeta.openSession on the UI thread — an
+        # Per-track duration grows SessionMeta's window and total_minutes
+        # so the timeline ruler reflects the longest track. Runs here
+        # rather than in SessionMeta.openSession on the UI thread — an
         # ffprobe-stall on a malformed file would otherwise hang the
         # shell on folder-pick.
-        worker.durationReady.connect(session_meta.setTotalSeconds)
-        worker.segmentDurationReady.connect(tracks_model.setSegmentDuration)
+        _peaks_state["relay"] = connect_peaks_worker(
+            worker, _peaks_state, session_meta, tracks_model
+        )
         worker.allDone.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

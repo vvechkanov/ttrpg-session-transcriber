@@ -11,12 +11,13 @@ folders on disk so the suite is portable and deterministic.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from core.timeline_window import (
+    _MAX_HOURS_AFTER_RECORDING,
     CombatMeta,
     TimelineWindow,
     build_window,
@@ -282,6 +283,43 @@ class TestBuildWindow:
         assert window is not None
         assert (window.t_end - window.t0).total_seconds() == pytest.approx(6 * 3600)
 
+    def test_a_track_longer_than_the_chat_extends_the_end(self):
+        """The recording is the thing the axis must cover, chat or no chat.
+
+        `max_track_duration` competes with the chat and combat ends, not
+        only with the default-hours floor — the case the existing coverage
+        misses, since it exercises the candidate with `chat=None` and no
+        combats, where nothing else could have won anyway. On a real
+        session the players stop typing before they stop talking, so the
+        chat end is exactly what the recording has to beat.
+        """
+        info_start = datetime(2026, 4, 9, 18, 35, 0, tzinfo=timezone.utc)
+        chat = (
+            datetime(2026, 4, 9, 18, 40, 0, tzinfo=timezone.utc),
+            datetime(2026, 4, 9, 22, 50, 0, tzinfo=timezone.utc),
+        )
+        recording_end = info_start + timedelta(seconds=5 * 3600)
+
+        without = build_window(
+            info_start=info_start, max_track_duration=None, chat=chat, combats=[]
+        )
+        assert without is not None
+        assert without.t_end == chat[1]
+        # …and the last 45 minutes of audio fall off the axis entirely.
+        assert without.pct_for(recording_end) == pytest.approx(100.0)
+
+        with_track = build_window(
+            info_start=info_start,
+            max_track_duration=5 * 3600,
+            chat=chat,
+            combats=[],
+        )
+        assert with_track is not None
+        assert with_track.t_end == recording_end
+        # The chat now ends where it actually ended, short of the edge.
+        assert with_track.pct_for(chat[1]) == pytest.approx(85.0)
+
+
     def test_window_scenario_yields_expected_percents(self):
         """End-to-end: session-4-like inputs produce the planned pct values."""
         info_start = datetime(2026, 4, 9, 17, 21, 29, tzinfo=timezone.utc)
@@ -304,6 +342,90 @@ class TestBuildWindow:
         assert 50.0 < start_pct < 53.0
         assert 84.0 < end_pct < 86.0
 
+
+
+class TestExtendingAWindowForATrack:
+    """`extended_for_track` — the axis growing as durations arrive.
+
+    Track durations are probed asynchronously, so the window is built
+    before any of them is known. Rebuilding it from scratch would need
+    the chat and combat inputs kept alive for the lifetime of the
+    session; extending it needs only the window, which already records
+    where the recording started.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 18, 35, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=(
+                datetime(2026, 4, 9, 18, 40, 0, tzinfo=timezone.utc),
+                datetime(2026, 4, 9, 22, 50, 0, tzinfo=timezone.utc),
+            ),
+            combats=[],
+        )
+
+    def test_a_longer_track_moves_the_end(self):
+        window = self._window()
+        grown = window.extended_for_track(5 * 3600)
+
+        assert grown.t_end == window.recording_start + timedelta(seconds=5 * 3600)
+        assert grown.pct_for(datetime(2026, 4, 9, 22, 50, tzinfo=timezone.utc)) == (
+            pytest.approx(85.0)
+        )
+
+    def test_the_start_never_moves(self):
+        """`t0` is the zero point ASR offsets are measured from.
+
+        `ui/engines/asr_worker` places every segment relative to
+        `TimelineWindow.t0`, so a growing axis must not shift it: that
+        would move transcribed speech in time, which is a merge-output
+        change hiding inside a drawing fix. `recording_start` is fixed by
+        `info.txt` and has no business moving either.
+        """
+        window = self._window()
+        grown = window.extended_for_track(9 * 3600)
+
+        assert grown.t0 == window.t0
+        assert grown.recording_start == window.recording_start
+
+    def test_a_shorter_track_leaves_the_window_alone(self):
+        """Longest wins, and the axis never shrinks back.
+
+        Durations arrive one track at a time and in no particular order,
+        so a short track landing after a long one must not pull the edge
+        back in and re-crop the lane that just fitted.
+        """
+        window = self._window()
+        grown = window.extended_for_track(5 * 3600)
+
+        assert grown.extended_for_track(600) is grown
+        assert window.extended_for_track(60) is window
+
+    def test_a_window_with_no_recording_start_cannot_place_a_track(self):
+        """No `info.txt` means no anchor for where the audio begins.
+
+        The window still exists — chat and combat can build one — but
+        placing a duration on it would mean guessing the recording start,
+        and a guess here draws audio at a time it was not recorded.
+        """
+        chat_only = build_window(
+            info_start=None,
+            max_track_duration=None,
+            chat=(
+                datetime(2026, 4, 9, 18, 40, 0, tzinfo=timezone.utc),
+                datetime(2026, 4, 9, 22, 50, 0, tzinfo=timezone.utc),
+            ),
+            combats=[],
+        )
+        assert chat_only is not None
+        assert chat_only.recording_start is None
+        assert chat_only.extended_for_track(9 * 3600) is chat_only
+
+    def test_a_nonsense_duration_is_ignored(self):
+        window = self._window()
+        assert window.extended_for_track(0) is window
+        assert window.extended_for_track(-60) is window
 
 # ── chat_span ────────────────────────────────────────────────────────────
 
@@ -572,3 +694,127 @@ class TestWindowDoesNotRunAway:
             combats=[],
         )
         assert window.t0 == chat_first
+
+
+class TestExtendingReturnsTheSameObjectWhenNothingMoves:
+    """Identity is the contract `SessionMeta._grow_window_for_track` reads.
+
+    It decides whether to emit `timelineWindowChanged` by asking whether
+    `extended_for_track` handed back the same object. An equal-but-new
+    window therefore costs a signal, and that signal costs every source
+    lane a full model reset — for an axis that did not move.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 18, 35, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=(
+                datetime(2026, 4, 9, 18, 40, 0, tzinfo=timezone.utc),
+                datetime(2026, 4, 9, 22, 50, 0, tzinfo=timezone.utc),
+            ),
+            combats=[],
+        )
+
+    def test_a_track_ending_exactly_on_the_edge_changes_nothing(self):
+        """The boundary case: `<=`, not `<`.
+
+        A recording that ends exactly where the chat did is not a
+        contrived input — it is what a session looks like when the last
+        message is sent as the recording stops."""
+        window = self._window()
+        exact = (window.t_end - window.recording_start).total_seconds()
+
+        assert window.extended_for_track(exact) is window
+        # …and one second more does move it, so the boundary is the only
+        # thing being asserted here.
+        assert window.extended_for_track(exact + 1) is not window
+
+
+class TestExtendingToAnAbsoluteMoment:
+    """`extended_to` — growing the axis to cover a moment, whatever anchors it.
+
+    `extended_for_track` measures from `recording_start`, which is right
+    only while the recording is one continuous run. Craig restarts, and a
+    restarted session is several archives with their own `info.txt` and
+    their own start times (feature #4), so the audio ends at
+    `max(segment.start_ts + duration)` — a moment no single duration can
+    name on its own.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=None,
+            combats=[],
+        )  # 17:00 → 21:00 by the four-hour floor
+
+    def test_a_later_moment_moves_the_end(self):
+        window = self._window()
+        # Second Craig archive: starts 20:00, runs three hours.
+        grown = window.extended_to(datetime(2026, 4, 9, 23, 0, tzinfo=timezone.utc))
+
+        assert grown.t_end == datetime(2026, 4, 9, 23, 0, tzinfo=timezone.utc)
+        assert grown.t0 == window.t0
+        assert grown.recording_start == window.recording_start
+
+    def test_a_moment_already_covered_changes_nothing(self):
+        window = self._window()
+        assert window.extended_to(window.t_end) is window
+        assert window.extended_to(window.t0) is window
+
+    def test_a_naive_moment_is_refused(self):
+        """Same rule as `pct_for`: a naive datetime is a bug, not a default."""
+        window = self._window()
+        with pytest.raises(ValueError, match="timezone-aware"):
+            window.extended_to(datetime(2026, 4, 9, 23, 0))
+
+
+class TestTheAxisCannotRunAwayRight:
+    """A duration comes from `ffprobe` output parsed as a bare float.
+
+    `core.peaks.probe_duration` does `float(out.strip())` with no sanity
+    bound, and until this change no such number reached the axis at all —
+    `build_window` is always called with `max_track_duration=None`. A
+    corrupt header therefore had one new way to matter: the left edge has
+    been capped since the Foundry "export whole campaign" incident, and
+    the right edge was uncapped.
+    """
+
+    def _window(self):
+        return build_window(
+            info_start=datetime(2026, 4, 9, 17, 0, 0, tzinfo=timezone.utc),
+            max_track_duration=None,
+            chat=None,
+            combats=[],
+        )
+
+    def test_an_absurd_duration_is_capped_not_obeyed(self):
+        window = self._window()
+        grown = window.extended_for_track(1e9)  # ~31 years
+
+        span_hours = (grown.t_end - grown.t0).total_seconds() / 3600.0
+        assert span_hours <= _MAX_HOURS_AFTER_RECORDING + 1, (
+            "a bogus ffprobe reading must not become millions of ruler ticks"
+        )
+
+    def test_a_duration_that_would_overflow_datetime_does_not_raise(self):
+        """`timedelta(seconds=1e12)` overflows on add and the exception
+        would escape a `@Slot` invoked from the worker thread."""
+        window = self._window()
+        grown = window.extended_for_track(1e12)
+        assert (grown.t_end - grown.t0).total_seconds() / 3600.0 <= (
+            _MAX_HOURS_AFTER_RECORDING + 1
+        )
+
+    def test_nonfinite_durations_are_ignored(self):
+        window = self._window()
+        assert window.extended_for_track(float("nan")) is window
+        assert window.extended_for_track(float("inf")) is window
+
+    def test_a_realistic_long_session_is_not_capped(self):
+        """The cap must sit above any session someone actually records."""
+        window = self._window()
+        grown = window.extended_for_track(11 * 3600)
+        assert grown.t_end == window.recording_start + timedelta(hours=11)
