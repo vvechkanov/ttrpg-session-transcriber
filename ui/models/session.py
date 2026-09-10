@@ -38,6 +38,7 @@ from core.file_matchers import (
 from core.peaks import probe_duration
 from core.speaker_map import load_speaker_map_raw, migrate_legacy_speaker_map
 from core.timeline_window import (
+    _MAX_HOURS_AFTER_RECORDING,
     TimelineWindow,
     build_window,
     chat_timeline,
@@ -1281,6 +1282,14 @@ class TrackListModel(QAbstractListModel):
         segment = entry.segments[seg_idx]
         if segment.duration_sec == seconds:
             return
+        # Clamped before it is stored, not only before it is used. The
+        # number is `float()` over ffprobe's stdout with no sanity bound
+        # (`core.peaks.probe_duration`), and a corrupt header giving 1e12
+        # overflows `start_ts + timedelta(...)` — here, on the UI thread,
+        # and again on every later `SegmentsRole` read if the raw value
+        # were kept. `TimelineWindow` caps the same way for the same
+        # reason; this is the second door into that arithmetic.
+        seconds = min(seconds, _MAX_HOURS_AFTER_RECORDING * 3600.0)
         updated = list(entry.segments)
         updated[seg_idx] = replace(segment, duration_sec=seconds)
         entry.segments = tuple(updated)

@@ -78,6 +78,45 @@ class Shell:
         return roots[0] if roots else None
 
 
+def connect_peaks_worker(worker, peaks_state, session_meta, tracks_model) -> None:
+    """Wire one :class:`PeaksWorker`, dropping anything it sends too late.
+
+    Lives here, out of ``build_shell``'s closure, so it can be tested. The
+    connections it makes are the only route by which a probed duration
+    reaches the timeline axis, and while they sat inside the closure
+    deleting one of them failed nothing.
+
+    Every delivery is gated on the worker still being the current one.
+    Tearing the previous worker down cannot be done by disconnecting it:
+    ``cancel()`` is only checked *before* each probe, so a worker already
+    inside ``ffprobe`` still emits what it holds, and those emissions are
+    queued to this thread — `disconnect()` stops future signals but does
+    not retract a call already in the queue (measured: emit, disconnect,
+    then ``processEvents`` still runs the slot). The queue drains after
+    ``openSession`` has installed the new window, so an old recording's
+    duration would land on it — permanently, because the axis only grows —
+    and an old track's peaks would land on the new track model.
+
+    Identity, not a counter: ``peaks_state["worker"]`` is what
+    ``_on_audio_paths_changed`` already maintains, and a superseded worker
+    is exactly one that is no longer it.
+    """
+
+    def _current() -> bool:
+        return peaks_state.get("worker") is worker
+
+    worker.peaksReady.connect(
+        lambda row, seg, peaks: _current() and tracks_model.setPeaks(row, seg, peaks)
+    )
+    worker.durationReady.connect(
+        lambda seconds: _current() and session_meta.setTotalSeconds(seconds)
+    )
+    worker.segmentDurationReady.connect(
+        lambda row, seg, seconds: _current()
+        and tracks_model.setSegmentDuration(row, seg, seconds)
+    )
+
+
 def build_shell(app: QGuiApplication) -> Shell:
     """Construct the whole object graph and load ``Main.qml``.
 
@@ -151,16 +190,6 @@ def build_shell(app: QGuiApplication) -> Shell:
                 # and the old track's peaks into the new track model.
                 # Silencing the worker is what makes the teardown a
                 # teardown; `cancel()` alone only stops the next probe.
-                for signal in (
-                    prev_worker.durationReady,
-                    prev_worker.segmentDurationReady,
-                    prev_worker.peaksReady,
-                ):
-                    try:
-                        signal.disconnect()
-                    except (RuntimeError, TypeError):
-                        # Nothing was connected to that one.
-                        pass
             prev_thread.quit()
             prev_thread.wait()
 
@@ -173,14 +202,12 @@ def build_shell(app: QGuiApplication) -> Shell:
         worker = PeaksWorker(paths)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.peaksReady.connect(tracks_model.setPeaks)
-        # Per-track duration grows SessionMeta's total_minutes so the
-        # timeline ruler reflects the longest track. Runs here rather
-        # than in SessionMeta.openSession on the UI thread — an
+        # Per-track duration grows SessionMeta's window and total_minutes
+        # so the timeline ruler reflects the longest track. Runs here
+        # rather than in SessionMeta.openSession on the UI thread — an
         # ffprobe-stall on a malformed file would otherwise hang the
         # shell on folder-pick.
-        worker.durationReady.connect(session_meta.setTotalSeconds)
-        worker.segmentDurationReady.connect(tracks_model.setSegmentDuration)
+        connect_peaks_worker(worker, _peaks_state, session_meta, tracks_model)
         worker.allDone.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

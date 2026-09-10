@@ -1349,23 +1349,30 @@ class TestTheWorkerActuallyReachesTheAxis:
         )
         assert (after.t_end.hour, after.t_end.minute) == (23, 35)
 
-    def test_a_silenced_worker_cannot_touch_the_next_session(
+    def test_a_late_delivery_from_a_superseded_worker_is_dropped(
         self, tmp_path, monkeypatch
     ):
-        """Opening a second folder must not inherit the first one's duration.
+        """The real race: the emission is already in the queue at teardown.
 
-        `cancel()` is checked before each probe, so a worker already inside
-        `ffprobe` still emits what it is holding, queued to the UI thread
-        and delivered after the new session is open. The axis only grows,
-        so such a late arrival is permanent. The teardown in
-        `ui/app_qml.py` therefore disconnects the worker as well as
-        cancelling it, and this pins the half that behaviour rests on: a
-        disconnected worker reaches nothing.
+        `cancel()` is checked before each probe, so a worker inside
+        `ffprobe` still emits what it holds, and a queued cross-thread
+        delivery cannot be taken back — measured: emit, `disconnect()`,
+        then `processEvents()` still runs the slot. The queue drains after
+        `openSession` has installed the new window, and the axis only
+        grows, so the stale duration would stick.
+
+        An earlier version of this test called `cancel()` *before* `run()`,
+        which makes `run` return at its pre-probe check without emitting at
+        all — it passed with the production guard deleted. This one enqueues
+        a real delivery first and drains the queue afterwards.
         """
-        _ensure_app()
+        from PySide6.QtCore import QCoreApplication
+        from ui.app_qml import connect_peaks_worker
         from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
         import ui.engines.peaks_worker as pw
 
+        _ensure_app()
         monkeypatch.setattr(pw, "probe_duration", lambda _p: 9 * 3600.0)
         monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
 
@@ -1373,19 +1380,95 @@ class TestTheWorkerActuallyReachesTheAxis:
         meta = SessionMeta()
         sources = SourceListModel()
         sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
         sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
         edge = meta.timelineWindow().t_end
 
         stale = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
-        stale.durationReady.connect(meta.setTotalSeconds)
-        stale.cancel()
-        # The same teardown `ui/app_qml.py` performs. Per-signal, because
-        # PySide6 has no zero-argument `QObject.disconnect()` — the
-        # tidier-looking call raises `TypeError`, which on a session
-        # switch would surface as a crash rather than a stale axis.
-        stale.durationReady.disconnect()
-        stale.run()
+        state: dict = {"worker": stale}
+        connect_peaks_worker(stale, state, meta, tracks)
+
+        # The folder is switched: `_on_audio_paths_changed` installs a new
+        # worker, so the old one is no longer the current one…
+        state["worker"] = object()
+        # …and only now does its in-flight probe come through.
+        stale.durationReady.emit(9 * 3600.0)
+        QCoreApplication.processEvents()
 
         assert meta.timelineWindow().t_end == edge, (
-            "a torn-down worker still moved the axis of the next session"
+            "a nine-hour duration from the previous session moved the new "
+            "session's axis"
         )
+
+    def test_a_delivery_from_the_current_worker_still_arrives(
+        self, tmp_path, monkeypatch
+    ):
+        """The guard must drop only what is stale, not everything."""
+        from PySide6.QtCore import QCoreApplication
+        from ui.app_qml import connect_peaks_worker
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+        import ui.engines.peaks_worker as pw
+
+        _ensure_app()
+        monkeypatch.setattr(pw, "probe_duration", lambda _p: 5 * 3600.0)
+        monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
+
+        session = self._session(tmp_path)
+        meta = SessionMeta()
+        sources = SourceListModel()
+        sources.setSessionMeta(meta)
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        sources.loadFromDir(str(session))
+        tracks.loadFromDir(str(session))
+        edge = meta.timelineWindow().t_end
+
+        worker = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
+        connect_peaks_worker(worker, {"worker": worker}, meta, tracks)
+        worker.durationReady.emit(5 * 3600.0)
+        QCoreApplication.processEvents()
+
+        assert meta.timelineWindow().t_end > edge
+
+
+def test_a_corrupt_segment_duration_cannot_overflow_the_axis(tmp_path: Path) -> None:
+    """`ffprobe` output is parsed as a bare float, and it reaches two doors.
+
+    `TimelineWindow.extended_for_track` caps the scalar path, but the
+    per-segment path adds the duration to the segment's own `start_ts`,
+    and `1e12` seconds overflows a `datetime` there — on the UI thread,
+    where the exception escapes a queued slot. Worse, the raw value would
+    be *stored*, so every later `SegmentsRole` read raises again and the
+    lane cannot be drawn at all.
+    """
+
+    _ensure_app()
+    from ui.models import TrackListModel
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    _write_info(session, "2026-04-09T18:35:00.000Z")
+    craig = session / "craig-1"
+    craig.mkdir()
+    _write_flac_stub(craig / "1-alice.flac")
+    _write_info(craig, "2026-04-09T18:35:00Z")
+
+    meta = SessionMeta()
+    sources = SourceListModel()
+    sources.setSessionMeta(meta)
+    tracks = TrackListModel()
+    tracks.setSessionMeta(meta)
+    sources.loadFromDir(str(session))
+    tracks.loadFromDir(str(session))
+
+    tracks.setSegmentDuration(0, 0, 1e12)  # must not raise
+
+    payload = tracks.data(tracks.index(0), TrackListModel.SegmentsRole)
+    assert payload, "the lane still has to render after a nonsense duration"
+    window = meta.timelineWindow()
+    assert (window.t_end - window.t0).total_seconds() / 3600.0 <= 25.0, (
+        "a corrupt header must not become a month of ruler"
+    )
