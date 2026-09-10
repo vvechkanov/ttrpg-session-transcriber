@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QUrl
+from PySide6.QtCore import QObject, QThread, QUrl, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterSingletonType
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -78,43 +78,74 @@ class Shell:
         return roots[0] if roots else None
 
 
-def connect_peaks_worker(worker, peaks_state, session_meta, tracks_model) -> None:
-    """Wire one :class:`PeaksWorker`, dropping anything it sends too late.
+class PeaksRelay(QObject):
+    """Receives one :class:`PeaksWorker`'s signals on the UI thread.
 
-    Lives here, out of ``build_shell``'s closure, so it can be tested. The
-    connections it makes are the only route by which a probed duration
-    reaches the timeline axis, and while they sat inside the closure
-    deleting one of them failed nothing.
+    A relay object rather than lambdas, and that is the whole point of it.
+    Qt picks a queued connection when the receiver is a ``QObject`` living
+    in another thread; a plain lambda has no receiver, so Qt calls it
+    directly — in the worker thread. Connecting the models' slots through
+    lambdas therefore let ``setPeaks``, ``setSegmentDuration`` and
+    ``setTotalSeconds`` mutate UI-affined objects concurrently with QML.
+    Measured: a bound ``QObject`` method ran on the main thread, the
+    equivalent lambda on the worker's.
+
+    Parented to ``session_meta``, so it lives where the models live and
+    stays alive as long as they do.
 
     Every delivery is gated on the worker still being the current one.
     Tearing the previous worker down cannot be done by disconnecting it:
     ``cancel()`` is only checked *before* each probe, so a worker already
-    inside ``ffprobe`` still emits what it holds, and those emissions are
-    queued to this thread — `disconnect()` stops future signals but does
-    not retract a call already in the queue (measured: emit, disconnect,
+    inside ``ffprobe`` still emits what it holds, and ``disconnect()``
+    does not retract a call already queued (measured: emit, disconnect,
     then ``processEvents`` still runs the slot). The queue drains after
-    ``openSession`` has installed the new window, so an old recording's
-    duration would land on it — permanently, because the axis only grows —
-    and an old track's peaks would land on the new track model.
-
-    Identity, not a counter: ``peaks_state["worker"]`` is what
-    ``_on_audio_paths_changed`` already maintains, and a superseded worker
-    is exactly one that is no longer it.
+    ``openSession`` installed the new window, so an old recording's
+    duration would land on it — permanently, because the axis only grows.
     """
 
-    def _current() -> bool:
-        return peaks_state.get("worker") is worker
+    def __init__(self, worker, peaks_state, session_meta, tracks_model) -> None:
+        super().__init__(session_meta)
+        self._worker = worker
+        self._peaks_state = peaks_state
+        self._session_meta = session_meta
+        self._tracks_model = tracks_model
 
-    worker.peaksReady.connect(
-        lambda row, seg, peaks: _current() and tracks_model.setPeaks(row, seg, peaks)
-    )
-    worker.durationReady.connect(
-        lambda seconds: _current() and session_meta.setTotalSeconds(seconds)
-    )
-    worker.segmentDurationReady.connect(
-        lambda row, seg, seconds: _current()
-        and tracks_model.setSegmentDuration(row, seg, seconds)
-    )
+    def _superseded(self) -> bool:
+        return self._peaks_state.get("worker") is not self._worker
+
+    @Slot(int, int, list)
+    def onPeaks(self, row: int, seg_idx: int, peaks: list) -> None:
+        if self._superseded():
+            return
+        self._tracks_model.setPeaks(row, seg_idx, peaks)
+
+    @Slot(float)
+    def onDuration(self, seconds: float) -> None:
+        if self._superseded():
+            return
+        self._session_meta.setTotalSeconds(seconds)
+
+    @Slot(int, int, float)
+    def onSegmentDuration(self, row: int, seg_idx: int, seconds: float) -> None:
+        if self._superseded():
+            return
+        self._tracks_model.setSegmentDuration(row, seg_idx, seconds)
+
+
+def connect_peaks_worker(worker, peaks_state, session_meta, tracks_model):
+    """Wire one :class:`PeaksWorker` and return the relay doing it.
+
+    Lives out of ``build_shell``'s closure so it can be tested: these
+    connections are the only route by which a probed duration reaches the
+    timeline axis, and while they sat inside the closure deleting one of
+    them failed nothing.
+    """
+
+    relay = PeaksRelay(worker, peaks_state, session_meta, tracks_model)
+    worker.peaksReady.connect(relay.onPeaks)
+    worker.durationReady.connect(relay.onDuration)
+    worker.segmentDurationReady.connect(relay.onSegmentDuration)
+    return relay
 
 
 def build_shell(app: QGuiApplication) -> Shell:
@@ -207,7 +238,9 @@ def build_shell(app: QGuiApplication) -> Shell:
         # rather than in SessionMeta.openSession on the UI thread — an
         # ffprobe-stall on a malformed file would otherwise hang the
         # shell on folder-pick.
-        connect_peaks_worker(worker, _peaks_state, session_meta, tracks_model)
+        _peaks_state["relay"] = connect_peaks_worker(
+            worker, _peaks_state, session_meta, tracks_model
+        )
         worker.allDone.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)

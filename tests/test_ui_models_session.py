@@ -1352,28 +1352,37 @@ class TestTheWorkerActuallyReachesTheAxis:
     def test_a_late_delivery_from_a_superseded_worker_is_dropped(
         self, tmp_path, monkeypatch
     ):
-        """The real race: the emission is already in the queue at teardown.
+        """The real race, driven from a real worker thread.
 
-        `cancel()` is checked before each probe, so a worker inside
-        `ffprobe` still emits what it holds, and a queued cross-thread
-        delivery cannot be taken back — measured: emit, `disconnect()`,
-        then `processEvents()` still runs the slot. The queue drains after
-        `openSession` has installed the new window, and the axis only
-        grows, so the stale duration would stick.
+        Two earlier versions of this test proved nothing. The first called
+        `cancel()` before `run()`, and a cancelled worker returns at its
+        pre-probe check without emitting at all. The second emitted from
+        the test thread, so the receiver ran synchronously and
+        `processEvents()` had no cross-thread delivery to drain — it
+        checked an identity comparison and neither the threading nor the
+        teardown ordering.
 
-        An earlier version of this test called `cancel()` *before* `run()`,
-        which makes `run` return at its pre-probe check without emitting at
-        all — it passed with the production guard deleted. This one enqueues
-        a real delivery first and drains the queue afterwards.
+        Here the worker runs on its own `QThread` over a probe stubbed to
+        block until released, so the emission is genuinely in flight while
+        the session is switched.
         """
-        from PySide6.QtCore import QCoreApplication
+        import threading
+        from PySide6.QtCore import QCoreApplication, QThread
         from ui.app_qml import connect_peaks_worker
         from ui.engines.peaks_worker import PeaksWorker
         from ui.models import TrackListModel
         import ui.engines.peaks_worker as pw
 
         _ensure_app()
-        monkeypatch.setattr(pw, "probe_duration", lambda _p: 9 * 3600.0)
+        released = threading.Event()
+        probed = threading.Event()
+
+        def _blocking_probe(_path):
+            probed.set()
+            released.wait(5)
+            return 9 * 3600.0
+
+        monkeypatch.setattr(pw, "probe_duration", _blocking_probe)
         monkeypatch.setattr(pw, "get_or_compute_peaks", lambda *a, **k: [])
 
         session = self._session(tmp_path)
@@ -1388,18 +1397,58 @@ class TestTheWorkerActuallyReachesTheAxis:
 
         stale = PeaksWorker([(0, 0, str(session / "craig-1" / "1-alice.flac"))])
         state: dict = {"worker": stale}
-        connect_peaks_worker(stale, state, meta, tracks)
+        relay = connect_peaks_worker(stale, state, meta, tracks)
+        assert relay is not None
 
-        # The folder is switched: `_on_audio_paths_changed` installs a new
-        # worker, so the old one is no longer the current one…
+        thread = QThread()
+        stale.moveToThread(thread)
+        thread.started.connect(stale.run)
+        thread.start()
+        assert probed.wait(5), "the stubbed probe never ran"
+
+        # The user opens another folder: a new worker becomes current
+        # while the old one is still inside ffprobe.
         state["worker"] = object()
-        # …and only now does its in-flight probe come through.
-        stale.durationReady.emit(9 * 3600.0)
+        released.set()
+        stale.allDone.connect(thread.quit)
+        thread.quit()
+        assert thread.wait(5000)
+        # Now drain what the old worker queued while it was being replaced.
         QCoreApplication.processEvents()
 
         assert meta.timelineWindow().t_end == edge, (
             "a nine-hour duration from the previous session moved the new "
             "session's axis"
+        )
+
+    def test_the_relay_lives_on_the_receiving_thread(self, tmp_path):
+        """Connections must be queued, not direct.
+
+        Qt picks a queued connection when the receiver is a `QObject` in
+        another thread; a lambda has no receiver and is called inline —
+        in the worker's thread — which would let the models be mutated
+        concurrently with QML. Measured directly: a bound `QObject` method
+        ran on the main thread where the equivalent lambda did not.
+        """
+        from PySide6.QtCore import QThread
+        from ui.app_qml import connect_peaks_worker
+        from ui.engines.peaks_worker import PeaksWorker
+        from ui.models import TrackListModel
+
+        _ensure_app()
+        meta = SessionMeta()
+        tracks = TrackListModel()
+        tracks.setSessionMeta(meta)
+        worker = PeaksWorker([])
+        relay = connect_peaks_worker(worker, {"worker": worker}, meta, tracks)
+
+        assert relay.thread() is meta.thread(), (
+            "the relay has to live where the models live"
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        assert relay.thread() is not worker.thread(), (
+            "receiver and sender in one thread means a direct call"
         )
 
     def test_a_delivery_from_the_current_worker_still_arrives(
