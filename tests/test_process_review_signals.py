@@ -257,6 +257,13 @@ APPROVAL_SIGN_REGIONS = {
                 "`Code Review` со статусом `Completed`, чей коммит совпадает "
                 "с началом текущего HEAD.**"
             ),
+            phrase(
+                "**`Completed` говорит о завершении, а не об итоге, поэтому "
+                "два канала — не «или», а «сначала находки, потом сводка».**"
+            ),
+            phrase(
+                "объекта ревью с `commit_id` на текущем HEAD **нет вовсе**"
+            ),
         ),
     ),
     "why the security row is excluded from the comparison": (
