@@ -67,7 +67,7 @@ SECTION_6 = re.compile(r"^## 6\..*?(?=^## 7\.)", re.MULTILINE | re.DOTALL)
 #: makes the rule make sense. What must not be swapped is the instruction.
 CHANNELS = {
     "findings": ("**Есть замечания", "**Сказать нечего", "get_reviews"),
-    "approval": ("**Сказать нечего", "**SHA в этой строке", "get_comments"),
+    "approval": ("**Сказать нечего", "**Строка `Security Review`", "get_comments"),
 }
 
 #: How §5 writes a call the agent is meant to make.
@@ -88,10 +88,17 @@ REQUIRED_CLAIMS = {
         phrase("Reviewed commit"),
         "the comment is only evidence if the reader matches its sha line",
     ),
-    "how long that sha is": (
+    "how long the findings channel's sha is": (
         phrase("префикс в 10 символов"),
-        "the comment carries a 10-character prefix, and a reader who assumes "
-        "a full sha compares two things that can never be equal",
+        "the review body carries a 10-character prefix, and a reader who "
+        "assumes a full sha compares two things that can never be equal",
+    ),
+    "how long the summary table's sha is": (
+        phrase("префикс в 7 символов"),
+        "the two channels disagree on length — the review body writes ten "
+        "characters, the summary table seven. A reader who carries the "
+        "findings channel's ten over to the table slices a sha that is only "
+        "seven long and never matches",
     ),
     "which way that sha is compared": (
         phrase("через «начинается с», а не на равенство"),
@@ -160,6 +167,74 @@ REQUIRED_CLAIMS = {
         "costing the silent PR its only call",
     ),
 }
+
+#: The approval channel's *contents*, pinned paragraph by paragraph.
+#:
+#: :data:`CHANNELS` settles which call the approval paragraph makes;
+#: this settles what the agent is told to look for in the answer, and that
+#: half went stale on its own. Codex changed its scheme: it now keeps one
+#: «Codex Review Summary» comment and edits it in place, and when a review
+#: finds nothing it writes no new message at all. The old sign — a fresh
+#: comment carrying «Reviewed commit» — simply stopped arriving, so §5 read
+#: every clean commit as un-reviewed and the PR slept in «На ревью». That is
+#: the same failure PR #21 fixed, returning from the other side, which is why
+#: the pins here are on the *facts the loop acts on* rather than on prose.
+#:
+#: Three regions, each bounded by the paragraph that follows it, so that
+#: deleting any one of them fails here rather than quietly narrowing the rule:
+#:
+#: 1. Which row of the table is the sign. The table lists several reviews, and
+#:    «отревьюено» is a claim about one of them.
+#: 2. Why the Security Review row is *not* compared with HEAD. It has its own
+#:    trigger and is not re-run by a push: on PR #27 it stayed on the opening
+#:    commit through four of them while Code Review moved on. A rule saying
+#:    «every row on HEAD» never converges — the original bug, re-entered.
+#: 3. Why the one machine-readable block in the summary is not the sign. It is
+#:    the obvious thing to reach for — JSON, in a document otherwise made of
+#:    prose — and it belongs to Security Review: on PR #27 it held `9ee5569`
+#:    while Code Review was already four commits ahead.
+#:
+#: Scoped to a region rather than to §5 as a whole, for the reason
+#: :data:`CALL_SITES` is: a fact stated somewhere in §5 is not a fact
+#: available to the agent standing on this step.
+#:
+#: Matched through :func:`phrase`, not as plain substrings. The document is
+#: hard-wrapped at 78 columns, so every one of these sentences is split across
+#: two lines somewhere — a substring check would fail on prose that says
+#: exactly the right thing, which is the kind of red that teaches an editor to
+#: weaken the guard.
+APPROVAL_SIGN_REGIONS = {
+    "which row of the summary is the sign": (
+        "**Сказать нечего",
+        "**Строка `Security Review`",
+        (
+            phrase("Codex Review Summary"),
+            phrase("правит на месте"),
+            phrase("Review | Status | Commit | Review trigger"),
+            phrase("строка `Code Review` со статусом `Completed`"),
+            phrase("совпадает с началом текущего HEAD"),
+        ),
+    ),
+    "why the security row is excluded from the comparison": (
+        "**Строка `Security Review`",
+        "**HTML-блок",
+        (
+            phrase("с HEAD не сверяется"),
+            phrase("на пуши она не перезапускается"),
+            phrase("9ee5569"),
+        ),
+    ),
+    "why the machine-readable block is not the sign": (
+        "**HTML-блок",
+        "**SHA в ячейке таблицы",
+        (
+            phrase("codex-security-review:v1"),
+            phrase("принадлежит Security Review"),
+            phrase("Полного SHA у строки `Code Review` в сводке нет"),
+        ),
+    ),
+}
+
 
 #: What the process document must not send the reader after, anywhere. The
 #: cloud agent has no way to read any of it: `api.github.com` is refused by
@@ -400,6 +475,37 @@ def test_each_channel_prescribes_its_own_call(
         f"the {channel} paragraph prescribes {prescribed or 'no call'}, "
         f"expected exactly ['{expected}'] — the two channels look swapped, "
         "which sends the agent to the one that stays silent for this case"
+    )
+
+
+@pytest.mark.parametrize(("region", "spec"), sorted(APPROVAL_SIGN_REGIONS.items()))
+def test_the_approval_channel_names_the_sign_that_actually_arrives(
+    section_5: str, region: str, spec: tuple[str, str, tuple[re.Pattern[str], ...]]
+) -> None:
+    """The approval half of step 10 describes today's Codex, not last month's.
+
+    The call is right — approval does arrive through `get_comments` — and that
+    is exactly why this needed its own guard: :data:`CHANNELS` stayed green
+    while the thing the agent was told to find inside the answer stopped
+    existing. A correct call and a sign that never appears fail the same way
+    as a wrong call, and more quietly.
+    """
+    opening, closing, expected = spec
+    start = section_5.find(opening)
+    assert start != -1, f"§5 no longer opens {region} with {opening!r}"
+    end = section_5.find(closing, start + 1)
+    assert end != -1, (
+        f"{region} no longer ends at {closing!r} — the paragraph that "
+        "follows it is gone, and with it the rule it carried"
+    )
+
+    paragraph = section_5[start:end]
+    missing = [fact.pattern for fact in expected if not fact.search(paragraph)]
+    assert not missing, (
+        f"{region}: §5 no longer states {missing}. Each of these is read by "
+        "the agent deciding whether the current HEAD has been reviewed; "
+        "without one of them the loop either waits for a sign that never "
+        "comes or merges on one that belongs to another commit."
     )
 
 
