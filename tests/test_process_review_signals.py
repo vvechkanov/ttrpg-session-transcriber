@@ -264,6 +264,8 @@ APPROVAL_SIGN_REGIONS = {
             phrase(
                 "объекта ревью с `commit_id` на текущем HEAD **нет вовсе**"
             ),
+            phrase("**Одного порядка мало: `get_reviews` читается дважды.**"),
+            phrase("только пустой второй ответ означает «чисто»"),
         ),
     ),
     "why the security row is excluded from the comparison": (
