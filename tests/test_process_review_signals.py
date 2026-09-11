@@ -67,8 +67,20 @@ SECTION_6 = re.compile(r"^## 6\..*?(?=^## 7\.)", re.MULTILINE | re.DOTALL)
 #: makes the rule make sense. What must not be swapped is the instruction.
 CHANNELS = {
     "findings": ("**Есть замечания", "**Сказать нечего", "get_reviews"),
-    "approval": ("**Сказать нечего", "**Строка `Security Review`", "get_comments"),
+    "approval": ("**Сказать нечего", "Искать надо единственный", "get_comments"),
 }
+
+#: The approval region above stops at the sentence after its fence, not at
+#: the end of the rule it opens. That is narrower than it looks like it
+#: should be, and deliberately so: the assertion is an *exact* list of
+#: prescribed calls, so every paragraph inside the region is a paragraph that
+#: may never legitimately prescribe anything else. Widened once to cover the
+#: whole approval rule, it turned a lawful addition — quoting
+#: `method=get → head.sha` next to the HEAD it fetches — into a red reading
+#: «the two channels look swapped», which is a false diagnosis pointing an
+#: editor at the wrong repair. What the rule *says* is guarded by
+#: :data:`APPROVAL_SIGN_REGIONS`, which asks about phrases rather than calls
+#: and can therefore span as much prose as it likes.
 
 #: How §5 writes a call the agent is meant to make.
 PRESCRIBED_CALL = re.compile(r"pull_request_read method=(\w+)")
@@ -84,9 +96,12 @@ REQUIRED_CLAIMS = {
         phrase("commit_id"),
         "a review is only evidence about the commit it names",
     ),
-    "the line the comment carries": (
+    "the line the review body carries": (
         phrase("Reviewed commit"),
-        "the comment is only evidence if the reader matches its sha line",
+        "the line still exists, but only inside a review body — naming it "
+        "is what keeps the next reader from hunting for it in the approval "
+        "channel, where Codex stopped writing it and where its absence "
+        "means nothing at all",
     ),
     "how long the findings channel's sha is": (
         phrase("префикс в 10 символов"),
@@ -131,7 +146,7 @@ REQUIRED_CLAIMS = {
         "service",
     ),
     "that step 10.1 itself names both channels": (
-        phrase("ревью **или одобрительного комментария**"),
+        phrase("ревью **или строки `Code Review` в сводке Codex**"),
         "the numbered list is what the agent executes top-down; leaving "
         "«дождаться ревью» there reproduces the exact wording that caused "
         "the bug, whatever the prose eighty lines below says",
@@ -203,6 +218,32 @@ REQUIRED_CLAIMS = {
 #: two lines somewhere — a substring check would fail on prose that says
 #: exactly the right thing, which is the kind of red that teaches an editor to
 #: weaken the guard.
+#:
+#: Each required entry is a whole sentence rather than a fragment, and that
+#: is the load-bearing detail. Mutation testing found the same hole in every
+#: region while the pins were fragments: a rule can be cancelled inside its
+#: own paragraph with every pinned phrase still present word for word. «А вот
+#: строка `Code Review` … признаком как раз не является» contains the pin and
+#: means its opposite, and the guard stayed green while the document
+#: prescribed the never-converging rule the next region exists to refuse.
+#: :data:`REQUIRED_CLAIMS` already knew this about single phrases — its
+#: `начинается с` entry says so — and the answer there was to pin word order.
+#: Pinning the sentence whole is the same answer at paragraph scale: an
+#: inversion has to break the sentence to write itself.
+#:
+#: A ban list was tried here beside the required set and is deliberately not
+#: kept. It killed nothing the whole-sentence pins did not already kill, and
+#: seven rewritings walked around it in one sitting — Russian morphology
+#: hands out `строка → строчка` and `все → каждую` for free, and two of the
+#: seven needed no banned vocabulary at all («записано до смены схемы и
+#: больше не действует», «это правило не применяется, когда…»). What would
+#: have to be forbidden is not a wording but *a second, contradicting
+#: prescription inside the region*, and an enumeration is the wrong shape for
+#: that. Keeping the list would have bought the appearance of a fence around
+#: a gap of the same size. The gap is real and filed as
+#: https://trello.com/c/HGPIC0Y1 ; until then, a paragraph that states a rule
+#: and its negation is a contradiction on the page, which is review's to
+#: catch and not a test's.
 APPROVAL_SIGN_REGIONS = {
     "which row of the summary is the sign": (
         "**Сказать нечего",
@@ -211,17 +252,21 @@ APPROVAL_SIGN_REGIONS = {
             phrase("Codex Review Summary"),
             phrase("правит на месте"),
             phrase("Review | Status | Commit | Review trigger"),
-            phrase("строка `Code Review` со статусом `Completed`"),
-            phrase("совпадает с началом текущего HEAD"),
+            phrase(
+                "Признак того, что итерация отревьюена, один: **строка "
+                "`Code Review` со статусом `Completed`, чей коммит совпадает "
+                "с началом текущего HEAD.**"
+            ),
         ),
     ),
     "why the security row is excluded from the comparison": (
         "**Строка `Security Review`",
         "**HTML-блок",
         (
-            phrase("с HEAD не сверяется"),
+            phrase("**Строка `Security Review` с HEAD не сверяется.**"),
             phrase("на пуши она не перезапускается"),
             phrase("9ee5569"),
+            phrase("Правило «все строки таблицы на HEAD» не сойдётся никогда"),
         ),
     ),
     "why the machine-readable block is not the sign": (
@@ -231,6 +276,19 @@ APPROVAL_SIGN_REGIONS = {
             phrase("codex-security-review:v1"),
             phrase("принадлежит Security Review"),
             phrase("Полного SHA у строки `Code Review` в сводке нет"),
+        ),
+    ),
+    "what to do when no sign is there": (
+        "**SHA в ячейке таблицы",
+        "Мержит агент сам",
+        (
+            phrase("префикс в 7 символов"),
+            phrase("через «начинается с», а не на равенство"),
+            phrase(
+                "ни строки `Code Review` со статусом `Completed` и его "
+                "префиксом в ячейке — ревью этой версии ещё не было, "
+                "мержить нельзя"
+            ),
         ),
     ),
 }
@@ -446,12 +504,18 @@ def test_section_5_is_actually_there(section_5: str) -> None:
     empty string. They are only meaningful because this runs beside them.
 
     The floor sits just under the real length rather than at a round number:
-    §5 is 205 lines, and a floor of 50 would let it lose three quarters of
+    §5 is 325 lines, and a floor of 50 would let it lose three quarters of
     itself — including every paragraph this guard exists to protect — while
     staying green.
+
+    It is a floor and nothing finer. Mutation testing deleted a four-line
+    paragraph and this stayed green, correctly: no line count can catch that,
+    and the answer was to pin the paragraph in
+    :data:`APPROVAL_SIGN_REGIONS` rather than to tighten the number until it
+    fails on any honest edit.
     """
     assert "Цикл ревью" in section_5, "§5 no longer contains the review loop"
-    assert len(section_5.splitlines()) > 190, "§5 lost a substantial part"
+    assert len(section_5.splitlines()) > 300, "§5 lost a substantial part"
 
 
 @pytest.mark.parametrize(("channel", "spec"), sorted(CHANNELS.items()))
@@ -480,7 +544,9 @@ def test_each_channel_prescribes_its_own_call(
 
 @pytest.mark.parametrize(("region", "spec"), sorted(APPROVAL_SIGN_REGIONS.items()))
 def test_the_approval_channel_names_the_sign_that_actually_arrives(
-    section_5: str, region: str, spec: tuple[str, str, tuple[re.Pattern[str], ...]]
+    section_5: str,
+    region: str,
+    spec: tuple[str, str, tuple[re.Pattern[str], ...]],
 ) -> None:
     """The approval half of step 10 describes today's Codex, not last month's.
 
