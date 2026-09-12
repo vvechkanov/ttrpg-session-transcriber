@@ -137,7 +137,12 @@ def _is_path_shaped(token: str) -> bool:
 
 #: A relative Markdown link target: `[text](docs/adr/thing.md)`, not `[t](http…)`
 #: and not `[t](#anchor)`.
-MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
+#: One level of balanced parentheses is allowed inside the destination, because
+#: `[design](docs/ui_(draft).md)` is a legal link and `[^)\s]+` stops at the
+#: first `)` — handing the check `docs/ui_(draft`, a path nobody wrote.
+MARKDOWN_LINK = re.compile(
+    r"\[[^\]]*\]\((?!https?:|mailto:|#)((?:[^()\s]|\([^()\s]*\))+)\)"
+)
 
 #: A reference-style Markdown definition: `[ui]: docs/adr/thing.md`. The use
 #: site (`[ADR][ui]`) names no path at all, so the definition is the only place
@@ -311,8 +316,14 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
             token = LINE_REFERENCE.sub("", token)
             if not token or " " in token:
                 continue
-            if any(char in token for char in "%<>{}|*'\"=("):
-                continue  # an env var, a placeholder, a glob, a line of code
+            if any(char in token for char in "%<>{}|*"):
+                continue  # an environment variable, a placeholder, a glob
+            if not from_link and any(char in token for char in "'\"=("):
+                # A line of code caught in a fence: `run(Path('games/x/Y'))`.
+                # A link destination is already delimited by its own brackets,
+                # so the same characters there are part of a filename — and
+                # dropping it would leave a broken link unreported.
+                continue
             if from_link:
                 # Anchor the destination to its document before anything else
                 # looks at it. A link that climbs out of the tree — GitHub's
@@ -774,6 +785,22 @@ def test_a_line_of_code_is_not_a_path():
     Python. `run(Path('games/bogomols/X'` is a call, not a claim."""
     assert _claimed_paths("```\nrun(Path('games/x/Y'))\n```") == []
     assert _claimed_paths("```\nmodel='bzikst/faster-whisper-ru'\n```") == []
+
+
+def test_a_destination_may_carry_the_characters_code_is_filtered_on():
+    """Codex on PR #29. The quote/paren filter is aimed at code caught in a
+    fence, and a link destination is delimited by its own brackets — applying
+    it there drops a legal filename instead, and a link to a missing
+    `docs/ui_(draft).md` would report nothing at all.
+
+    The regex has to reach the real closing bracket first: `[^)\\s]+` hands
+    back `docs/ui_(draft`, which is not a path anyone wrote either."""
+    assert _claimed_paths("[design](docs/ui_(draft).md)") == [
+        (1, "docs/ui_(draft).md")
+    ]
+    assert _claimed_paths("[q](docs/it's.md)") == [(1, "docs/it's.md")]
+    # Still a link, still checked, and still absent from the tree.
+    assert not _exists("docs/ui_(draft).md")
 
 
 def test_a_dotted_symbol_is_not_a_filename():
