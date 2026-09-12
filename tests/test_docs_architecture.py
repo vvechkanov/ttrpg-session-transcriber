@@ -140,8 +140,12 @@ def _is_path_shaped(token: str) -> bool:
 #: One level of balanced parentheses is allowed inside the destination, because
 #: `[design](docs/ui_(draft).md)` is a legal link and `[^)\s]+` stops at the
 #: first `)` — handing the check `docs/ui_(draft`, a path nobody wrote.
+#: The optional title — `[guide](docs/guide.md "Guide")` — has to be consumed
+#: too, or the link yields no candidate at all and deleting its target leaves
+#: the guard green.
 MARKDOWN_LINK = re.compile(
-    r"\[[^\]]*\]\((?!https?:|mailto:|#)((?:[^()\s]|\([^()\s]*\))+)\)"
+    r"\[[^\]]*\]\((?!https?:|mailto:|#)((?:[^()\s]|\([^()\s]*\))+)"
+    r"(?:\s+[\"'][^\"']*[\"'])?\)"
 )
 
 #: A reference-style Markdown definition: `[ui]: docs/adr/thing.md`. The use
@@ -253,26 +257,34 @@ def _repository_entries() -> frozenset[str]:
     return frozenset(name.split("/")[0] for name in _repository_files())
 
 
-def _is_planned(line: str, written: str, from_link: bool) -> bool:
-    """Whether `(planned)` excuses this path on this line.
+def _is_planned(line: str, end_of_path: int) -> bool:
+    """Whether `(planned)` excuses the path that ends at `end_of_path`.
 
-    The marker has to sit against the path as the *document* spells it, or a
-    roadmap cannot name the file it plans to add. Three spellings carry it,
-    and the link one was missed for as long as only `ARCHITECTURE.md` — which
-    has no such links — was read: in ``[design](docs/future.md) (planned)`` a
-    closing bracket stands between the destination and the marker, so neither
-    ``docs/future.md (planned)`` nor its backticked form occurs in the line at
-    all, and the escape silently did nothing.
+    Bound to the occurrence rather than looked for anywhere on the line. A
+    search of the whole line excuses *every* copy of a path as soon as one is
+    marked: in ``[future](docs/future.md) (planned); [now](docs/future.md)``
+    the second link is an unqualified claim about today and was waved through
+    by the first one's marker.
+
+    The three spellings differ only in what sits between the path and the
+    marker — a closing backtick, a closing bracket, or nothing — so the
+    position is taken at the end of the path itself and the punctuation is
+    stepped over. The link case was missed for as long as only
+    `ARCHITECTURE.md` was read: it carries no such links.
     """
-    if f"`{written}` (planned)" in line:
-        return True
-    if f"{written} (planned)" in line:  # bare, and the reference-style form
-        return True
-    return from_link and f"]({written}) (planned)" in line
+    return line[end_of_path:].lstrip("`)").startswith(" (planned)")
 
 
-def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
-    """Every backticked token that points at something inside this repository.
+def _claims_with_origin(
+    text: str, document: str = ""
+) -> list[tuple[int, str, bool]]:
+    """Every claimed path, with whether it came from a Markdown link.
+
+    The flag matters to the caller as well as here: a link destination is a
+    path by construction, so the "slashed paths only" boundary — which exists
+    to keep *bare backticked filenames* out of scope — must not apply to it.
+    `[TASKS.md](TASKS.md)` is an unambiguous claim about a root file, and
+    dropping it let a rename break every such link with the guard green.
 
     Anything shaped like a path is a claim unless it is explicitly excused in
     :data:`NOT_REPOSITORY_PATHS` or carries a shell/URL marker. Keying on
@@ -314,25 +326,27 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
         # a link destination is a path by construction and must not be filtered
         # by shape: `[shot](docs/screenshots/x.png)` names a file whose suffix
         # this module's allowlist does not carry.
+        # Each candidate carries where its path ends in the line, so the
+        # `(planned)` marker can be bound to this occurrence and not to a
+        # different copy of the same path further along.
+        candidates: list[tuple[str, bool, int]] = []
         if in_fence:
-            candidates = [
-                (token, False)
-                for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line)
-                if "/" in token
-            ]
+            cursor = 0
+            for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line):
+                if not token:
+                    continue
+                found = line.find(token, cursor)
+                cursor = (found if found >= 0 else cursor) + len(token)
+                if "/" in token:
+                    candidates.append((token, False, cursor))
         else:
-            candidates = [
-                (match.group(1), False)
-                for match in re.finditer(r"`([^`\n]+)`", line)
-            ]
-            candidates += [(token, True) for token in MARKDOWN_LINK.findall(line)]
-            candidates += [(token, True) for token in MARKDOWN_REFERENCE.findall(line)]
-        for token, from_link in candidates:
-            # As written in the document. The `(planned)` escape is matched
-            # against this rather than against the processed path: by the time
-            # a link has been anchored to its document and a line reference
-            # stripped, the token no longer occurs in the line at all.
-            written = token
+            for match in re.finditer(r"`([^`\n]+)`", line):
+                candidates.append((match.group(1), False, match.end(1)))
+            for match in MARKDOWN_LINK.finditer(line):
+                candidates.append((match.group(1), True, match.end(1)))
+            for match in MARKDOWN_REFERENCE.finditer(line):
+                candidates.append((match.group(1), True, match.end(1)))
+        for token, from_link, path_ends_at in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
@@ -348,6 +362,13 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
                 # dropping it would leave a broken link unreported.
                 continue
             if from_link:
+                # A destination is a URL reference, so it can carry a query as
+                # well as a fragment: `docs/example.md?raw=1` names a file that
+                # exists, and checking the literal string fails CI on a valid
+                # link — a false red, the one failure mode worse than a miss.
+                token = token.split("?", 1)[0]
+                if not token:
+                    continue
                 # Anchor the destination to its document before anything else
                 # looks at it. A link that climbs out of the tree — GitHub's
                 # `../../releases` idiom points at the *repository*, not a
@@ -372,10 +393,15 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
                     continue  # an output file, or a bare word — not a repo path
                 if pathlib.PurePath(token).suffix not in FILE_SUFFIXES:
                     continue  # `core.pipeline.run` is a symbol, not a file
-            if _is_planned(line, written, from_link):
+            if _is_planned(line, path_ends_at):
                 continue
-            claims.append((line_number, token))
+            claims.append((line_number, token, from_link))
     return claims
+
+
+def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
+    """:func:`_claims_with_origin` without the origin flag."""
+    return [(line, token) for line, token, _ in _claims_with_origin(text, document)]
 
 
 #: Documents that record what was true when they were written, and are not
@@ -440,16 +466,20 @@ def _live_documents() -> list[str]:
 def _broken_paths_in(document: str) -> list[str]:
     """Slashed paths the document names that the repository does not carry.
 
-    Slashed only: a bare `ci.yml` names a real file without saying where it
-    lives, which is a naming policy and a separate card — 152 of them, none of
-    them rot.
+    Slashed only, *unless the path came from a Markdown link*: a bare `ci.yml`
+    in backticks names a real file without saying where it lives, which is a
+    naming policy and a separate card — 152 of them, none of them rot. A link
+    is not that case. `[TASKS.md](TASKS.md)` says exactly which file it means,
+    and skipping it for want of a slash let a rename of `TASKS.md` break the
+    links in `README.md`, `CONTRIBUTING.md` and `TASKS.md` itself while this
+    guard stayed green.
     """
     text = (PROJECT_ROOT / document).read_text(encoding="utf-8")
     return sorted(
         {
             f"{document}:{line} -> {token}"
-            for line, token in _claimed_paths(text, document)
-            if "/" in token and not _exists(token)
+            for line, token, from_link in _claims_with_origin(text, document)
+            if (from_link or "/" in token) and not _exists(token)
         }
     )
 
@@ -578,6 +608,40 @@ def test_the_planned_marker_reaches_a_markdown_link_too():
     ]
 
 
+def test_the_planned_marker_belongs_to_one_occurrence():
+    """Codex on PR #29. Searching the whole line excuses every copy of a path
+    as soon as one of them is marked, so an unqualified claim about today
+    rides out on a neighbour's plan."""
+    line = "[future](docs/future.md) (planned); [now](docs/future.md)"
+
+    assert _claimed_paths(line) == [(1, "docs/future.md")], "only the second one"
+
+    # Order does not rescue it either.
+    assert _claimed_paths("[now](docs/future.md); [f](docs/future.md) (planned)") == [
+        (1, "docs/future.md")
+    ]
+
+
+def test_a_link_may_carry_a_title():
+    """Codex on PR #29. `[guide](docs/guide.md "Guide")` is ordinary CommonMark
+    and yielded no candidate at all, so deleting its target left the guard
+    green."""
+    assert _claimed_paths('[guide](docs/gone.md "Guide")') == [(1, "docs/gone.md")]
+    assert _claimed_paths("[guide](docs/gone.md 'Guide')") == [(1, "docs/gone.md")]
+    assert _claimed_paths("[guide](docs/gone.md)") == [(1, "docs/gone.md")]
+
+
+def test_a_query_string_is_not_part_of_the_filename():
+    """Codex on PR #29, and this one fails in the dangerous direction: a valid
+    `[raw](README.md?raw=1)` was checked as the literal string and reported
+    broken, turning CI red on a document that is correct."""
+    assert _claimed_paths("[raw](README.md?raw=1)") == [(1, "README.md")]
+    assert _exists("README.md"), "so the link above is green, as it should be"
+    assert _claimed_paths("[raw](docs/gone.md?raw=1)") == [(1, "docs/gone.md")]
+
+
+
+
 def test_paths_inside_fenced_blocks_are_checked():
     """The layer diagrams live in fences, and that is where `ui/gui.py`
     survived every prose correction for months."""
@@ -704,6 +768,34 @@ def test_git_decides_what_the_repository_contains(tmp_path, monkeypatch):
     assert _exists("core/")
     assert not _exists("handoff/impostor.py"), "on disk, but git does not track it"
     assert not _exists("impostor.py"), "bare name found only in an untracked file"
+
+
+@needs_git
+def test_a_link_to_a_root_file_is_checked_even_without_a_slash(tmp_path, monkeypatch):
+    """Codex on PR #29. The slashed-only boundary keeps *backticked bare
+    names* out of scope — a naming policy, filed as its own card. A link is
+    not that case: `[TASKS.md](TASKS.md)` says which file it means, and
+    dropping it let a rename of `TASKS.md` break that link in `README.md`,
+    `CONTRIBUTING.md` and `TASKS.md` itself with the guard green.
+
+    Driven through :func:`_broken_paths_in` against a real repository rather
+    than through the extractor, because the boundary being tested lives in
+    that function: a first version of this test re-applied the filter in its
+    own assertion and stayed green when the defect was restored by mutation.
+    """
+    _init_repository(tmp_path)
+    (tmp_path / "README.md").write_text(
+        "see [roadmap](TASKS.md) and `ci.yml`\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True
+    )
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _broken_paths_in("README.md") == ["README.md:1 -> TASKS.md"], (
+        "the link names a root file that is not there; `ci.yml` is a bare "
+        "backticked name and stays out of scope"
+    )
 
 
 @needs_git
