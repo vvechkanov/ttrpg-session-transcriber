@@ -39,7 +39,7 @@ How was this tested? What did you run?
 - [ ] I have added tests for new functionality
 - [ ] I have updated documentation where needed
 - [ ] I have updated `CHANGELOG.md` under `[Unreleased]`
-- [ ] My changes do not modify `scripts/merge_whisperx.py` (or if they do, the canonical JSON contract is preserved — see `TASKS.md` Decision log)
+- [ ] My changes do not modify the source boundary — `sources/base.py` and the annotation types in `domain/annotations.py` (or if they do, the canonical contract every source returns is preserved)
 
 ## Screenshots
 

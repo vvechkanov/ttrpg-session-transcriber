@@ -139,7 +139,7 @@ Foundry VTT chat log export (optional)
 Acoustic diarization (pyannote, WhisperX `--diarize`) struggles with TTRPG audio: overlapping excited voices, players doing NPC voices, dramatic shouting, and uncontrolled laughter. Craig records every player on a separate track, so attribution is perfect by construction — no model can confuse who said what when each speaker is on their own stream.
 
 **Why GigaAM for Russian?**
-GigaAM-v3 is Sber's open Russian ASR model under MIT license. On Russian audio it consistently outperforms Whisper. It also supports **contextual biasing** — you can hand it a list of NPC names and it will recognize them correctly instead of inventing creative variants. The hotwords file ships with PF2e names; you can swap in your own.
+GigaAM-v3 is Sber's open Russian ASR model under MIT license. On Russian audio it consistently outperforms Whisper. It also supports **contextual biasing** — you can hand it a list of NPC names and it will recognize them correctly instead of inventing creative variants. The hotword list ships with PF2e names — though biasing is switched off in this build, see below.
 
 **Is my audio uploaded anywhere?**
 No. Everything runs on your machine. No telemetry, no API calls, no cloud services. The project literally cannot see your audio — there is no server.
@@ -148,7 +148,7 @@ No. Everything runs on your machine. No telemetry, no API calls, no cloud servic
 Yes. All backends support CPU mode. With faster-whisper int8 quantization, a 3-hour session takes about 30-60 minutes on a modern CPU. With an NVIDIA GPU it takes 5-10 minutes.
 
 **What about D&D 5e or other systems?**
-The transcription pipeline is universal. We test it on Pathfinder 2e because that's what the maintainer plays. The hotwords file ships with PF2e names — you can replace `config/pathfinder_ru_hotwords.txt` with your own term list.
+The transcription pipeline is universal. We test it on Pathfinder 2e because that's what the maintainer plays. The PF2e hotword list lives in `sources/speech/_gigaam_download.py` and is written into the GigaAM bundle as `hotwords.txt` at install time. Contextual biasing is switched off in this build (`ENABLE_HOTWORDS_BIASING`), so editing that list does not change the output yet, and there is no user-facing way to supply one.
 
 **Can I use this for non-TTRPG audio?**
 Technically yes. Any multi-track Discord recording (podcasts, meetings, interviews) works. The Foundry VTT integration and PF2e hotwords obviously won't apply, but the core transcription pipeline is general-purpose.
@@ -168,16 +168,15 @@ ttrpg-session-transcriber/
 │   └── install_logic.py
 ├── ui/                     ← PySide6/QML GUI; entry point is `python -m ui`
 │   ├── __main__.py         ← launches the QML application
-│   ├── qml/                ← QML/JS UI assets
-│   ├── engines/            ← background pipeline/ASR/merge workers
-│   └── models/             ← Qt data models bound to the UI
+│   ├── qml                 ← QML/JS UI assets
+│   ├── engines             ← background pipeline/ASR/merge workers
+│   └── models              ← Qt data models bound to the UI
 ├── core/                   ← pipeline orchestration, discovery, peaks
 ├── domain/                 ← pure dataclasses (segments, speaker maps)
 ├── sources/                ← ASR + FVTT input adapters
 ├── mergers/                ← per-track JSON → unified timeline
 ├── renderers/              ← timeline → merged.txt / chunks
 ├── prompts/                 ← LLM prompts for post-processing
-├── config/                  ← hotwords, defaults
 ├── tests/                   ← pytest suite (in development)
 └── docs/                    ← additional documentation
 ```
