@@ -21,7 +21,7 @@ Any other approaches you thought about and why you prefer the proposed one.
 
 ## Roadmap check
 
-Have you checked [TASKS.md](../../blob/master/TASKS.md) and the [project roadmap](../../blob/master/TASKS.md)? Is this feature already planned, partially implemented, or explicitly out of scope?
+Have you checked [TASKS.md](../../TASKS.md) and the [project roadmap](../../TASKS.md)? Is this feature already planned, partially implemented, or explicitly out of scope?
 
 - [ ] I have checked the roadmap and this is not already planned
 - [ ] This is related to an existing roadmap item: (link)

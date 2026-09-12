@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import pathlib
+import posixpath
 import re
 import shutil
 import subprocess
@@ -247,7 +248,7 @@ def _repository_entries() -> frozenset[str]:
     return frozenset(name.split("/")[0] for name in _repository_files())
 
 
-def _claimed_paths(text: str) -> list[tuple[int, str]]:
+def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
     """Every backticked token that points at something inside this repository.
 
     Anything shaped like a path is a claim unless it is explicitly excused in
@@ -269,6 +270,17 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
     Without that escape a roadmap cannot name the file it plans to add, and
     the test would quietly delete the plan instead of checking the document.
     """
+    # A Markdown link resolves against the document that carries it, not
+    # against the repository root — `[x](README.md)` inside
+    # `skill/session-book/SKILL.md` names a file beside *that* file. While only
+    # `ARCHITECTURE.md` was read the distinction could not arise, because it
+    # sits at the root and the two readings coincide; extending the guard to
+    # nested documents is what makes them differ, and reading such a link from
+    # the root lets the repository's own `README.md` vouch for a sibling that
+    # was never there. Backticked paths keep their root-relative meaning: that
+    # is the convention `_exists` documents, and prose says `core/pipeline.py`
+    # meaning the one in this tree, wherever the sentence happens to live.
+    base = posixpath.dirname(document)
     claims: list[tuple[int, str]] = []
     in_fence = False
     for line_number, line in enumerate(text.splitlines(), start=1):
@@ -301,9 +313,18 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
                 continue
             if any(char in token for char in "%<>{}|*'\"=("):
                 continue  # an env var, a placeholder, a glob, a line of code
-            if token.startswith(("../", "./")):
-                # Resolved against the document, not the root — and on GitHub
-                # `../../releases` is a link out of the tree entirely.
+            if from_link:
+                # Anchor the destination to its document before anything else
+                # looks at it. A link that climbs out of the tree — GitHub's
+                # `../../releases` idiom points at the *repository*, not a
+                # file — is nobody's path to check.
+                token = posixpath.normpath(posixpath.join(base, token))
+                if token == ".." or token.startswith("../"):
+                    continue
+            elif token.startswith(("../", "./")):
+                # In backticks a leading `../` is prose or a shell line: the
+                # path itself is root-relative by convention, so there is no
+                # document to anchor it to.
                 continue
             if ":" in token:
                 continue  # a URL or a Qt resource: `https://…`, `qrc:/…`
@@ -393,7 +414,7 @@ def _broken_paths_in(document: str) -> list[str]:
     return sorted(
         {
             f"{document}:{line} -> {token}"
-            for line, token in _claimed_paths(text)
+            for line, token in _claimed_paths(text, document)
             if "/" in token and not _exists(token)
         }
     )
@@ -536,6 +557,40 @@ def test_a_markdown_link_destination_is_a_claim():
     ]
     assert _claimed_paths("see [site](https://example.com/a.md)") == []
     assert _claimed_paths("see [section](#anchor)") == []
+
+
+def test_a_link_is_resolved_from_the_document_that_carries_it():
+    """Codex on PR #29, and it is the defect that only appears once the guard
+    reads more than one document. `[guide](README.md)` inside
+    `skill/session-book/SKILL.md` names `skill/session-book/README.md`; read
+    from the root, the repository's own `README.md` answers for it and the
+    link stays green however broken it is. `ARCHITECTURE.md` never showed this
+    because it sits at the root, where both readings agree.
+
+    It cuts the other way too: `../00_README.md` from `scripts/` is a valid
+    link that the blanket `../` skip used to drop unchecked, and anchoring it
+    brings it back under the guard.
+    """
+    assert _claimed_paths("[guide](README.md)", "skill/session-book/SKILL.md") == [
+        (1, "skill/session-book/README.md")
+    ]
+    assert _claimed_paths("[a](../00_README.md)", "scripts/00_README.md") == [
+        (1, "00_README.md")
+    ]
+    assert _claimed_paths("[a](ADR-013-gigaam-independent-module.md)", "docs/adr/x.md") == [
+        (1, "docs/adr/ADR-013-gigaam-independent-module.md")
+    ]
+    # Climbing out of the tree is nobody's path, from any depth.
+    assert _claimed_paths("[rel](../../releases)", "docs/adr/x.md") == []
+    assert _claimed_paths("[rel](../../../escape.md)", "docs/adr/x.md") == []
+    # A backticked path stays root-relative wherever the sentence lives.
+    assert _claimed_paths("see `core/gone.py`", "skill/session-book/SKILL.md") == [
+        (1, "core/gone.py")
+    ]
+    # And a root document is unchanged — the two readings coincide there.
+    assert _claimed_paths("see [ADR](docs/adr/gone.md)", "README.md") == [
+        (1, "docs/adr/gone.md")
+    ]
 
 
 def test_a_reference_style_definition_is_a_claim():
