@@ -392,7 +392,7 @@ SettingsScreen. `LLMMerger` регистрируется в `MERGERS[]`, но
 без реализации — деградирует до `script`. 1-2 дня работы.
 **Разблокирует архитектуру без риска.**
 
-**Этап 6.2 (после закрытия #4):** PoC — `scripts/llm_revise_poc.py`
+**Этап 6.2 (после закрытия #4):** PoC — `scripts/llm_revise_poc.py` (planned)
 (standalone CLI, вход merged.txt + speaker_map.json, выход
 revised.txt). Qwen2.5 7B, окно 20 мин, только задача (A).
 Тест на Сессии 4: "Пикаэль" → "Микаэль", "Анканта" → "Анканто".

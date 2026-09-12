@@ -9,7 +9,7 @@
 ## Структура проекта
 
 ```
-discord-session-transcriber/
+ttrpg-session-transcriber/
 ├── run.bat                              ← двойной клик — запуск GUI
 ├── 00_README.md                         ← этот файл
 ├── 01_Как_пользоваться.md               ← пошаговая инструкция

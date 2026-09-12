@@ -102,7 +102,7 @@
 - [ ] Прогнать, починить найденное (ожидается мелочь)
 
 ### 1.3 Починка нарушения dependency rule (F-C1)
-- [ ] `core/merge_render.py`: `merge_and_render(timeline, *, merger="script", renderer="plain-text", merge_gap_sec=...) -> bytes` (+ опционально стадийный колбэк)
+- [ ] `core/merge_render.py` (planned): `merge_and_render(timeline, *, merger="script", renderer="plain-text", merge_gap_sec=...) -> bytes` (+ опционально стадийный колбэк)
 - [ ] `ui/engines/merger_worker.py` импортирует только core
 - [ ] Тест: grep-защита (ruff из 1.2) + юнит на фасад
 
@@ -133,7 +133,7 @@
 ### 1.7 Тестовые пробелы (F-D2, F-D3)
 > Тесты launcher (F-D1) демотированы в Отложено — инсталлер заморожен до
 > «работает у меня» (D1). Вернуть в скоуп при разморозке #1.
-- [ ] `tests/test_ui_cli.py`: argparse → PipelineParams маппинг, exit codes
+- [ ] `tests/test_ui_cli.py` (planned): argparse → PipelineParams маппинг, exit codes
 - [x] CONTRIBUTING: когда обязателен локальный tier-2 e2e прогон (перед релизом; при правках sources/mergers) (F-D3) — раздел «The tier-2 end-to-end run»; решение не тащить прогон в CI записано в ADR-022, механическую половину сторожит `tests/test_tier2_e2e_gate.py`
 
 ### 1.8 Удалить legacy `install_whisperx_windows.ps1` (C3)
@@ -157,7 +157,7 @@
 
 ### 2.2 Фича #6 — LLM-мержер (поэтапно, gate после PoC)
 - [ ] **6.1** Селектор мержера в SettingsScreen; `LLMMerger` в `MERGERS` с деградацией до `script` (1–2 дня)
-- [ ] **6.2** PoC `scripts/llm_revise_poc.py` (Qwen2.5 7B / Ollama, задача A — коррекция имён). Gate: качество на Сессии 4
+- [ ] **6.2** PoC `scripts/llm_revise_poc.py` (planned) (Qwen2.5 7B / Ollama, задача A — коррекция имён). Gate: качество на Сессии 4
 - [ ] **6.3** Полная интеграция (QThread worker, Installable для Ollama) — **только после** green 6.2 и желательно после 3.1 (см. Фазу 3: PipelineController к этому моменту лучше разрезать)
 - Блокер «ждём #4» снят — #4 закрыт 2026-04-21.
 

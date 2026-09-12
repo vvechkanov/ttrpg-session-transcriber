@@ -1,13 +1,19 @@
-"""ARCHITECTURE.md has to describe *this* repository.
+"""The documents that describe *this* repository have to keep describing it.
 
 A design document nobody can check goes stale silently, and the reader cannot
 tell which half is still true. These tests check the half a machine can: that
-every path the document points at exists, and that the layer the UI actually
+every path a document points at exists, and that the layer the UI actually
 lives in is described at all.
 
 They deliberately do not judge prose. A wrong sentence about *why* a layer
 exists is for review; a reference to a file deleted four months ago is for a
 test.
+
+The path check used to read one file — `ARCHITECTURE.md` — while 47 other
+documents named paths nobody verified. The briefs an agent opens first were
+among the rotten ones: `scripts/00_README.md` advertised two scripts deleted
+in the six-layer move, and both READMEs told the user to edit a `config/`
+directory this tree has never contained.
 """
 
 from __future__ import annotations
@@ -39,6 +45,25 @@ NOT_REPOSITORY_PATHS = {
     "if": "`if/else` is prose, not a path",
     "bzikst": "a HuggingFace model id, not a file",
     "__init__.py": "named as the Python convention — 15 of them, no one in particular",
+    # Provisioned, not checked in. `.gitignore` carries both, and the install
+    # instructions have to name them anyway — `venv/bin/python` is the
+    # interpreter docs/process.md §11 prescribes to the night run.
+    "venv": "the virtualenv the user creates; gitignored by design",
+    "tools": "the bundled ffmpeg the launcher provisions; gitignored",
+    "ffmpeg": "the provisioned binary's own folder, named from inside tools/",
+    # Written at runtime next to the user's session, same class as `_cache`.
+    "chunks": "written next to the transcript when the chunker runs",
+    "session": "a session folder the fixture docs name as an example",
+    "games": "the user's tree of session folders, named as an example",
+    "e2e_p2": "the fixture directory naming itself from its own README",
+    "craig-1": "an example name for a user's Craig export folder",
+    "крэйг-2": "the same example, spelled as the user would",
+    # The Obsidian vault the `skill/` prompts read. Another tree entirely:
+    # these documents ship here but describe files that never live here.
+    "Кампейны": "a path in the user's Obsidian vault, not in this repository",
+    "Sessions": "the same vault's per-session folders",
+    "Glossary": "the same vault's glossary",
+    "ttrpg-session-transcriber": "the checkout's own directory, the root of a tree diagram",
 }
 
 #: Slash-less tokens that name a file the pipeline *writes*, not one this
@@ -74,6 +99,40 @@ NOT_THE_REPOSITORY = frozenset(
     {".git", "venv", ".venv", "__pycache__", "node_modules", "build", "dist",
      ".pytest_cache", ".ruff_cache", ".mypy_cache", "tools", ".eggs"}
 )
+
+#: A trailing source line reference: `ui/models/session.py:1349`, and the range
+#: form `:1514-1517`. The path half is the claim, exactly as with `::symbol`;
+#: without stripping it, the most precise references in the tree — the ones that
+#: name the line they mean — would be the only ones reported as broken.
+LINE_REFERENCE = re.compile(r":\d+(?:-\d+)?$")
+
+#: A token whose last segment carries no file extension and which does not end
+#: in `/` is prose, not a path. `Linux/macOS`, `QML/JS`, `merger/renderer`,
+#: `startPct/endPct` and `origin/master` are all "A or B" written with a slash,
+#: and every one of them was reported as a missing file the moment this check
+#: was pointed at a second document.
+#:
+#: What it costs, measured rather than guessed, because the first version of
+#: this comment named the wrong case and the wrong size:
+#:
+#: * **A directory written without a trailing slash.** This is the whole of the
+#:   loss on `ARCHITECTURE.md` — all eight tokens the rule drops there are
+#:   `ui/engines`, `ui/models` and `ui/qml`, real directories, and not one is
+#:   prose. Delete `ui/engines/` tomorrow and four lines of §4.1 keep naming it
+#:   with the guard green. There is no free fix: nothing distinguishes
+#:   `ui/engines` from `merger/renderer` by shape alone.
+#: * **A file whose extension is outside :data:`FILE_SUFFIXES`** — 70 in this
+#:   tree, most of them `.tsx`, and four of them `.png`. That one *is* fixable
+#:   and is fixed: a Markdown link destination skips the rule entirely (see
+#:   :func:`_claimed_paths`), because nobody writes `[x](Linux/macOS)`. Without
+#:   that, `![shot](docs/screenshots/gone.png)` would have gone unchecked, and
+#:   §7.3 of `docs/process.md` asks for screenshots on every UI change.
+def _is_path_shaped(token: str) -> bool:
+    if token.endswith("/"):
+        return True
+    last = token.rstrip("/").split("/")[-1]
+    return pathlib.PurePath(last).suffix in FILE_SUFFIXES
+
 
 #: A relative Markdown link target: `[text](docs/adr/thing.md)`, not `[t](http…)`
 #: and not `[t](#anchor)`.
@@ -216,25 +275,43 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
         if line.lstrip().startswith("```"):
             in_fence = not in_fence
             continue
+        # Each candidate carries whether it came from a Markdown link, because
+        # a link destination is a path by construction and must not be filtered
+        # by shape: `[shot](docs/screenshots/x.png)` names a file whose suffix
+        # this module's allowlist does not carry.
         if in_fence:
             candidates = [
-                token for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line) if "/" in token
+                (token, False)
+                for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line)
+                if "/" in token
             ]
         else:
-            candidates = [match.group(1) for match in re.finditer(r"`([^`\n]+)`", line)]
-            candidates += MARKDOWN_LINK.findall(line)
-            candidates += MARKDOWN_REFERENCE.findall(line)
-        for token in candidates:
+            candidates = [
+                (match.group(1), False)
+                for match in re.finditer(r"`([^`\n]+)`", line)
+            ]
+            candidates += [(token, True) for token in MARKDOWN_LINK.findall(line)]
+            candidates += [(token, True) for token in MARKDOWN_REFERENCE.findall(line)]
+        for token, from_link in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
+            token = LINE_REFERENCE.sub("", token)
             if not token or " " in token:
                 continue
-            if any(char in token for char in "%<>{}|*"):
-                continue  # an environment variable, a placeholder, a glob
+            if any(char in token for char in "%<>{}|*'\"=("):
+                continue  # an env var, a placeholder, a glob, a line of code
+            if token.startswith(("../", "./")):
+                # Resolved against the document, not the root — and on GitHub
+                # `../../releases` is a link out of the tree entirely.
+                continue
+            if ":" in token:
+                continue  # a URL or a Qt resource: `https://…`, `qrc:/…`
             head = token.split("/")[0]
             if head in NOT_REPOSITORY_PATHS:
                 continue
+            if "/" in token and not from_link and not _is_path_shaped(token):
+                continue  # `Linux/macOS` — prose with a slash in it
             if "/" not in token:
                 if token in OUTPUT_FILE_NAMES or not FILE_TOKEN.match(token):
                     continue  # an output file, or a bare word — not a repo path
@@ -244,6 +321,133 @@ def _claimed_paths(text: str) -> list[tuple[int, str]]:
                 continue
             claims.append((line_number, token))
     return claims
+
+
+#: Documents that record what was true when they were written, and are not
+#: claims about the tree as it stands. A decision record naming `ui/widgets/`
+#: is *correct*: that is the layout the decision was taken against, and editing
+#: it to match today would destroy the only reason the record exists.
+#:
+#: Keyed with a reason each, for the same purpose as :data:`NOT_REPOSITORY_PATHS`
+#: — an exclusion nobody has to justify is how a guard quietly stops guarding.
+#: This is the larger half of the rot by count — 190 broken paths still inside
+#: these documents, against the 25 that were fixed to green the guarded set,
+#: both measured with the extractor in this file — and freezing it is a
+#: decision, not an oversight: what to do with a document whose subject was
+#: deleted is a question for the board, not for this file.
+HISTORICAL_PREFIXES = {
+    "docs/adr/": "a decision records the tree it was decided against",
+    "docs/architecture/": "migration notes describe the layout being migrated away from",
+    "docs/handoff/": "a snapshot handed over at a point in time",
+    "docs/plans/": "what was planned, including the parts that were not built",
+    "docs/specs/": "a point-in-time design spec whose §-numbers are cited from code",
+    "docs/design/": "mockup exports and the prompts that produced them",
+}
+
+HISTORICAL_DOCUMENTS = {
+    "CHANGELOG.md": "a log of what happened; entries name files as they were then",
+    "docs/architecture-review-2026-06.md": "a dated review — a snapshot of June",
+}
+
+
+def _markdown_documents() -> list[str]:
+    """Every Markdown file the repository carries, in a stable order.
+
+    Git first, the walk as a fallback, for the same reason :func:`_exists`
+    works that way — and with the same silence-is-not-emptiness rule.
+
+    The fallback is not theoretical here, and `check=True` would have been a
+    worse bug than in `_tracked_files`: this runs inside a `parametrize`
+    decorator, at import time. A tree git cannot answer for — a checkout
+    unpacked inside someone else's work tree, or git missing entirely — would
+    raise during collection and take all of this file's tests down with it,
+    including the ones that need no git at all.
+    """
+    tracked = _tracked_files(PROJECT_ROOT) or _walked_files(PROJECT_ROOT)
+    return sorted(name for name in tracked if name.endswith(".md"))
+
+
+def _live_documents() -> list[str]:
+    """The documents whose paths are claims about the repository as it is now.
+
+    Derived by subtraction rather than listed, so a document added tomorrow is
+    guarded without anyone remembering to add it here — which is the failure
+    this whole card is about.
+    """
+    return [
+        name
+        for name in _markdown_documents()
+        if name not in HISTORICAL_DOCUMENTS
+        and not name.startswith(tuple(HISTORICAL_PREFIXES))
+    ]
+
+
+def _broken_paths_in(document: str) -> list[str]:
+    """Slashed paths the document names that the repository does not carry.
+
+    Slashed only: a bare `ci.yml` names a real file without saying where it
+    lives, which is a naming policy and a separate card — 152 of them, none of
+    them rot.
+    """
+    text = (PROJECT_ROOT / document).read_text(encoding="utf-8")
+    return sorted(
+        {
+            f"{document}:{line} -> {token}"
+            for line, token in _claimed_paths(text)
+            if "/" in token and not _exists(token)
+        }
+    )
+
+
+@pytest.mark.parametrize("document", _live_documents())
+def test_every_path_a_live_document_names_exists(document):
+    """The card this file grew for: the guard read 1 document out of 48.
+
+    `CONTRIBUTING.md` sent a new contributor to `scripts/asr_backends/`,
+    `scripts/merge_whisperx.py` and `scripts/parse_fvtt_chat.py` — all three
+    deleted. Both READMEs told the user to edit `config/pathfinder_ru_hotwords.txt`
+    in a `config/` directory that has never existed in this tree.
+    """
+    missing = _broken_paths_in(document)
+
+    assert not missing, f"{document} points at paths that do not exist:\n" + "\n".join(
+        missing
+    )
+
+
+def test_the_document_set_is_derived_from_git_not_listed():
+    """A document added tomorrow has to be guarded without an edit here.
+
+    The floor on the *guarded* set is the load-bearing half, and it is here
+    because mutation found its absence: cutting `_live_documents()` down to
+    `["ARCHITECTURE.md", "README.md"]` — the whole card undone, back to very
+    nearly the one document it started from — left every test in this file
+    green. The only symptom was the collected case count dropping from 52 to
+    29, and nothing was watching that. Naming two documents proves membership,
+    never coverage.
+    """
+    documents = _markdown_documents()
+    live = _live_documents()
+
+    assert len(documents) > 40, f"suspiciously few documents found: {len(documents)}"
+    assert len(live) >= 24, f"the guarded set has shrunk to {len(live)} documents"
+    assert "ARCHITECTURE.md" in live
+    assert "README.md" in live
+    assert "docs/adr/ADR-016-module-ui-contract.md" not in live
+    assert "CHANGELOG.md" not in live
+
+
+def test_every_historical_exclusion_carries_a_reason():
+    """Same rule as NOT_REPOSITORY_PATHS: no silent exclusions. A prefix added
+    without a reason is how the guard would shrink back to one document."""
+    assert all(reason for reason in HISTORICAL_PREFIXES.values())
+    assert all(reason for reason in HISTORICAL_DOCUMENTS.values())
+    for prefix in HISTORICAL_PREFIXES:
+        assert prefix.endswith("/"), f"{prefix} has to be a directory prefix"
+    # `all([])` is True, so the two assertions above pass on empty dicts and
+    # this test would report a policy that had been deleted as well-formed.
+    assert "docs/adr/" in HISTORICAL_PREFIXES
+    assert "CHANGELOG.md" in HISTORICAL_DOCUMENTS
 
 
 def test_every_path_architecture_names_exists():
@@ -452,6 +656,71 @@ def test_the_fallback_prunes_below_the_root_not_above_it(tmp_path, monkeypatch):
     assert _exists("core/pipeline.py"), "the root's own name is not a skip rule"
 
 
+def test_a_line_reference_names_the_file_it_points_into():
+    """`ui/models/session.py:1349` is the most precise kind of reference this
+    tree writes, and before the strip it was the only kind reported broken —
+    the guard punished exactly the documents that said where they meant."""
+    assert _claimed_paths("see `ui/models/session.py:1349`") == [
+        (1, "ui/models/session.py")
+    ]
+    assert _claimed_paths("see `ui/models/session.py:1514-1517`") == [
+        (1, "ui/models/session.py")
+    ]
+    assert _claimed_paths("see `core/no_such_file.py:12`") == [
+        (1, "core/no_such_file.py")
+    ], "stripping the line must not excuse the file"
+
+
+def test_prose_with_a_slash_in_it_is_not_a_path():
+    """Every one of these was reported as a missing file the moment the check
+    was pointed at a second document. A guard that cries about `Linux/macOS`
+    teaches its reader to stop reading it."""
+    assert _claimed_paths("on `Linux/macOS` the launcher") == []
+    assert _claimed_paths("written in `QML/JS`") == []
+    assert _claimed_paths("the `merger/renderer` boundary") == []
+    assert _claimed_paths("clamped to `0.0/100.0`") == []
+    assert _claimed_paths("`git merge origin/master`") == []
+    # …and the rule must not swallow a real path: extension, or trailing slash.
+    assert _claimed_paths("see `core/gone.py`") == [(1, "core/gone.py")]
+    assert _claimed_paths("see `core/gone/`") == [(1, "core/gone/")]
+
+
+def test_a_link_destination_skips_the_shape_rule():
+    """`FILE_SUFFIXES` is an allowlist, and this tree tracks 70 files outside
+    it — 56 `.tsx`, and four `.png`. A screenshot is exactly the reference
+    `docs/process.md` §7.3 asks every UI change to add, and shape alone would
+    stop checking it. A link destination needs no shape test: it is a path
+    because of where it is written, not because of how it is spelled."""
+    assert _claimed_paths("![shot](docs/screenshots/gone.png)") == [
+        (1, "docs/screenshots/gone.png")
+    ]
+    assert _claimed_paths("[ui]: ui/qml/gone.tsx") == [(1, "ui/qml/gone.tsx")]
+    # Backticked, the same token is still shape-filtered — that is the rule
+    # this exemption is narrow about, not a hole in it.
+    assert _claimed_paths("see `docs/screenshots/gone.png`") == []
+
+
+def test_a_url_is_not_a_repository_path():
+    """`https://github.com/…/x.git` survives the Markdown-link filter when it
+    is written in backticks instead, and `qrc:/` is Qt's resource scheme."""
+    assert _claimed_paths("clone `https://github.com/o/r.git`") == []
+    assert _claimed_paths("loads `qrc:/ui/qml/Main.qml`") == []
+    # Carrying an extension on purpose. `../../releases` is turned away by the
+    # shape rule before the relative-link rule is ever consulted, so asserting
+    # on it proves nothing about the rule it appears to be testing — mutation
+    # deleted the `../` skip and these two lines stayed green.
+    assert _claimed_paths("see `../../blob/master/TASKS.md`") == []
+    assert _claimed_paths("see [roadmap](../../blob/master/TASKS.md)") == []
+    assert _claimed_paths("see `../sibling/thing.py`") == []
+
+
+def test_a_line_of_code_is_not_a_path():
+    """Fenced blocks are read for the layer diagrams, and the same fences hold
+    Python. `run(Path('games/bogomols/X'` is a call, not a claim."""
+    assert _claimed_paths("```\nrun(Path('games/x/Y'))\n```") == []
+    assert _claimed_paths("```\nmodel='bzikst/faster-whisper-ru'\n```") == []
+
+
 def test_a_dotted_symbol_is_not_a_filename():
     """`core.pipeline.run` and `README.md` are both dotted words; only one of
     them ends in something this tree stores."""
@@ -500,7 +769,15 @@ def test_the_extractor_reads_the_real_document():
     still pass, while claiming to catch exactly that. Raise it when the
     document grows; a drop means either the extractor broke or the document
     lost its references, and both are worth failing over.
+
+    It came down from 130 to 125 once the shape rule landed: 137 claims became
+    129. The first version of this paragraph said 123 and blamed "fourteen
+    prose tokens", and both halves were invented rather than measured — the
+    eight tokens actually lost are `ui/engines`, `ui/models` and `ui/qml`
+    written without a trailing slash, every one of them a real directory. A
+    floor justified by a number nobody ran is the same rot this file exists to
+    catch, one level up.
     """
     claims = _claimed_paths(ARCHITECTURE.read_text(encoding="utf-8"))
 
-    assert len(claims) >= 130, f"suspiciously few paths extracted: {len(claims)}"
+    assert len(claims) >= 125, f"suspiciously few paths extracted: {len(claims)}"
