@@ -253,6 +253,24 @@ def _repository_entries() -> frozenset[str]:
     return frozenset(name.split("/")[0] for name in _repository_files())
 
 
+def _is_planned(line: str, written: str, from_link: bool) -> bool:
+    """Whether `(planned)` excuses this path on this line.
+
+    The marker has to sit against the path as the *document* spells it, or a
+    roadmap cannot name the file it plans to add. Three spellings carry it,
+    and the link one was missed for as long as only `ARCHITECTURE.md` — which
+    has no such links — was read: in ``[design](docs/future.md) (planned)`` a
+    closing bracket stands between the destination and the marker, so neither
+    ``docs/future.md (planned)`` nor its backticked form occurs in the line at
+    all, and the escape silently did nothing.
+    """
+    if f"`{written}` (planned)" in line:
+        return True
+    if f"{written} (planned)" in line:  # bare, and the reference-style form
+        return True
+    return from_link and f"]({written}) (planned)" in line
+
+
 def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
     """Every backticked token that points at something inside this repository.
 
@@ -310,6 +328,11 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
             candidates += [(token, True) for token in MARKDOWN_LINK.findall(line)]
             candidates += [(token, True) for token in MARKDOWN_REFERENCE.findall(line)]
         for token, from_link in candidates:
+            # As written in the document. The `(planned)` escape is matched
+            # against this rather than against the processed path: by the time
+            # a link has been anchored to its document and a line reference
+            # stripped, the token no longer occurs in the line at all.
+            written = token
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
@@ -349,7 +372,7 @@ def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
                     continue  # an output file, or a bare word — not a repo path
                 if pathlib.PurePath(token).suffix not in FILE_SUFFIXES:
                     continue  # `core.pipeline.run` is a symbol, not a file
-            if f"`{token}` (planned)" in line or f"{token} (planned)" in line:
+            if _is_planned(line, written, from_link):
                 continue
             claims.append((line_number, token))
     return claims
@@ -530,6 +553,29 @@ def test_a_planned_path_may_be_named_without_existing_yet():
     and P6 rows lost their file lists in the first place."""
     assert _claimed_paths("| 6 | `sources/emotion/` (planned) | … |") == []
     assert _claimed_paths("| 6 | `sources/emotion/` | … |") == [(1, "sources/emotion/")]
+
+
+def test_the_planned_marker_reaches_a_markdown_link_too():
+    """Codex on PR #29. `[design](docs/future.md) (planned)` puts a closing
+    bracket between the destination and the marker, so the escape matched
+    nothing and a roadmap linking to a file it plans to add failed the guard.
+    Invisible while only `ARCHITECTURE.md` was read — it has no such links.
+
+    Matched against the destination as written, because by the time the path
+    has been anchored to its document it no longer occurs in the line."""
+    assert _claimed_paths("[design](docs/future.md) (planned)") == []
+    assert _claimed_paths("[design](docs/future.md)") == [(1, "docs/future.md")]
+    assert _claimed_paths("[ui]: docs/future.md (planned)") == []
+    # The marker travels with its own line, not with the whole document.
+    assert _claimed_paths("[design](docs/future.md)\nand `core/gone.py`") == [
+        (1, "docs/future.md"),
+        (2, "core/gone.py"),
+    ]
+    # A nested document: the destination is anchored, the marker still lands.
+    assert _claimed_paths("[d](future.md) (planned)", "docs/adr/x.md") == []
+    assert _claimed_paths("[d](future.md)", "docs/adr/x.md") == [
+        (1, "docs/adr/future.md")
+    ]
 
 
 def test_paths_inside_fenced_blocks_are_checked():
