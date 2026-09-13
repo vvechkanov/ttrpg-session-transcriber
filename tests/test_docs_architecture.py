@@ -171,7 +171,9 @@ MARKDOWN_REFERENCE = re.compile(
 #: `[guide](docs/guide.md "Guide")` and `[ui]: docs/guide.md "Guide"`. Matched
 #: from the end of the destination so :func:`_is_planned` can step over it and
 #: reach the `(planned)` marker beyond.
-TRAILING_LINK_TITLE = re.compile(r"^\s+([\"'])[^\n]*?\1")
+TRAILING_LINK_TITLE = re.compile(
+    r"^\s+(?:([\"'])[^\n]*?\1|\((?!planned\))[^()]*\))"
+)
 
 #: An opening or closing code fence: three or more backticks or tildes. The
 #: run is captured whole rather than tested three characters at a time,
@@ -356,16 +358,26 @@ def _claims_with_origin(
     # closing run has to be at least as long as the one that opened.
     fence: str | None = None
     for line_number, line in enumerate(text.splitlines(), start=1):
-        run = FENCE_MARKER.match(line.lstrip())
+        stripped = line.lstrip()
+        run = FENCE_MARKER.match(stripped)
         if run is not None:
             marker = run.group(1)
             if fence is None:
                 fence = marker
                 continue
-            if marker[0] == fence[0] and len(marker) >= len(fence):
+            # A closing fence carries nothing but the marker. ```python is an
+            # *opening* fence's info string, and a line shaped like one inside
+            # a block is content — closing on it hands the rest of the block
+            # to the prose reader, which is the miss this fence work exists to
+            # remove.
+            if (
+                marker[0] == fence[0]
+                and len(marker) >= len(fence)
+                and not stripped[len(marker):].strip()
+            ):
                 fence = None
                 continue
-            # A shorter run, or the other character, is block content.
+            # A shorter run, the other character, or an info string: content.
         in_fence = fence is not None
         # Each candidate carries whether it came from a Markdown link, because
         # a link destination is a path by construction and must not be filtered
@@ -387,9 +399,19 @@ def _claims_with_origin(
         else:
             for match in re.finditer(r"`([^`\n]+)`", line):
                 candidates.append((match.group(1), False, match.end(1)))
-            for match in MARKDOWN_LINK.finditer(line):
+            # A code span shows Markdown rather than writing it: a document
+            # explaining the `(planned)` escape spells out a whole link to
+            # illustrate it, and read as a link that example becomes a claim
+            # the document never made — a false red, and on a document whose
+            # only sin is documenting this very file. The span is blanked
+            # rather than cut so that every offset, and with it the
+            # `(planned)` marker's position, survives untouched.
+            outside_code = re.sub(
+                r"`[^`\n]+`", lambda m: " " * len(m.group(0)), line
+            )
+            for match in MARKDOWN_LINK.finditer(outside_code):
                 candidates.append((match.group(1), True, match.end(1)))
-            for match in MARKDOWN_REFERENCE.finditer(line):
+            for match in MARKDOWN_REFERENCE.finditer(outside_code):
                 candidates.append((match.group(1), True, match.end(1)))
         for token, from_link, path_ends_at in candidates:
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
@@ -409,7 +431,7 @@ def _claims_with_origin(
                 # `docs/gone.md?value=%2A` was thrown out as a placeholder and
                 # its target could be deleted with the guard green. The filters
                 # are about the path, and this is where the path begins.
-                token = token.split("?", 1)[0]
+                token = token.split("#", 1)[0].split("?", 1)[0]
                 if not token:
                     continue
             if any(char in token for char in "%<>{}|*"):
@@ -421,28 +443,26 @@ def _claims_with_origin(
                 # dropping it would leave a broken link unreported.
                 continue
             if from_link:
-                # A protocol-relative URL borrows the page's scheme instead of
-                # naming one, so it carries no colon for the `:` test below to
-                # catch and would be normalized into a repository path nobody
-                # could ever have — a false red on a document that is correct.
-                if token.startswith("//"):
-                    continue
-                # Anchor the destination to its document before anything else
-                # looks at it. A link that climbs out of the tree — GitHub's
-                # `../../releases` idiom points at the *repository*, not a
-                # file — is nobody's path to check. A single leading slash is
-                # the other case: root-anchored, so the document it sits in
-                # does not enter into it.
+                # A leading slash is resolved against the *site*, not against
+                # this checkout, and both spellings of it land outside: `//x`
+                # borrows the page's scheme, and `/README.md` in a document
+                # GitHub renders points at `github.com/README.md`. Reading
+                # either as a repository path lets the root file of the same
+                # name vouch for a link that resolves somewhere else entirely
+                # — and the first draft of this rule did exactly that, having
+                # been written to tell the two apart rather than to notice
+                # that neither is ours.
                 if token.startswith("/"):
-                    token = posixpath.normpath(token[1:])
-                else:
-                    token = posixpath.normpath(posixpath.join(base, token))
+                    continue
+                # Anchor the destination to its document. A link that climbs
+                # out of the tree — GitHub's `../../releases` idiom, which
+                # only escapes from a root document and is only written
+                # there — is nobody's path to check.
+                token = posixpath.normpath(posixpath.join(base, token))
                 if token == ".." or token.startswith("../"):
                     continue
-                # `normpath` turns a link to a directory — `/` or `./`, "the
-                # repository root" and "where I am" — into `.`, which names no
-                # file and would be reported missing. Both are ordinary links
-                # and neither is a claim about a path.
+                # `normpath` turns `./` — "the directory I am in" — into `.`,
+                # which names no file and would be reported missing.
                 if token == ".":
                     continue
             elif token.startswith(("../", "./")):
@@ -833,6 +853,62 @@ def test_a_link_title_may_contain_the_other_delimiters():
     ]
 
 
+def test_the_planned_marker_survives_a_parenthesised_title():
+    """Codex on PR #29, on the parenthesised-title support added one iteration
+    earlier. The link parsed, but the marker is matched from the end of the
+    destination and the skipper knew only quoted titles, so `_is_planned` saw
+    ` (Draft)) (planned)` and required a file the roadmap had said it planned
+    to add. The marker itself is parenthesised too, which is why the skipper
+    has to refuse that one form explicitly — stepping over it would excuse
+    nothing and discard the escape instead."""
+    assert _claimed_paths("[d](docs/future.md (Draft)) (planned)") == []
+    assert _claimed_paths("[d](docs/future.md (Draft))") == [(1, "docs/future.md")]
+    # The marker is not a title: stepping over it would leave nothing to find.
+    assert _claimed_paths("[ui]: docs/future.md (planned)") == []
+
+
+def test_a_link_shown_inside_a_code_span_is_not_a_link():
+    """Codex on PR #29. A code span *shows* Markdown rather than writing it,
+    and the link scan ran over the raw line, so a document illustrating the
+    `(planned)` escape with a whole example link made a claim it never made.
+    A false red, and pointed at exactly the documents that explain this file.
+
+    The span is blanked rather than removed, so offsets — and with them the
+    marker's position — are unchanged for everything else on the line."""
+    assert _claimed_paths("Use `[guide](docs/future.md)` as an example") == []
+    assert _claimed_paths("`[ui]: docs/future.md` is the other spelling") == []
+    # A real link on the same line as an illustrated one still counts, and
+    # still at its own position.
+    assert _claimed_paths("`[x](docs/a.md)` and [y](docs/gone.md)") == [
+        (1, "docs/gone.md")
+    ]
+    assert _claimed_paths("`[x](docs/a.md)` and [y](docs/future.md) (planned)") == []
+
+
+def test_a_fragment_is_not_part_of_the_filename():
+    """Codex on PR #29, the same defect as the query string and in the same
+    place: a fragment stayed attached until `_exists`, long after the
+    placeholder filter had seen its percent-escapes. `docs/gone.md#name%20with%20spaces`
+    is a valid link to a heading, and it was discarded whole."""
+    assert _claimed_paths("[s](docs/gone.md#name%20with%20spaces)") == [
+        (1, "docs/gone.md")
+    ]
+    assert _claimed_paths("[s](docs/gone.md#heading)") == [(1, "docs/gone.md")]
+    assert _claimed_paths("[s](docs/gone.md?raw=1#heading)") == [(1, "docs/gone.md")]
+
+
+def test_an_info_string_does_not_close_a_fence():
+    """Codex on PR #29, on the fence work itself — and the third time this one
+    block has produced the same class of miss. ```` ```python ```` is an
+    *opening* fence's info string; a line shaped like one inside a block is
+    content, and closing on it hands everything after it to the prose reader,
+    which reads no bare paths at all."""
+    fenced = "```\ncore/a.py\n```python\ncore/b.py\n```"
+    assert _claimed_paths(fenced) == [(2, "core/a.py"), (4, "core/b.py")]
+    # An info string on the opener is still an opener.
+    assert _claimed_paths("```python\ncore/gone.py\n```") == [(2, "core/gone.py")]
+
+
 def test_a_longer_fence_holds_a_shorter_one():
     """Codex on PR #29, on the fence fix itself. A four-backtick block exists
     precisely so a three-backtick line may sit inside it, and recording only
@@ -892,8 +968,10 @@ def test_a_protocol_relative_url_is_not_a_repository_path():
     have: a false red on a document that is correct."""
     assert _claimed_paths("[mirror](//example.com/docs/file.md)") == []
     assert _claimed_paths("[mirror]: //example.com/docs/file.md") == []
-    # A single leading slash is a root-anchored path, not a scheme.
-    assert _claimed_paths("[a](/README.md)") == [(1, "README.md")]
+    # A single leading slash lands outside the checkout too, and reading it as
+    # a repository path was worse than dropping it: the root `README.md` would
+    # vouch for a link that points at `github.com/README.md`.
+    assert _claimed_paths("[a](/README.md)") == []
 
 
 def test_a_tilde_fence_is_a_fence_too():
