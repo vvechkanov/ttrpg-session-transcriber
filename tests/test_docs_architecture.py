@@ -286,7 +286,7 @@ def _is_planned(line: str, end_of_path: int) -> bool:
     one rule whose entire job is to prevent one.
     """
     rest = TRAILING_LINK_TITLE.sub("", line[end_of_path:], count=1)
-    return rest.lstrip("`)").startswith(" (planned)")
+    return rest.lstrip("`)>").startswith(" (planned)")
 
 
 def _claims_with_origin(
@@ -412,22 +412,17 @@ def _claims_with_origin(
                 # file — is nobody's path to check. A single leading slash is
                 # the other case: root-anchored, so the document it sits in
                 # does not enter into it.
-                climbed = ".." in token.split("/")
                 if token.startswith("/"):
                     token = posixpath.normpath(token[1:])
                 else:
                     token = posixpath.normpath(posixpath.join(base, token))
                 if token == ".." or token.startswith("../"):
                     continue
-                # `../../releases` from `docs/adr/x.md` lands back inside the
-                # tree as `releases`, and it is still the GitHub idiom: it
-                # points at the *repository's* releases page, not at a file.
-                # Only the document's depth decides whether the climb escapes
-                # the tree or not, so depth cannot be what tells the two
-                # apart. What does: a link that climbs to name a real file
-                # names the file — `../00_README.md` from `scripts/` — while
-                # the idiom has no extension to name.
-                if climbed and not pathlib.PurePath(token).suffix:
+                # `normpath` turns a link to a directory — `/` or `./`, "the
+                # repository root" and "where I am" — into `.`, which names no
+                # file and would be reported missing. Both are ordinary links
+                # and neither is a claim about a path.
+                if token == ".":
                     continue
             elif token.startswith(("../", "./")):
                 # In backticks a leading `../` is prose or a shell line: the
@@ -450,10 +445,10 @@ def _claims_with_origin(
                     # `README.md` are the same shape, and `pytest` is a word.
                     # A link destination needs no such tiebreak — it is a path
                     # by construction, the same reason the shape rule skips it
-                    # — and asking it for an extension dropped
-                    # `[MIT License](LICENSE)`, which is how all three of
-                    # `README.md`, `README.ru.md` and `CONTRIBUTING.md` spell
-                    # it today.
+                    # — and asking it for an extension dropped every link to
+                    # the root `LICENSE`: `[LICENSE](LICENSE)` in `README.md`
+                    # and `README.ru.md`, `[MIT License](LICENSE)` in
+                    # `CONTRIBUTING.md`.
                     if not FILE_TOKEN.match(token):
                         continue  # a bare word — not a repository path
                     if pathlib.PurePath(token).suffix not in FILE_SUFFIXES:
@@ -766,16 +761,38 @@ def test_a_link_title_is_read_as_one_quoted_run():
     ]
 
 
-def test_a_link_climbs_wherever_the_dots_sit():
-    """Mutation testing on PR #29. The GitHub-idiom rule turns on whether the
-    destination climbed, and `..` is a path segment rather than a prefix:
-    `sub/../releases` climbs just as `../releases` does, and a rule reading
-    only the start of the string called it a plain repository path."""
-    assert _claimed_paths("[d](sub/../releases)") == []
-    assert _claimed_paths("[d](../sub/../releases)", "docs/x.md") == []
-    # Climbing is not itself disqualifying — a climb that names a real file
-    # still names it, whichever segment the dots sit in.
+def test_a_link_is_normalized_wherever_the_dots_sit():
+    """`..` is a path segment and not a prefix, so a destination that climbs
+    in the middle resolves like any other."""
     assert _claimed_paths("[d](docs/../00_README.md)") == [(1, "00_README.md")]
+    assert _claimed_paths("[d](../docs/../00_README.md)", "docs/x.md") == [
+        (1, "00_README.md")
+    ]
+
+
+def test_a_link_to_a_directory_is_not_a_claim_about_a_file():
+    """Internal review on PR #29, on two of the fixes meeting each other.
+
+    Root-anchoring and dropping the extension requirement together turned
+    `[home](/)` and `[here](./)` — "the repository root" and "where I am",
+    both ordinary links — into a claim on `.`, which names no file and was
+    duly reported missing. A false red, on the most innocuous link there
+    is."""
+    assert _claimed_paths("[home](/)") == []
+    assert _claimed_paths("[here](./)") == []
+    assert _claimed_paths("[home](/)", "docs/process.md") == []
+    # A directory that is not the root still names something checkable.
+    assert _claimed_paths("[d](../scripts/)", "docs/x.md") == [(1, "scripts")]
+
+
+def test_the_planned_marker_reaches_through_angle_brackets():
+    """Internal review on PR #29. CommonMark lets a reference definition wrap
+    its destination in `<…>`, and the marker is matched from the end of the
+    destination — so the closing `>` sat between path and marker exactly as a
+    closing bracket does in the inline spelling, and the escape read as a
+    no-op."""
+    assert _claimed_paths("[ui]: <docs/future.md> (planned)") == []
+    assert _claimed_paths("[ui]: <docs/gone.md>") == [(1, "docs/gone.md")]
 
 
 def test_a_fence_may_be_indented():
@@ -809,12 +826,9 @@ def test_an_extensionless_root_link_is_still_a_claim():
     # A backticked bare word is still not a path: that is the naming-policy
     # card, 152 of them, and this fix must not drag it in.
     assert _claimed_paths("run `pytest` first") == []
-    # And the boundary this opened: an extensionless destination is a claim
-    # only when it did not climb to get there. `../../releases` from a nested
-    # document lands on a bare `releases` that names the repository's page,
-    # not a file — the one case where the same shape means something else.
-    assert _claimed_paths("[rel](../../releases)", "docs/adr/x.md") == []
-    assert _claimed_paths("[lic](../LICENSE)", "docs/x.md") == []
+    # It reaches the same file named from a nested document, which is where
+    # all but one of the live documents would have to name it.
+    assert _claimed_paths("[lic](../LICENSE)", "docs/x.md") == [(1, "LICENSE")]
     assert _claimed_paths("[a](../00_README.md)", "docs/x.md") == [(1, "00_README.md")]
 
 
@@ -903,8 +917,19 @@ def test_a_link_is_resolved_from_the_document_that_carries_it():
     assert _claimed_paths("[a](ADR-013-gigaam-independent-module.md)", "docs/adr/x.md") == [
         (1, "docs/adr/ADR-013-gigaam-independent-module.md")
     ]
-    # Climbing out of the tree is nobody's path, from any depth.
-    assert _claimed_paths("[rel](../../releases)", "docs/adr/x.md") == []
+    # Climbing out of the tree is nobody's path — but "out of the tree" is
+    # decided by where the climb lands, not by how it is spelled. GitHub's
+    # `../../releases` idiom escapes from a *root* document, which is the only
+    # place it is written and the only place it works: from two directories
+    # down the same spelling lands back inside, on `releases`, and it is then
+    # an ordinary broken link that GitHub renders as one too. An earlier
+    # reading of this case invented a rule to excuse it at any depth, and that
+    # rule cost `[lic](../LICENSE)` — the same file this guard had just been
+    # taught to check — from every nested document in the tree.
+    assert _claimed_paths("[rel](../../releases)", "README.md") == []
+    assert _claimed_paths("[rel](../../releases)", "docs/adr/x.md") == [
+        (1, "releases")
+    ]
     assert _claimed_paths("[rel](../../../escape.md)", "docs/adr/x.md") == []
     # A backticked path stays root-relative wherever the sentence lives.
     assert _claimed_paths("see `core/gone.py`", "skill/session-book/SKILL.md") == [
