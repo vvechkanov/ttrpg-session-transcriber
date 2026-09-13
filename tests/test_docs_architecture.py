@@ -736,6 +736,59 @@ def test_the_planned_marker_survives_a_link_title():
     ]
     # And the reference-style spelling, which carries a title of its own.
     assert _claimed_paths('[ui]: docs/future.md "Draft" (planned)') == []
+    # With its positive counterpart in the same test: without one, deleting
+    # the title support from MARKDOWN_REFERENCE would stop the line parsing
+    # at all and the assertion above would pass for the wrong reason.
+    assert _claimed_paths('[ui]: docs/gone.md "Draft"') == [(1, "docs/gone.md")]
+
+
+def test_a_link_title_is_read_as_one_quoted_run():
+    """Mutation testing on PR #29, on the title-stepping fix itself: both
+    details of the pattern that reads a title were load-bearing and neither
+    was pinned, so a mutant that dropped either passed the whole file.
+
+    The quotes have to be *the same* quote. A title may legally contain the
+    other one — `"It's a draft"` — and a pattern that accepts any quote to
+    close any other stops at the apostrophe, leaving ` a draft" (planned)`
+    where the marker should be: a false red on a roadmap.
+
+    And the run has to be the shortest one. A greedy body runs past the title
+    to the last quote anywhere on the line, so a sentence that quotes
+    something later swallows the marker along with it — and, the other way
+    round, a stray quote *after* the marker pulls the match past a marker that
+    was doing its job."""
+    assert _claimed_paths("""[ui]: docs/future.md "It's a draft" (planned)""") == []
+    assert _claimed_paths('[d](docs/future.md "Draft") (planned) and "x"') == []
+    # The shortest run, not the longest: here the marker sits inside what a
+    # greedy read would call the title, and the claim stands.
+    assert _claimed_paths("[d](docs/future.md 'Draft') ' (planned)") == [
+        (1, "docs/future.md")
+    ]
+
+
+def test_a_link_climbs_wherever_the_dots_sit():
+    """Mutation testing on PR #29. The GitHub-idiom rule turns on whether the
+    destination climbed, and `..` is a path segment rather than a prefix:
+    `sub/../releases` climbs just as `../releases` does, and a rule reading
+    only the start of the string called it a plain repository path."""
+    assert _claimed_paths("[d](sub/../releases)") == []
+    assert _claimed_paths("[d](../sub/../releases)", "docs/x.md") == []
+    # Climbing is not itself disqualifying — a climb that names a real file
+    # still names it, whichever segment the dots sit in.
+    assert _claimed_paths("[d](docs/../00_README.md)") == [(1, "00_README.md")]
+
+
+def test_a_fence_may_be_indented():
+    """Mutation testing on PR #29, on ground the tilde fix walked over: a
+    fence inside a list item is indented, which is ordinary CommonMark, and
+    reading the marker only at column zero leaves the block's paths unread —
+    the same miss the tilde spelling had, one level in."""
+    assert _claimed_paths("- item\n  ```\n  core/gone.py\n  ```") == [
+        (3, "core/gone.py")
+    ]
+    assert _claimed_paths("- item\n  ~~~\n  core/gone.py\n  ~~~") == [
+        (3, "core/gone.py")
+    ]
 
 
 def test_an_extensionless_root_link_is_still_a_claim():
