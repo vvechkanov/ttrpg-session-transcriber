@@ -143,9 +143,15 @@ def _is_path_shaped(token: str) -> bool:
 #: The optional title — `[guide](docs/guide.md "Guide")` — has to be consumed
 #: too, or the link yields no candidate at all and deleting its target leaves
 #: the guard green.
+#: A title is delimited by one of three pairs, and each may contain the other
+#: two: the first attempt excluded *both* quote characters from every title
+#: whatever its delimiter, so `"It's gone"` and `'A "Guide"'` — ordinary
+#: English inside ordinary CommonMark — yielded no candidate at all, and the
+#: parenthesised form was not known. The delimiter is captured and matched
+#: against itself instead.
 MARKDOWN_LINK = re.compile(
     r"\[[^\]]*\]\((?!https?:|mailto:|#)((?:[^()\s]|\([^()\s]*\))+)"
-    r"(?:\s+[\"'][^\"']*[\"'])?\)"
+    r"(?:\s+(?:([\"'])[^\n]*?\2|\([^()]*\)))?\)"
 )
 
 #: A reference-style Markdown definition: `[ui]: docs/adr/thing.md`. The use
@@ -166,6 +172,11 @@ MARKDOWN_REFERENCE = re.compile(
 #: from the end of the destination so :func:`_is_planned` can step over it and
 #: reach the `(planned)` marker beyond.
 TRAILING_LINK_TITLE = re.compile(r"^\s+([\"'])[^\n]*?\1")
+
+#: An opening or closing code fence: three or more backticks or tildes. The
+#: run is captured whole rather than tested three characters at a time,
+#: because both its character and its length decide what closes it.
+FENCE_MARKER = re.compile(r"(`{3,}|~{3,})")
 
 
 def _tracked_files(root: Path) -> frozenset[str] | None:
@@ -331,20 +342,30 @@ def _claims_with_origin(
     # meaning the one in this tree, wherever the sentence happens to live.
     base = posixpath.dirname(document)
     claims: list[tuple[int, str]] = []
-    # The marker that opened the block currently being read, or `None`. Kept
-    # rather than a boolean because CommonMark has two fences and a block is
-    # closed only by its own: `~~~` exists precisely so a block may contain
-    # backticks, and treating the ``` line inside it as a closing fence would
-    # read the rest of the block as prose. Tracking only ``` left every path
-    # in a tilde-fenced tree diagram unread.
+    # The exact marker run that opened the block being read, or `None`. Both
+    # halves of it are load-bearing, and each was found missing in turn.
+    #
+    # The *character*, because CommonMark has two fences and a block closes
+    # only on its own: `~~~` exists precisely so a block may contain
+    # backticks, and reading the ``` line inside one as a closing fence turns
+    # the rest of the block into prose. Tracking only ``` left every path in a
+    # tilde-fenced tree diagram unread.
+    #
+    # The *length*, for the same reason one level in: a block opened with four
+    # backticks exists so that a three-backtick line may sit inside it, and a
+    # closing run has to be at least as long as the one that opened.
     fence: str | None = None
     for line_number, line in enumerate(text.splitlines(), start=1):
-        opener = next(
-            (mark for mark in ("```", "~~~") if line.lstrip().startswith(mark)), None
-        )
-        if opener is not None and (fence is None or opener == fence):
-            fence = opener if fence is None else None
-            continue
+        run = FENCE_MARKER.match(line.lstrip())
+        if run is not None:
+            marker = run.group(1)
+            if fence is None:
+                fence = marker
+                continue
+            if marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+                continue
+            # A shorter run, or the other character, is block content.
         in_fence = fence is not None
         # Each candidate carries whether it came from a Markdown link, because
         # a link destination is a path by construction and must not be filtered
@@ -793,6 +814,38 @@ def test_the_planned_marker_reaches_through_angle_brackets():
     no-op."""
     assert _claimed_paths("[ui]: <docs/future.md> (planned)") == []
     assert _claimed_paths("[ui]: <docs/gone.md>") == [(1, "docs/gone.md")]
+
+
+def test_a_link_title_may_contain_the_other_delimiters():
+    """Codex on PR #29, on the title support itself. CommonMark gives a title
+    three delimiter pairs, and each may carry the other two — `"It's gone"` is
+    ordinary English. The first attempt excluded both quote characters from
+    every title whatever its delimiter, so those links produced no candidate
+    at all and their targets could be deleted with the guard green."""
+    assert _claimed_paths("""[g](docs/gone.md "It's gone")""") == [
+        (1, "docs/gone.md")
+    ]
+    assert _claimed_paths("""[g](docs/gone.md 'A "Guide"')""") == [(1, "docs/gone.md")]
+    assert _claimed_paths("[g](docs/gone.md (Guide))") == [(1, "docs/gone.md")]
+    # The destination still ends where the title begins, not inside it.
+    assert _claimed_paths("""[g](docs/gone.md "docs/other.md")""") == [
+        (1, "docs/gone.md")
+    ]
+
+
+def test_a_longer_fence_holds_a_shorter_one():
+    """Codex on PR #29, on the fence fix itself. A four-backtick block exists
+    precisely so a three-backtick line may sit inside it, and recording only
+    three characters made that inner line close the block — so every path
+    after it in the same block went unread, which is the miss the fence work
+    was undertaken to remove."""
+    assert _claimed_paths("````\n```\ncore/gone.py\n```\n````") == [
+        (3, "core/gone.py")
+    ]
+    # And the closing run may be longer than the opener, never shorter.
+    assert _claimed_paths("```\ncore/gone.py\n`````\nui/after.py") == [
+        (2, "core/gone.py"),
+    ]
 
 
 def test_a_fence_may_be_indented():
