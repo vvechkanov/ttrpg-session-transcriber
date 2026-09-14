@@ -42,6 +42,35 @@ NAMES_ONLY_THE_UI_SAW = [
 CANONICAL_NAME = "fvtt-log-2025-07-11.txt"
 
 
+def _unique_ignoring_case(names: list[str]) -> list[str]:
+    """Оставить имена, различимые на регистронезависимой ФС.
+
+    Windows и macOS не различают ``fvtt-log.txt`` и ``fvtt-log.TXT``:
+    в одной папке это один файл, и второй ``write_text`` перезаписывает
+    первый. Тест, кладущий рядом всю параметризацию, на Linux видит
+    пять файлов, а на Windows четыре — и падает там, где ошибки нет.
+
+    Отфильтровано вычислением, а не списком руками: имя, добавленное в
+    корпус завтра, не вернёт расхождение платформ молча. Ось «регистр
+    расширения» от этого не теряется — её держит однофайловая
+    параметризация выше, где коллидировать не с чем.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in names:
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        unique.append(name)
+    return unique
+
+
+#: Корпус для проверок, кладущих несколько логов в одну папку.
+MULTI_LOG_CORPUS = _unique_ignoring_case(
+    [*NAMES_ONLY_THE_UI_SAW, CANONICAL_NAME]
+)
+
+
 class _FakeSource(Source):
     name = "fake"
 
@@ -142,15 +171,10 @@ class TestTheUiAndThePipelineAgree:
         self, tmp_path: Path, patched_pipeline
     ):
         """Весь корпус разом: множество и его первый элемент совпадают."""
-        session = _session_with(
-            tmp_path, *NAMES_ONLY_THE_UI_SAW, CANONICAL_NAME
-        )
+        session = _session_with(tmp_path, *MULTI_LOG_CORPUS)
 
         found = detect_fvtt_chat_logs(session)
-        assert {p.name for p in found} == {
-            *NAMES_ONLY_THE_UI_SAW,
-            CANONICAL_NAME,
-        }
+        assert {p.name for p in found} == set(MULTI_LOG_CORPUS)
 
         # Не «из того же набора», а именно тот же элемент: пайплайн
         # берёт первый, и первым обязан быть тот же файл, который
