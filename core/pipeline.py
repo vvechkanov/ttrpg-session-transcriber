@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from core.chunking import ChunkingOptions, chunk_text_file
-from core.discovery import find_fvtt_chat_log, find_info_file
-from core.file_matchers import detect_combat_logs
+from core.discovery import find_info_file
+from core.file_matchers import detect_combat_logs, detect_fvtt_chat_logs
 from core.gpu_check import check_gpu_or_warn
 from core.session_clock import session_clock_start
 from domain.annotations import ChatMessage, GameLogEntry
@@ -119,7 +119,11 @@ def run(
     # browser-local time), so FvttChatSource needs them up front.
     combat_logs = detect_combat_logs(session_dir)
 
-    chat_log = find_fvtt_chat_log(session_dir)
+    # Тот же искатель, что у экрана сессии: показанный файл обязан
+    # быть открытым. Берётся первый — «несколько чат-логов» это
+    # отдельная карточка, здесь поведение не меняется.
+    chat_logs = detect_fvtt_chat_logs(session_dir)
+    chat_log = chat_logs[0] if chat_logs else None
     chat_messages: list[ChatMessage] = []
     if chat_log is not None:
         info_file = find_info_file(session_dir)

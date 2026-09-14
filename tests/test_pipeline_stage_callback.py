@@ -5,7 +5,7 @@ order (start → speech → chat → merge → render → done) and that the
 default / absent callback path still works (byte-compat with earlier
 tests and CLI callers).
 
-We mock out ``SPEECH_SOURCES`` / ``find_fvtt_chat_log`` / ``MERGERS``
+We mock out ``SPEECH_SOURCES`` / ``detect_fvtt_chat_logs`` / ``MERGERS``
 / ``get_renderer`` / ``check_gpu_or_warn`` so the test never touches
 real ASR backends or GPU detection.
 """
@@ -54,7 +54,7 @@ def patched_pipeline(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("core.pipeline.get_renderer", lambda name: _FakeRenderer())
     monkeypatch.setattr("core.pipeline.check_gpu_or_warn", lambda device: None)
     monkeypatch.setattr(
-        "core.pipeline.find_fvtt_chat_log", lambda session_dir: None
+        "core.pipeline.detect_fvtt_chat_logs", lambda session_dir: ()
     )
     monkeypatch.setattr("core.pipeline._speech_kwargs", lambda p, c: {})
 

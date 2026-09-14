@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def find_fvtt_chat_log(session_dir: Path) -> Path | None:
-    """First fvtt-log-*.txt in session_dir (alphabetical), or None."""
-    matches = sorted(session_dir.glob("fvtt-log-*.txt"))
-    return matches[0] if matches else None
+#: Чат-лог ищет ``core.file_matchers.detect_fvtt_chat_logs`` — один
+#: искатель на экран сессии и на мердж. Здесь жил второй, с шаблоном
+#: ``fvtt-log-*.txt``; он расходился с первым на четырёх осях (дефис,
+#: любой символ вместо него, регистр имени, регистр расширения), и
+#: файл, показанный в интерфейсе, молча не доезжал до merged.txt.
+#: Карточка https://trello.com/c/eyFOj25c .
 
 
 def find_info_file(session_dir: Path) -> Path | None:

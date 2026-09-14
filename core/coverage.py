@@ -27,8 +27,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from core.discovery import find_fvtt_chat_log
-from core.file_matchers import detect_combat_logs, detect_craig_segments
+from core.file_matchers import (
+    detect_combat_logs,
+    detect_craig_segments,
+    detect_fvtt_chat_logs,
+)
 from core.timeline_window import parse_combat_file, parse_info_start
 from sources.game_log.fvtt_chat import parse_fvtt_log, resolve_tz_offset
 
@@ -169,13 +172,16 @@ def session_start(session_dir: Path) -> datetime | None:
 def _analyse_chat(session_dir: Path, info_start: datetime) -> _ChatFacts:
     """Разобрать чат-лог: сколько всего, сколько до записи, какой офсет.
 
-    Файл ищется тем же ``find_fvtt_chat_log``, что и в
-    :mod:`core.pipeline` — не ``detect_fvtt_chat_logs``. Две функции
-    поиска расходятся в шаблоне (``fvtt-log-*.txt`` против
-    ``fvtt-log*.txt``), и взять здесь вторую значило бы посчитать файл,
-    который мерджер потом не откроет.
+    Файл ищется тем же ``detect_fvtt_chat_logs``, что и в
+    :mod:`core.pipeline` и на экране сессии. Совпадение с мерджером
+    здесь принципиально: баннер, который считает не те сообщения, что
+    реально попадут в ``merged.txt``, хуже отсутствующего баннера.
+    Раньше совпадение держалось на том, что оба звали одну и ту же из
+    **двух** расходившихся функций, и стоило комментария; теперь
+    функция одна, и сломать его нечем.
     """
-    chat_path = find_fvtt_chat_log(session_dir)
+    chat_paths = detect_fvtt_chat_logs(session_dir)
+    chat_path = chat_paths[0] if chat_paths else None
     if chat_path is None:
         return _ChatFacts()
 

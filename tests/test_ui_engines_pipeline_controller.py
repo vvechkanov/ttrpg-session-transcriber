@@ -628,14 +628,23 @@ class _StubMergerPrefs:
         self.renderer = "plain-text"
 
 
-def _spawn_merger_with(prefs, tmp_path: Path, monkeypatch) -> dict:
-    """Run ``_spawn_merger`` against a stub worker, return its kwargs."""
+def _spawn_merger_with(
+    prefs, tmp_path: Path, monkeypatch, chat_log_name: str | None = None
+) -> dict:
+    """Run ``_spawn_merger`` against a stub worker, return its kwargs.
+
+    ``chat_log_name`` кладёт в папку сессии чат-лог под указанным
+    именем — нужно тем тестам, которые проверяют, какой файл доехал
+    до мерджера.
+    """
 
     _ensure_app()
 
     session = tmp_path / "session"
     session.mkdir(parents=True, exist_ok=True)
     _write_flac_stub(session / "1-vova.flac")
+    if chat_log_name is not None:
+        (session / chat_log_name).write_text("chat\n", encoding="utf-8")
 
     monkeypatch.setattr(
         "ui.engines.pipeline_controller.MergerWorker", _StubMergerWorker
@@ -778,3 +787,50 @@ def test_merge_gap_is_read_when_the_merge_starts(tmp_path: Path, monkeypatch) ->
         "правка настройки не застала следующую сборку — значит значение "
         "где-то закешировано, и описание на экране снова врёт"
     )
+
+
+def test_gui_merge_opens_the_chat_log_the_screen_shows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Вторая точка входа: мердж из интерфейса, а не из CLI.
+
+    Экран сессии наполняет список источников через
+    ``detect_fvtt_chat_logs``, а ``_spawn_merger`` раньше искал чат-лог
+    вторым искателем с шаблоном ``fvtt-log-*.txt``. Голый
+    ``fvtt-log.txt`` показывался строкой «Foundry чат» и молча не
+    доезжал до ``merged.txt``.
+
+    Имя взято именно то, которое прежний узкий шаблон не ловил: с
+    ``fvtt-log-<дата>.txt`` тест зеленел бы и на сломанном коде.
+    Карточка https://trello.com/c/eyFOj25c .
+    """
+
+    seen = _spawn_merger_with(
+        _StubMergerPrefs("1.0"),
+        tmp_path,
+        monkeypatch,
+        chat_log_name="fvtt-log.txt",
+    )
+
+    chat_log_path = seen.get("chat_log_path")
+    assert chat_log_path is not None, (
+        "MergerWorker построен без чат-лога — файл, показанный на "
+        "экране сессии, в merged.txt не попадёт"
+    )
+    assert chat_log_path.name == "fvtt-log.txt"
+
+
+def test_gui_merge_has_no_chat_log_when_the_screen_shows_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Обратная сторона: без чат-лога мерджеру передаётся ``None``.
+
+    Без этого теста предыдущий зеленел бы и на коде, который суёт в
+    ``chat_log_path`` первый попавшийся файл сессии.
+    """
+
+    seen = _spawn_merger_with(
+        _StubMergerPrefs("1.0"), tmp_path, monkeypatch, chat_log_name=None
+    )
+
+    assert seen.get("chat_log_path") is None

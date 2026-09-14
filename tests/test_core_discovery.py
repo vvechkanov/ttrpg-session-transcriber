@@ -1,46 +1,15 @@
 """Tier 1 — core.discovery helper tests.
 
-Tests find_fvtt_chat_log and find_info_file with tmp_path fixtures.
+Tests find_info_file with tmp_path fixtures.
 No audio, no models. Must run in <5s.
+
+Чат-лог ищет core.file_matchers.detect_fvtt_chat_logs — один искатель
+на экран сессии и на мердж; его тесты в test_core_file_matchers.py и
+в test_chat_log_finder_agreement.py.
 """
 
 import pytest
 from pathlib import Path
-
-
-class TestFindFvttChatLog:
-    def test_returns_none_when_no_fvtt_files(self, tmp_path):
-        from core.discovery import find_fvtt_chat_log
-        result = find_fvtt_chat_log(tmp_path)
-        assert result is None
-
-    def test_returns_first_alphabetically(self, tmp_path):
-        from core.discovery import find_fvtt_chat_log
-        (tmp_path / "fvtt-log-20250711.txt").write_text("b", encoding="utf-8")
-        (tmp_path / "fvtt-log-20250710.txt").write_text("a", encoding="utf-8")
-        result = find_fvtt_chat_log(tmp_path)
-        assert result is not None
-        assert result.name == "fvtt-log-20250710.txt"
-
-    def test_returns_single_file(self, tmp_path):
-        from core.discovery import find_fvtt_chat_log
-        p = tmp_path / "fvtt-log-session1.txt"
-        p.write_text("log content", encoding="utf-8")
-        result = find_fvtt_chat_log(tmp_path)
-        assert result == p
-
-    def test_ignores_non_fvtt_files(self, tmp_path):
-        from core.discovery import find_fvtt_chat_log
-        (tmp_path / "merged.txt").write_text("not fvtt", encoding="utf-8")
-        (tmp_path / "speaker_map.json").write_text("{}", encoding="utf-8")
-        result = find_fvtt_chat_log(tmp_path)
-        assert result is None
-
-    def test_returns_path_object(self, tmp_path):
-        from core.discovery import find_fvtt_chat_log
-        (tmp_path / "fvtt-log-x.txt").write_text("x", encoding="utf-8")
-        result = find_fvtt_chat_log(tmp_path)
-        assert isinstance(result, Path)
 
 
 class TestFindInfoFile:
