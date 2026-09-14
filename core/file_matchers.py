@@ -23,7 +23,9 @@ plain strings so this module stays UI-free.
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -246,10 +248,33 @@ def detect_audio_files(session_dir: Path) -> tuple[Path, ...]:
     return tuple(sorted(all_files))
 
 
-#: Имя канонического экспорта Foundry: ``fvtt-log-<дата>.txt``, в том
-#: числе по регистру. Ровно это, и только это, видел прежний искатель
-#: мерджа (``glob("fvtt-log-*.txt")``) — см. :func:`detect_fvtt_chat_logs`.
+#: Имя канонического экспорта Foundry: ``fvtt-log-<дата>.txt``. Ровно
+#: это, и только это, видел прежний искатель мерджа
+#: (``glob("fvtt-log-*.txt")``) — см. :func:`detect_fvtt_chat_logs`.
+#: Шаблон записан в нижнем регистре и применяется к имени, пропущенному
+#: через :func:`os.path.normcase`; почему — в :func:`_is_canonical_fvtt_chat`.
 _CANONICAL_FVTT_CHAT = re.compile(r"fvtt-log-.*\.txt\Z")
+
+
+def _is_canonical_fvtt_chat(
+    name: str, normcase: Callable[[str], str] = os.path.normcase
+) -> bool:
+    """Совпадает ли имя с каноническим экспортом — по правилам платформы.
+
+    ``Path.glob`` складывает регистр так же, как файловая система: на
+    Windows ``glob("fvtt-log-*.txt")`` находил и ``FVTT-LOG-2026.txt``,
+    на POSIX — нет. Классификация обязана повторять ровно это, иначе
+    на Windows уже смерженный файл теряет приоритет: рядом с
+    ``fvtt-log (1).txt`` оба окажутся неканоническими, а пробел
+    сортируется раньше дефиса, и мердж возьмёт копию из браузера.
+
+    ``os.path.normcase`` — тот самый механизм, которым складывает
+    регистр сам ``pathlib``: на Windows опускает в нижний, на POSIX
+    возвращает имя как есть. Отсюда и параметр: подменив его на
+    ``ntpath.normcase`` или ``posixpath.normcase``, обе платформы
+    проверяются на любой машине, а ночному прогону Windows негде взять.
+    """
+    return _CANONICAL_FVTT_CHAT.fullmatch(normcase(name)) is not None
 
 
 def _fvtt_chat_order(path: Path) -> tuple[int, Path]:
@@ -282,7 +307,7 @@ def _fvtt_chat_order(path: Path) -> tuple[int, Path]:
     там, где два канонических экспорта различаются регистром:
     ``fvtt-log-a.txt`` против ``fvtt-log-B.txt``.
     """
-    return (0 if _CANONICAL_FVTT_CHAT.fullmatch(path.name) else 1, path)
+    return (0 if _is_canonical_fvtt_chat(path.name) else 1, path)
 
 
 def detect_fvtt_chat_logs(session_dir: Path) -> tuple[Path, ...]:

@@ -319,3 +319,37 @@ class TestOrderingMatchesThePlatform:
             "строковый ключ сравнивается регистрозависимо на всех ОС, "
             "а прежний порядок на Windows был регистронезависимым"
         )
+
+    def test_canonical_classification_follows_the_platform_case_rule(self):
+        """Заглавный экспорт каноничен на Windows и нет на POSIX.
+
+        ``Path.glob`` складывает регистр как файловая система: прежний
+        ``glob("fvtt-log-*.txt")`` находил ``FVTT-LOG-2026.txt`` на
+        Windows и не находил на POSIX. Классификация обязана повторять
+        ровно это, иначе на Windows уже смерженный файл теряет
+        приоритет рядом с ``fvtt-log (1).txt`` — оба неканоничны, а
+        пробел сортируется раньше дефиса.
+
+        Обе платформы проверяются здесь, на любой машине: ночному
+        прогону Windows негде взять, а CI показал бы это только на
+        своей половине матрицы.
+        """
+        import ntpath
+        import posixpath
+
+        from core.file_matchers import _is_canonical_fvtt_chat
+
+        upper = "FVTT-LOG-2026.txt"
+        lower = "fvtt-log-2026.txt"
+
+        assert _is_canonical_fvtt_chat(upper, ntpath.normcase) is True
+        assert _is_canonical_fvtt_chat(upper, posixpath.normcase) is False
+
+        # Канонический в нижнем регистре — канонический везде, иначе
+        # проверка выше зеленела бы и на «всегда False».
+        assert _is_canonical_fvtt_chat(lower, ntpath.normcase) is True
+        assert _is_canonical_fvtt_chat(lower, posixpath.normcase) is True
+
+        # И не всё подряд: иначе зеленела бы на «всегда True».
+        assert _is_canonical_fvtt_chat("fvtt-log (1).txt", ntpath.normcase) is False
+        assert _is_canonical_fvtt_chat("fvtt-log.txt", ntpath.normcase) is False
