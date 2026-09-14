@@ -138,10 +138,10 @@ class TestTheUiAndThePipelineAgree:
         assert _FakeChatSource.opened is not None
         assert _FakeChatSource.opened.name == name
 
-    def test_the_two_finders_return_the_same_set(
+    def test_the_screen_and_the_merge_pick_the_same_first_log(
         self, tmp_path: Path, patched_pipeline
     ):
-        """Весь корпус разом: множества совпадают, а не пересекаются."""
+        """Весь корпус разом: множество и его первый элемент совпадают."""
         session = _session_with(
             tmp_path, *NAMES_ONLY_THE_UI_SAW, CANONICAL_NAME
         )
@@ -158,6 +158,14 @@ class TestTheUiAndThePipelineAgree:
         # пока стороны расходятся на регистре имени.
         assert _chat_stage_message(session) == found[0].name
 
+        # И здесь — открытый путь, а не объявленный. На односессионных
+        # кейсах выше эта проверка слаба: там [0] и [-1] совпадают, и
+        # пайплайн, объявляющий первый файл и открывающий последний,
+        # проходил мимо всего набора. Отличить их может только папка
+        # с несколькими логами, то есть эта.
+        assert _FakeChatSource.opened is not None
+        assert _FakeChatSource.opened.name == found[0].name
+
     def test_a_name_neither_side_claims_is_still_ignored(
         self, tmp_path: Path, patched_pipeline
     ):
@@ -170,11 +178,13 @@ class TestTheUiAndThePipelineAgree:
 
 class TestOnlyOneFinderRemains:
     def test_discovery_no_longer_ships_a_second_chat_finder(self):
-        """«Свести к одной функции» — машинная форма этого требования.
+        """Сторож против возврата именно того искателя, что был удалён.
 
         Пока две функции существуют рядом, они снова разойдутся: именно
-        так и вышло в прошлый раз. Держим отсутствие второй, а не
-        совпадение двух шаблонов.
+        так и вышло в прошлый раз. Заявка скромная и её стоит знать:
+        пиннится отсутствие одного имени в одном модуле, а не
+        единственность искателя вообще — третий, названный иначе или
+        живущий в другом файле, пройдёт мимо.
         """
         import core.discovery
 
