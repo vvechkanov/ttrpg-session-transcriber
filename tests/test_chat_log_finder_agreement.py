@@ -213,3 +213,55 @@ class TestOnlyOneFinderRemains:
         import core.discovery
 
         assert not hasattr(core.discovery, "find_fvtt_chat_log")
+
+
+class TestWideningDoesNotChangeWhichLogIsMerged:
+    """Расширение шаблона добавляет файлы, а не переигрывает выбор.
+
+    Потребители берут ``[0]``, поэтому набор кандидатов решает не
+    только «увидим ли файл», но и «какой файл уедет в merged.txt».
+    Наивно отсортированный расширенный набор менял второе: имена,
+    которые прежний узкий шаблон не видел вовсе, сортируются раньше
+    канонического экспорта и вытесняли его.
+
+    Найдено внешним ревью на PR #30 (P1).
+    """
+
+    #: Имена, которые прежний искатель мерджа не видел И которые
+    #: сортируются раньше канонического экспорта: по регистру и по
+    #: пунктуации соответственно.
+    SORT_BEFORE_CANONICAL = ["FVTT-LOG-old.txt", "fvtt-log (1).txt"]
+
+    @pytest.mark.parametrize("intruder", SORT_BEFORE_CANONICAL)
+    def test_canonical_export_still_wins(
+        self, tmp_path: Path, intruder: str, patched_pipeline
+    ):
+        session = _session_with(tmp_path, intruder, CANONICAL_NAME)
+
+        # Предпосылка: имя действительно сортируется раньше, иначе
+        # тест не о том и зеленел бы на любой реализации.
+        assert intruder < CANONICAL_NAME
+
+        found = detect_fvtt_chat_logs(session)
+        assert {p.name for p in found} == {intruder, CANONICAL_NAME}, (
+            "оба файла обязаны быть видны — сужать набор мы не хотели"
+        )
+
+        assert found[0].name == CANONICAL_NAME
+        assert _chat_stage_message(session) == CANONICAL_NAME
+        assert _FakeChatSource.opened is not None
+        assert _FakeChatSource.opened.name == CANONICAL_NAME
+
+    def test_the_bug_case_still_works(
+        self, tmp_path: Path, patched_pipeline
+    ):
+        """А когда канонического нет — берётся то, что есть.
+
+        Без этого «канонический первым» можно было бы выродить в
+        «только канонический», то есть вернуть исходный баг.
+        """
+        session = _session_with(tmp_path, "fvtt-log.txt")
+
+        assert _chat_stage_message(session) == "fvtt-log.txt"
+        assert _FakeChatSource.opened is not None
+        assert _FakeChatSource.opened.name == "fvtt-log.txt"
