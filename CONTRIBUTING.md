@@ -210,9 +210,9 @@ Example: `feat(asr): add SherpaOnnxBackend with GigaAM-v3 support`
 
 See [TASKS.md](TASKS.md) for the high-level roadmap and the canonical design decisions. The short version:
 
-- **`scripts/asr_backends/`** — pluggable ASR backends. All backends produce a canonical JSON contract documented in `base.py`.
-- **`scripts/merge_whisperx.py`** — merges per-track transcripts into a unified timeline. Engine-agnostic — do not add Whisper-specific assumptions here.
-- **`scripts/parse_fvtt_chat.py`** — converts Foundry VTT chat log into the same canonical JSON format so it can be merged with audio segments.
+- **`sources/`** — pluggable input adapters, all implementing `sources/base.py::Source.extract`. `sources/speech/` holds the ASR backends; `sources/game_log/` holds two more — the Foundry VTT chat log and the PF2e combat dump. Each returns `domain/annotations.py` values, which `core/pipeline.py` assembles into one `Timeline` with speech, chat and game-log events on a shared clock.
+- **`mergers/`** — collapse that `Timeline` into an ordered script: `mergers/script_merger.py::ScriptMerger.merge` takes a `Timeline` and returns `list[ScriptEvent]`. Engine-agnostic — do not add Whisper-specific assumptions here.
+- **`renderers/`** — `renderers/base.py::Renderer.render` turns `list[ScriptEvent]` into `bytes`. `core/pipeline.py` writes those bytes to `merged.txt`; the chunk files are a separate post-step in `core/chunking.py`.
 - **`launcher/`** — single-EXE installer (PyInstaller). Pure Python, dark-themed installer UI.
 
 ## Code of Conduct
