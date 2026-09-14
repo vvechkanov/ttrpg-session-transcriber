@@ -263,14 +263,20 @@ class TestAnalyseCoverage:
     def test_uses_the_same_chat_discovery_as_the_merger(
         self, tmp_path, pin_system_tz
     ):
-        """A file the merger will not open must not be counted here.
+        """Баннер считает ровно тот файл, который откроет мерджер.
 
-        core.discovery matches ``fvtt-log-*.txt`` (hyphen required);
-        core.file_matchers also accepts a bare ``fvtt-log.txt``. Counting
-        by the looser rule would promise messages that never reach
-        merged.txt.
+        Требование то же, что и раньше, а ожидание — противоположное.
+        Прежде обе стороны звали ``find_fvtt_chat_log`` с шаблоном
+        ``fvtt-log-*.txt``, и голый ``fvtt-log.txt`` не попадал ни в
+        мердж, ни в баннер: совпадение достигалось тем, что молчали
+        оба. Теперь искатель один (``detect_fvtt_chat_logs``), файл
+        доезжает до ``merged.txt`` — и баннер обязан его посчитать,
+        иначе он недосчитает реально слитые сообщения.
+
+        Карточка https://trello.com/c/eyFOj25c .
         """
         from core.coverage import analyse_coverage
+        from core.file_matchers import detect_fvtt_chat_logs
 
         pin_system_tz(2.0)
         session = tmp_path / "bare-name"
@@ -279,7 +285,61 @@ class TestAnalyseCoverage:
         shutil.copy(
             FIXTURE_DIR / "fvtt-log-fixture.txt", session / "fvtt-log.txt"
         )
-        assert analyse_coverage(session) is None
+
+        # Мерджер откроет именно этот файл — предпосылка теста, а не
+        # его вывод: без неё «баннер посчитал» ничего не значит.
+        assert [p.name for p in detect_fvtt_chat_logs(session)] == [
+            "fvtt-log.txt"
+        ]
+
+        report = analyse_coverage(session)
+        assert report is not None
+        assert report.chat_total > 0
+
+    def test_counts_the_same_log_the_merger_will_open(
+        self, tmp_path, pin_system_tz
+    ):
+        """С двумя чат-логами баннер обязан считать ПЕРВЫЙ.
+
+        Мерджер берёт ``detect_fvtt_chat_logs(...)[0]``. Если баннер
+        возьмёт другой элемент того же набора, он снова разойдётся с
+        мерджем — по индексу, а не по шаблону. Прежде этот выбор не
+        держал ни один тест: ``[-1]`` проходил насквозь.
+
+        Второй лог сделан заведомо длиннее первого, чтобы ``chat_total``
+        у двух файлов различался — иначе тест зеленеет на любом выборе.
+        """
+        from core.coverage import analyse_coverage
+        from core.file_matchers import detect_fvtt_chat_logs
+
+        pin_system_tz(2.0)
+        session = tmp_path / "two-logs"
+        session.mkdir()
+        shutil.copy(FIXTURE_DIR / "info.txt", session / "info.txt")
+
+        first = session / "fvtt-log-a.txt"
+        second = session / "fvtt-log-b.txt"
+        fixture = (FIXTURE_DIR / "fvtt-log-fixture.txt").read_text(
+            encoding="utf-8"
+        )
+        first.write_text(fixture, encoding="utf-8")
+        second.write_text(fixture + fixture, encoding="utf-8")
+
+        found = detect_fvtt_chat_logs(session)
+        assert [p.name for p in found] == [first.name, second.name]
+
+        only_first = analyse_coverage(session)
+        assert only_first is not None
+
+        # Отдельная сессия с одним лишь первым файлом даёт эталон.
+        solo = tmp_path / "one-log"
+        solo.mkdir()
+        shutil.copy(FIXTURE_DIR / "info.txt", solo / "info.txt")
+        (solo / "fvtt-log-a.txt").write_text(fixture, encoding="utf-8")
+        solo_report = analyse_coverage(solo)
+        assert solo_report is not None
+
+        assert only_first.chat_total == solo_report.chat_total
 
 
 class TestRuDuration:

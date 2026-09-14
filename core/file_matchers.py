@@ -23,7 +23,9 @@ plain strings so this module stays UI-free.
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -246,12 +248,79 @@ def detect_audio_files(session_dir: Path) -> tuple[Path, ...]:
     return tuple(sorted(all_files))
 
 
+#: Имя канонического экспорта Foundry: ``fvtt-log-<дата>.txt``. Ровно
+#: это, и только это, видел прежний искатель мерджа
+#: (``glob("fvtt-log-*.txt")``) — см. :func:`detect_fvtt_chat_logs`.
+#: Шаблон записан в нижнем регистре и применяется к имени, пропущенному
+#: через :func:`os.path.normcase`; почему — в :func:`_is_canonical_fvtt_chat`.
+_CANONICAL_FVTT_CHAT = re.compile(r"fvtt-log-.*\.txt\Z")
+
+
+def _is_canonical_fvtt_chat(
+    name: str, normcase: Callable[[str], str] = os.path.normcase
+) -> bool:
+    """Совпадает ли имя с каноническим экспортом — по правилам платформы.
+
+    ``Path.glob`` складывает регистр так же, как файловая система: на
+    Windows ``glob("fvtt-log-*.txt")`` находил и ``FVTT-LOG-2026.txt``,
+    на POSIX — нет. Классификация обязана повторять ровно это, иначе
+    на Windows уже смерженный файл теряет приоритет: рядом с
+    ``fvtt-log (1).txt`` оба окажутся неканоническими, а пробел
+    сортируется раньше дефиса, и мердж возьмёт копию из браузера.
+
+    ``os.path.normcase`` — тот самый механизм, которым складывает
+    регистр сам ``pathlib``: на Windows опускает в нижний, на POSIX
+    возвращает имя как есть. Отсюда и параметр: подменив его на
+    ``ntpath.normcase`` или ``posixpath.normcase``, обе платформы
+    проверяются на любой машине, а ночному прогону Windows негде взять.
+    """
+    return _CANONICAL_FVTT_CHAT.fullmatch(normcase(name)) is not None
+
+
+def _fvtt_chat_order(path: Path) -> tuple[int, Path]:
+    """Ключ сортировки: канонический экспорт раньше всех остальных.
+
+    Потребители берут первый элемент, поэтому порядок решает, какой
+    файл попадёт в ``merged.txt``. Расширение шаблона само по себе
+    переигрывало этот выбор: `FVTT-LOG-old.txt` и `fvtt-log (1).txt`
+    сортируются раньше канонического `fvtt-log-2025-07-11.txt` — по
+    регистру и по пунктуации соответственно, — и мердж начинал брать
+    их вместо файла, который брал вчера.
+
+    Правка обязана добавлять файлы, прежде невидимые, а не менять
+    выбор там, где он уже был сделан. Поэтому имена канонической формы
+    идут первыми и между собой в прежнем порядке; всё остальное —
+    следом. Когда прежний узкий набор был непуст, победитель тот же,
+    что и раньше; когда он был пуст (тот самый баг — в папке один
+    `fvtt-log.txt`), берётся расширенный набор.
+
+    Какой файл выбирать при нескольких логах вообще — отдельный
+    вопрос: https://trello.com/c/xS6eXH8L . Здесь только гарантия, что
+    этот выбор не поехал.
+
+    Второй ключ — сам ``Path``, а не ``path.name``, и это не стиль.
+    ``PurePath`` сравнивается по правилам своей платформы: на Windows
+    регистр в сравнении не участвует, на POSIX участвует. Прежний
+    порядок задавали ``sorted(glob(...))`` и ``sorted(iterdir())`` —
+    обе сортируют именно ``Path``. Строка вместо пути сделала бы
+    сравнение регистрозависимым везде, и на Windows выбор поехал бы
+    там, где два канонических экспорта различаются регистром:
+    ``fvtt-log-a.txt`` против ``fvtt-log-B.txt``.
+    """
+    return (0 if _is_canonical_fvtt_chat(path.name) else 1, path)
+
+
 def detect_fvtt_chat_logs(session_dir: Path) -> tuple[Path, ...]:
     """Return files matching the FVTT chat export pattern.
 
     Foundry VTT's "export chat" button produces ``fvtt-log-<date>.txt``
     by convention. We accept any ``fvtt-log*.txt`` so both the
     date-stamped export and the plain ``fvtt-log.txt`` work.
+
+    Unlike the other ``detect_*`` helpers the result is **not** in plain
+    path order: the canonical export sorts first, see
+    :func:`_fvtt_chat_order`. Callers take ``[0]``, so that order is
+    what decides which log reaches ``merged.txt``.
     """
     matches: list[Path] = []
     for path in _iter_session_files(session_dir):
@@ -260,7 +329,7 @@ def detect_fvtt_chat_logs(session_dir: Path) -> tuple[Path, ...]:
         if not path.name.lower().startswith("fvtt-log"):
             continue
         matches.append(path)
-    return tuple(matches)
+    return tuple(sorted(matches, key=_fvtt_chat_order))
 
 
 def detect_combat_logs(session_dir: Path) -> tuple[Path, ...]:

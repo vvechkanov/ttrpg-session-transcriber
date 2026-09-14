@@ -459,7 +459,7 @@ ui/cli.py собирает params → core.pipeline.run(session_dir, params)
 │  "speech"  SPEECH_SOURCES[params.speech_backend]         │
 │               .extract(session_dir) → list[SpeechSegment]│
 │                                                           │
-│  "chat"    find_fvtt_chat_log → FvttChatSource           │
+│  "chat"    detect_fvtt_chat_logs[0] → FvttChatSource     │
 │               .extract(session_dir) → list[ChatMessage]  │
 │            (или "no chat log" — стадия всё равно есть)   │
 │                                                           │

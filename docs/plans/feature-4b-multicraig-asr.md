@@ -230,7 +230,9 @@ seg_jobs = tuple(
 ### 5.4. Что **не** трогаем
 
 - `MergerWorker` и его API.
-- `find_fvtt_chat_log` — работает от `session_dir`, сегментам индифферентен.
+- поиск чат-лога — работает от `session_dir`, сегментам индифферентен.
+  (На момент плана это был `find_fvtt_chat_log`; позже он слит с
+  `detect_fvtt_chat_logs`, см. https://trello.com/c/eyFOj25c .)
 - `totalSeconds` в `SessionMeta` — в 4a он уже приходит через `PeaksWorker.durationReady` и представляет длину **самого длинного файла**, не объединённый span. После 4b желаемое: `totalSeconds` = `(t_end - t0).total_seconds()` из `TimelineWindow`. Отдельный TODO (см. раздел 7), но **не блокирует** 4b.
 
 ## 6. Изменения в тестах

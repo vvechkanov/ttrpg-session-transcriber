@@ -103,8 +103,22 @@ class TestDetectFvttChatLogs:
         result = detect_fvtt_chat_logs(tmp_path)
         assert set(result) == {a, b}
 
+    def test_multiple_logs_come_back_sorted(self, tmp_path: Path) -> None:
+        """Порядок — не косметика: пайплайн берёт ``[0]``.
+
+        Файлы создаются в обратном порядке, чтобы тест краснел от
+        порядка обхода каталога, а не совпадал с ним случайно.
+        """
+        b = _touch(tmp_path, "fvtt-log-b.txt")
+        a = _touch(tmp_path, "fvtt-log-a.txt")
+        assert detect_fvtt_chat_logs(tmp_path) == (a, b)
+
     def test_rejects_non_txt(self, tmp_path: Path) -> None:
         _touch(tmp_path, "fvtt-log.json")
+        assert detect_fvtt_chat_logs(tmp_path) == ()
+
+    def test_empty_when_nothing_matches(self, tmp_path: Path) -> None:
+        _touch(tmp_path, "notes.txt")
         assert detect_fvtt_chat_logs(tmp_path) == ()
 
 

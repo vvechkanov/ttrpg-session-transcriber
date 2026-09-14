@@ -1508,8 +1508,10 @@ class SourceListModel(QAbstractListModel):
         # further parse in SessionMeta — three reads of one file.
         #
         # Only the first chat log feeds the span: real sessions carry
-        # at most one fvtt-log-*.txt per export, and merging spans
-        # across several would need a policy nobody has needed yet.
+        # at most one chat export, and merging spans across several
+        # would need a policy nobody has needed yet. The merge takes
+        # the same first element of the same detect_fvtt_chat_logs,
+        # so the screen and merged.txt cannot disagree about which.
         chat_moments: dict[Path, tuple] = {}
         display_offset: float | None = None
         for path in chat_paths:

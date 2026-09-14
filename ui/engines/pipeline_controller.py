@@ -29,8 +29,7 @@ from PySide6.QtCore import Property, QObject, QThread, Signal, Slot
 
 from core.asr import AsrSource, make_source
 from core.chunking import chunk_text_file
-from core.discovery import find_fvtt_chat_log
-from core.file_matchers import detect_combat_logs
+from core.file_matchers import detect_combat_logs, detect_fvtt_chat_logs
 from core.speaker_map import (
     load_speaker_map,
     load_speaker_map_raw,
@@ -601,7 +600,10 @@ class PipelineController(QObject):
             return
 
         session_dir = Path(session_dir_str)
-        chat_log = find_fvtt_chat_log(session_dir)
+        # Тот же искатель, которым SourceListModel наполняет список
+        # источников, — иначе мердж открывает не то, что показано.
+        chat_logs = detect_fvtt_chat_logs(session_dir)
+        chat_log = chat_logs[0] if chat_logs else None
         combat_logs = list(detect_combat_logs(session_dir))
         total_seconds = float(self._session.totalSeconds) if self._session is not None else 0.0
 
