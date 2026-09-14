@@ -107,7 +107,7 @@ python -m ui
    per-track JSON (канонический schema)
                 ↓
         ┌───────────────┐
-        │ merge timeline │ ← merge_whisperx.py
+        │ merge timeline │ ← mergers/script_merger.py
         └───────────────┘
                 ↓
         merged.txt + chunks/

@@ -107,7 +107,7 @@ Foundry VTT chat log export (optional)
    per-track JSON (canonical schema)
                 ↓
         ┌───────────────┐
-        │ merge timeline │ ← merge_whisperx.py
+        │ merge timeline │ ← mergers/script_merger.py
         └───────────────┘
                 ↓
         merged.txt + chunks/
