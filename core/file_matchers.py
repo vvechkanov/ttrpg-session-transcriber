@@ -252,7 +252,7 @@ def detect_audio_files(session_dir: Path) -> tuple[Path, ...]:
 _CANONICAL_FVTT_CHAT = re.compile(r"fvtt-log-.*\.txt\Z")
 
 
-def _fvtt_chat_order(path: Path) -> tuple[int, str]:
+def _fvtt_chat_order(path: Path) -> tuple[int, Path]:
     """Ключ сортировки: канонический экспорт раньше всех остальных.
 
     Потребители берут первый элемент, поэтому порядок решает, какой
@@ -272,8 +272,17 @@ def _fvtt_chat_order(path: Path) -> tuple[int, str]:
     Какой файл выбирать при нескольких логах вообще — отдельный
     вопрос: https://trello.com/c/xS6eXH8L . Здесь только гарантия, что
     этот выбор не поехал.
+
+    Второй ключ — сам ``Path``, а не ``path.name``, и это не стиль.
+    ``PurePath`` сравнивается по правилам своей платформы: на Windows
+    регистр в сравнении не участвует, на POSIX участвует. Прежний
+    порядок задавали ``sorted(glob(...))`` и ``sorted(iterdir())`` —
+    обе сортируют именно ``Path``. Строка вместо пути сделала бы
+    сравнение регистрозависимым везде, и на Windows выбор поехал бы
+    там, где два канонических экспорта различаются регистром:
+    ``fvtt-log-a.txt`` против ``fvtt-log-B.txt``.
     """
-    return (0 if _CANONICAL_FVTT_CHAT.fullmatch(path.name) else 1, path.name)
+    return (0 if _CANONICAL_FVTT_CHAT.fullmatch(path.name) else 1, path)
 
 
 def detect_fvtt_chat_logs(session_dir: Path) -> tuple[Path, ...]:

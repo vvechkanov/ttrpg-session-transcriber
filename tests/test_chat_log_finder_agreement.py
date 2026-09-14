@@ -265,3 +265,57 @@ class TestWideningDoesNotChangeWhichLogIsMerged:
         assert _chat_stage_message(session) == "fvtt-log.txt"
         assert _FakeChatSource.opened is not None
         assert _FakeChatSource.opened.name == "fvtt-log.txt"
+
+
+class TestOrderingMatchesThePlatform:
+    """Порядок между каноническими экспортами — как у прежнего поиска.
+
+    Прежний порядок задавали ``sorted(glob(...))`` и
+    ``sorted(iterdir())`` — обе сортируют ``Path``, а ``PurePath``
+    сравнивается по правилам платформы: на Windows регистр в сравнении
+    не участвует, на POSIX участвует. Ключ по ``path.name`` сделал бы
+    сравнение регистрозависимым везде и поехал бы на Windows.
+
+    Найдено внешним ревью на PR #30 (P2).
+    """
+
+    def test_canonical_logs_keep_platform_path_order(
+        self, tmp_path: Path, patched_pipeline
+    ):
+        names = ["fvtt-log-B.txt", "fvtt-log-a.txt"]
+        session = _session_with(tmp_path, *names)
+
+        found = detect_fvtt_chat_logs(session)
+
+        # Эталон считает сама платформа — тем же способом, каким
+        # порядок задавался до правки. Зашитый список имён здесь
+        # означал бы «верно на Linux, неверно на Windows»: ровно та
+        # ошибка, которую тест и стережёт.
+        expected = sorted(session / n for n in names)
+        assert list(found) == expected
+
+        assert _chat_stage_message(session) == expected[0].name
+        assert _FakeChatSource.opened is not None
+        assert _FakeChatSource.opened.name == expected[0].name
+
+    def test_the_tiebreak_key_is_a_path_not_a_string(self):
+        """Ключ обязан быть ``Path`` — и это проверяемо на любой ОС.
+
+        Тест выше сравнивает с эталоном платформы, поэтому на Linux он
+        зелен и для строкового ключа: там ``path.name`` и ``path``
+        упорядочивают одинаково. Разница видна только на Windows, то
+        есть на машине, которой у ночного прогона нет, — и регрессия
+        доехала бы до CI незамеченной.
+
+        Здесь проверяется ровно то свойство, из которого
+        платформенная эквивалентность и следует.
+        """
+        from pathlib import PurePath
+
+        from core.file_matchers import _fvtt_chat_order
+
+        _, tiebreak = _fvtt_chat_order(Path("fvtt-log-a.txt"))
+        assert isinstance(tiebreak, PurePath), (
+            "строковый ключ сравнивается регистрозависимо на всех ОС, "
+            "а прежний порядок на Windows был регистронезависимым"
+        )
