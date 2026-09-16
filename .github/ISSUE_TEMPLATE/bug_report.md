@@ -37,7 +37,7 @@ Paste the relevant section of the GUI log pane, or attach the log file if it is 
 - **OS:** Windows 11 / Windows 10 / Linux / macOS (version)
 - **Python version:** (e.g. 3.11.9)
 - **GPU:** (e.g. NVIDIA RTX 3060, or "CPU only")
-- **ASR backend:** (faster-whisper / sherpa-onnx / whisperx)
+- **ASR backend:** (faster-whisper / sherpa-onnx)
 - **Model:** (e.g. large-v3, podlodka-turbo, gigaam-v3-rnnt)
 - **Project version:** (commit hash or release tag)
 

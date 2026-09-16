@@ -50,7 +50,6 @@ Pick the engine that fits your sessions:
 |---|---|---|
 | `faster-whisper` (default) | Russian + English mixed sessions, all languages | MIT |
 | `sherpa-onnx` + GigaAM-v3 | Pure Russian sessions, best Russian quality | MIT |
-| `whisperx` (legacy) | Existing setups, backward compatibility | BSD-2 |
 
 ---
 
@@ -101,7 +100,7 @@ Craig multi-track recording (.flac per player)
 Foundry VTT chat log export (optional)
                 ↓
         ┌───────────────┐
-        │  ASR backend  │ ← faster-whisper / sherpa-onnx / whisperx
+        │  ASR backend  │ ← faster-whisper / sherpa-onnx
         └───────────────┘
                 ↓
    per-track JSON (canonical schema)

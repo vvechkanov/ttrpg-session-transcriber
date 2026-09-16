@@ -50,7 +50,7 @@ def default_models_root() -> Path:
     ``~/.local/share/ttrpg-transcriber/models``.
 
     Используется и GigaAM, и pip-wheel backends (faster-whisper,
-    whisperx) как общий root под per-backend поддиректории.
+    как общий root под per-backend поддиректории.
     """
     if _current_os_name() == "nt":
         base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))

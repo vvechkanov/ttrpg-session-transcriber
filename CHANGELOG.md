@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The system-timezone step asked for today's offset instead of the session's, sliding sessions recorded across a DST boundary by an hour
 - Chat messages and combat events recorded before the recording started were dropped silently; they are now reported
 
+### Removed
+- WhisperX speech backend (`sources/speech/whisperx.py`, a subprocess wrapper around the `whisperx` CLI), by owner decision C2 in `TASKS.md` — it lives on in the owner's local branch. Gone with it: the registry entry in `sources/__init__.py`, the `_speech_kwargs` branch in `core/pipeline.py`, and the PyInstaller hiddenimport in `build.spec`. Two of the three call sites the task listed turned out never to have known about it — `core/asr.py::make_source` and `ui/models/model_registry.py`, which is to say the QML shell's whole ASR path was already WhisperX-free. `tests/test_whisperx_removed.py` now keeps it out; a removal nobody guards comes back with the next merge from that branch
+- `--speech_backend whisperx` accordingly stops being a valid CLI value. It fails in argparse, which lists the two remaining choices, rather than anywhere deeper: `ui/cli.py` builds `choices` from the live registry. A transcript JSON written by the old backend is not orphaned either — nothing ever read its `source_engine` field back, and the surviving backends re-transcribe and overwrite it exactly as they would any file that misses the cache key
+- The `whisperx` *package* stays in both PyInstaller `excludes` lists, and the product is still named `WhisperX-Transcriber`. Neither is the backend: the first is what stops a system-wide install leaking into a frozen build, and renaming the second would orphan the Windows uninstall key every installed user is registered under. `scripts/install_whisperx_windows.ps1` also stays — measured while doing this, it installs the venv, torch and ffmpeg, and `install.bat` calls nothing else, so deleting it removes the only described Windows install path rather than a legacy tail. That is task C3, and it is not this one
+
 ## [0.0.1] - 2026-03
 
 ### Added
