@@ -4,7 +4,8 @@
 Generate TTS audio fixtures for e2e_p2 test suite.
 
 Uses pyttsx3 (Windows SAPI5, offline) to synthesize Russian speech,
-then converts WAV -> 16kHz mono FLAC via ffmpeg for WhisperX compatibility.
+then converts WAV -> 16kHz mono FLAC via ffmpeg. 16 kHz mono is what
+every speech backend in this tree wants, not a quirk of any one of them.
 
 Usage:
     python scripts/generate_e2e_fixtures.py
@@ -101,7 +102,7 @@ def _find_russian_voice(engine) -> str | None:
 
     print("\nWARNING: No Russian voice found. Using default voice.")
     print("The generated audio will be in the default language (likely English).")
-    print("WhisperX transcription quality for Russian text will be very low.")
+    print("Transcription quality for Russian text will be very low.")
     print("Consider installing Microsoft Irina Desktop or similar Russian TTS voice.")
     return None
 
@@ -118,7 +119,7 @@ def _wav_to_flac_16k_mono(ffmpeg: str, wav_path: Path, flac_path: Path) -> None:
         ffmpeg,
         "-y",                    # overwrite output
         "-i", str(wav_path),
-        "-ar", "16000",          # 16 kHz sample rate (WhisperX requirement)
+        "-ar", "16000",          # 16 kHz sample rate — what the ASR backends expect
         "-ac", "1",              # mono
         "-c:a", "flac",
         str(flac_path),

@@ -60,9 +60,13 @@ WHISPERX_BACKEND_ID = "whisperx"
 #: both spellings of the module path — dotted for an import, sliced for a
 #: document or a build spec.
 #:
-#: Assembled at runtime rather than written out, so that this file — which
-#: necessarily contains all three — does not match itself when the scan
-#: below reads the tree. Without that, the guard fails on its own text.
+#: What keeps this file from matching itself is the path exclusion in
+#: :func:`_live_files`, and only that. The concatenation below is cosmetic
+#: and was once credited with the job in a comment here — wrongly, as the
+#: literal ``"sources.speech.whisperx"`` appears further down inside
+#: :meth:`TestTheModuleIsGone.test_whisperx_module_is_not_importable`
+#: anyway. Anyone removing the exclusion on the strength of the trick
+#: turns this test permanently red.
 FORBIDDEN_SPELLINGS = (
     "WhisperX" + "Source",
     "sources.speech." + "whisperx",
@@ -109,14 +113,23 @@ def _tracked_files() -> list[str]:
     except (OSError, UnicodeDecodeError, subprocess.SubprocessError):
         names = []
 
-    if names:
-        return [n for n in names if (PROJECT_ROOT / n).is_file()]
-    return _walked_files()
+    # ``or _walked_files()`` and not ``if names:`` — the filter is what
+    # can empty the list. git answering with names that are all absent
+    # from disk is silence too, and must fall through to the walk rather
+    # than return an empty repository. ``tests/test_docs_architecture.py``
+    # makes the same distinction, in the same words.
+    return [n for n in names if (PROJECT_ROOT / n).is_file()] or _walked_files()
 
 
 def _walked_files() -> list[str]:
     """Fallback enumeration: walk the tree, prune the obvious."""
-    pruned = {".git", "venv", ".venv", "__pycache__", "node_modules", "build", "dist"}
+    # ``.claude`` holds agent worktrees — entire checkouts of other
+    # branches, gitignored, and some of them still carry the backend. The
+    # walk would report their contents as live hits in this tree.
+    pruned = {
+        ".git", ".claude", "venv", ".venv", "__pycache__", "node_modules",
+        "build", "dist", ".pytest_cache", ".ruff_cache", ".mypy_cache",
+    }
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
         dirnames[:] = [d for d in dirnames if d not in pruned]
@@ -134,7 +147,8 @@ def _live_files() -> list[str]:
         if name not in HISTORICAL_DOCUMENTS
         and not name.startswith(HISTORICAL_PREFIXES)
         and not name.endswith(SKIPPED_SUFFIXES)
-        # This file names all three spellings in order to look for them.
+        # This file carries a forbidden spelling in order to look for it,
+        # and is the one exclusion the scan cannot do without.
         and name != "tests/test_whisperx_removed.py"
     )
 
@@ -147,8 +161,16 @@ class TestTheModuleIsGone:
         )
 
     def test_whisperx_module_is_not_importable(self):
-        with pytest.raises(ModuleNotFoundError):
+        """Pinned to this module by name.
+
+        A bare ``pytest.raises(ModuleNotFoundError)`` passes when anything
+        in the import chain is missing — a deleted ``sources/speech/``, a
+        third-party package that failed to install — and would report
+        "WhisperX is still gone" about an unrelated broken tree.
+        """
+        with pytest.raises(ModuleNotFoundError) as excinfo:
             __import__("sources.speech.whisperx")
+        assert excinfo.value.name == "sources.speech.whisperx"
 
 
 class TestTheRegistryDoesNotNameIt:
@@ -172,7 +194,12 @@ class TestTheRegistryDoesNotNameIt:
         """
         from sources import list_speech_sources
 
-        assert set(list_speech_sources()) == {"faster-whisper", "gigaam"}
+        assert set(list_speech_sources()) == {"faster-whisper", "gigaam"}, (
+            "the set of speech backends changed. If a backend was ADDED, "
+            "this test is not the objection — decision B2 in TASKS.md is "
+            "(\"no growth planned\"), and updating both is the fix. If one "
+            "was removed or swapped, that is what this guards."
+        )
 
 
 class TestTheDispatchHasNoDanglingBranch:

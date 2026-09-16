@@ -7,7 +7,7 @@ Must run in < 50 ms each. No network.
 Epic A note: ``VersionInfo`` / ``read_version_file`` / ``write_version_file``
 были удалены из этого модуля — их роль взял на себя generic
 ``sources/speech/_bundle_download.py`` (общий формат version.json для
-GigaAM + faster-whisper + whisperx). Соответствующие тесты живут в
+GigaAM и faster-whisper). Соответствующие тесты живут в
 ``test_bundle_download.py``.
 """
 from __future__ import annotations

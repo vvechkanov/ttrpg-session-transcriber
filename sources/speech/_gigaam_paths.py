@@ -49,8 +49,8 @@ def default_models_root() -> Path:
     Linux/macOS: ``$XDG_DATA_HOME/ttrpg-transcriber/models`` или
     ``~/.local/share/ttrpg-transcriber/models``.
 
-    Используется и GigaAM, и pip-wheel backends (faster-whisper,
-    как общий root под per-backend поддиректории.
+    Используется и GigaAM, и pip-wheel backends (faster-whisper) как
+    общий root под per-backend поддиректории.
     """
     if _current_os_name() == "nt":
         base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
