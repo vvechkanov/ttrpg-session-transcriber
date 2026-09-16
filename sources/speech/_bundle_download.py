@@ -1,7 +1,7 @@
 """Generic tracked-install helper: download → verify → atomic-move.
 
 Единый паттерн установки для всех backend-ов (GigaAM-style ONNX bundles
-и pip-wheel based backends вроде faster-whisper/whisperx). Модуль
+и pip-wheel based backends вроде faster-whisper). Модуль
 полностью self-contained: только stdlib (``urllib``, ``hashlib``,
 ``shutil``, ``tempfile``, ``zipfile``, ``json``).
 
@@ -22,7 +22,7 @@ Design — см. Epic A (tracked install):
     * Прогресс-колбэк (``InstallProgress``) вызывается по мере чтения
       байтов с throttle ``emit_interval_sec`` (0.25 сек по умолчанию).
 
-Вызывается из GigaAM / faster-whisper / whisperx через тонкие обёртки,
+Вызывается из GigaAM / faster-whisper через тонкие обёртки,
 которые готовят ``list[_RemoteFile]`` с pinned URL + SHA256 и
 опциональный ``_LocalFile`` список (сгенерированные локально файлы
 типа hotwords.txt).

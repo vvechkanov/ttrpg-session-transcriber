@@ -36,7 +36,7 @@ class BackendId(str, enum.Enum):
 
     GIGAAM_RNNT_FP32 = "gigaam-rnnt-fp32"
     FASTER_WHISPER_LARGE_V3_RU = "faster-whisper-large-v3-ru"
-    # Будущее: GIGAAM_E2E_RNNT_FP32, GIGAAM_RNNT_INT8, WHISPERX_LARGE_V3 и т.д.
+    # Будущее: GIGAAM_E2E_RNNT_FP32, GIGAAM_RNNT_INT8 и т.д.
 
 
 @dataclass(frozen=True)

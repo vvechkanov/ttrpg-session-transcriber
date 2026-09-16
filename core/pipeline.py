@@ -217,8 +217,25 @@ def run_batch(
 def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
     """Build constructor kwargs for a speech source class.
 
-    Explicit hardcoded mapping — no ``inspect``. FasterWhisperSource does not
-    take ``beam_size``; WhisperXSource does.
+    Explicit hardcoded mapping — no ``inspect``. Each backend's constructor
+    takes a different set, and the set is named here rather than guessed
+    from the signature.
+
+    ``params.beam_size`` is passed by no branch here, and that is worth
+    saying out loud because the CLI still accepts ``--beam_size``. GigaAM
+    has no such knob; ``FasterWhisperSource.__init__`` does take one
+    (``sources/speech/faster_whisper.py``) and this branch has never passed
+    it. The removed WhisperX branch was the only one that did, so the flag
+    is now inert on every CLI run.
+
+    The GUI is not in the same position: it does not come through this
+    function at all. It goes ``AppPreferences`` → ``AsrOptions`` →
+    ``core.asr.make_source``, which *does* forward ``beam_size`` to
+    faster-whisper. So the same knob works in one surface and not the
+    other — a discrepancy older than this removal, and a question about
+    faster-whisper rather than about the backend that left. Left alone
+    deliberately: wiring it up here would change pipeline output and
+    invalidate the frozen tier-2 baseline.
     """
     if cls.__name__ == "FasterWhisperSource":
         return {
@@ -226,15 +243,6 @@ def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
             "device": params.device,
             "compute_type": params.compute_type,
             "language": params.language,
-            "speaker_map": params.speaker_map,
-        }
-    if cls.__name__ == "WhisperXSource":
-        return {
-            "model": params.model,
-            "device": params.device,
-            "compute_type": params.compute_type,
-            "language": params.language,
-            "beam_size": params.beam_size,
             "speaker_map": params.speaker_map,
         }
     if cls.__name__ == "GigaAMSource":

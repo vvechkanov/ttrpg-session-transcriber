@@ -249,12 +249,19 @@ large-v3-ru. Поэтому bootstrap остаётся маленьким, а п
 веса только того бэкенда, который выбрал.
 
 `torch` не ставит ни один из них, и `core/backend_installers.py` тоже: он
-знает только про бандлы GigaAM/sherpa и faster-whisper. Источник
-`sources/speech/whisperx.py`, которому torch нужен, остаётся в дереве, и
-поставить его есть чем — `scripts/install_whisperx_windows.ps1` тянет колёса
-torch (CPU или CUDA) и сам WhisperX в venv проекта. Это путь разработчика, а
-не часть продукта: ни один exe его не запускает и в бандлы он не входит. По
-решению из `TASKS.md` (C2) WhisperX вообще подлежит удалению из master.
+знает только про бандлы GigaAM/sherpa и faster-whisper. Теперь этого и не
+требуется ни от кого: источника, которому torch был нужен, в дереве больше
+нет. Это был WhisperX; по решению из `TASKS.md` (C2) он удалён из master и
+живёт в локальной ветке владельца. Что ушло вместе с ним — реестровая запись
+в `sources/__init__.py`, ветка в `core/pipeline.py::_speech_kwargs` и
+hiddenimport в `build.spec`; что осталось — `tests/test_whisperx_removed.py`,
+который держит это состояние машинно.
+
+`scripts/install_whisperx_windows.ps1` при этом остался в дереве. Он ставит
+не только бэкенд: с него начинаются venv, torch и ffmpeg, и на него ссылается
+`install.bat`. Это путь разработчика, а не часть продукта — ни один exe его
+не запускает и в бандлы он не входит; его собственная судьба разбирается
+отдельной задачей (C3), а не этой.
 
 Здесь же — всё, что осталось в проекте от tkinter: окно установщика
 (`launcher/installer_ui.py`), окно удаления (`launcher/uninstaller_ui.py`) и
@@ -434,7 +441,7 @@ class Renderer(ABC):
 
 ### 5.7 Canonical JSON (minimum) — выход speech sources
 
-Speech source (`faster_whisper`, `whisperx`) пишет на диск JSON **только с required полями**:
+Speech source (`faster_whisper`, `gigaam`) пишет на диск JSON **только с required полями**:
 
 - `start: float`
 - `end: float`
@@ -542,7 +549,7 @@ PipelineStage = Literal[
 Что сделал Приоритет 2:
 1. Завёл шесть слоёв: `ui/`, `core/`, `sources/`, `mergers/`, `renderers/`, `domain/`.
 2. Перенёс работу со speaker map в `domain/speaker_map.py`, завёл `domain/annotations.py` и `domain/events.py`.
-3. Обернул вызов whisperx в `sources/speech/whisperx.py` как `Source`.
+3. Обернул вызов тогдашнего ASR-бэкенда — WhisperX — в `Source`. Его модуль удалён из master позже, по решению C2; имя файла здесь намеренно не названо по той же причине, что и в пункте 10.
 4. Добавил `sources/speech/faster_whisper.py` — backend через Python API.
 5. Обернул разбор фаундривского чат-лога в `sources/game_log/fvtt_chat.py` как `Source`.
 6. Заменил старый merge-скрипт на `mergers/script_merger.py` — реализует `Merger` ABC и выдаёт `list[ScriptEvent]`.

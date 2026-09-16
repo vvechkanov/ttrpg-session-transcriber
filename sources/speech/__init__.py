@@ -1,1 +1,1 @@
-"""Speech sources: faster-whisper, whisperx, sherpa-onnx."""
+"""Speech sources: faster-whisper, GigaAM (sherpa-onnx)."""

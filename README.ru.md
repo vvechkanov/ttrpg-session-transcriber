@@ -50,7 +50,6 @@
 |---|---|---|
 | `faster-whisper` (по умолчанию) | Смешанные русско-английские сессии, любые языки | MIT |
 | `sherpa-onnx` + GigaAM-v3 | Чисто русские сессии, лучшее качество для русского | MIT |
-| `whisperx` (legacy) | Существующие сетапы, обратная совместимость | BSD-2 |
 
 ---
 
@@ -101,7 +100,7 @@ python -m ui
 Чат-лог Foundry VTT (опционально)
                 ↓
         ┌───────────────┐
-        │  ASR backend  │ ← faster-whisper / sherpa-onnx / whisperx
+        │  ASR backend  │ ← faster-whisper / sherpa-onnx
         └───────────────┘
                 ↓
    per-track JSON (канонический schema)
