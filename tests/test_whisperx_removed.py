@@ -42,8 +42,16 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-#: The module that was deleted, and the script that installed it.
+#: The module that was deleted. Only the module: the PowerShell script
+#: that used to install the backend is still in the tree on purpose, and
+#: nothing here checks for it (see the ``### Removed`` entry in
+#: CHANGELOG.md and task C3 in TASKS.md).
 WHISPERX_MODULE = PROJECT_ROOT / "sources" / "speech" / "whisperx.py"
+
+#: Files that must turn up in any honest enumeration of this repository.
+#: They are the canary for the scan below — see
+#: ``test_the_scan_is_reading_a_real_tree``.
+CANARY_FILES = ("sources/__init__.py", "core/pipeline.py", "README.md")
 
 #: The backend's registry id, as it read in ``SPEECH_SOURCES``.
 WHISPERX_BACKEND_ID = "whisperx"
@@ -188,6 +196,32 @@ class TestTheDispatchHasNoDanglingBranch:
 
 
 class TestNoLiveFileNamesTheBackend:
+    def test_the_scan_is_reading_a_real_tree(self):
+        """The scan below passes trivially over an empty file list.
+
+        Measured, not supposed: forcing ``_live_files()`` to return ``[]``
+        left the scan green and silent. Nothing else in the suite noticed,
+        because "found no forbidden spellings" and "looked at nothing" are
+        the same result.
+
+        Enumeration failing outright is already handled — ``_tracked_files``
+        falls back to a walk when git cannot answer. What this guards is the
+        quieter way the list empties out: a filter predicate widened,
+        ``SKIPPED_SUFFIXES`` gaining ``.py``, a short string landing in
+        ``HISTORICAL_PREFIXES``. Each turns the scan into a no-op that
+        reports success.
+
+        Named files rather than a count, because a count drifts with the
+        tree and teaches nobody what went missing.
+        """
+        files = _live_files()
+        missing = [name for name in CANARY_FILES if name not in files]
+        assert not missing, (
+            f"_live_files() returned {len(files)} file(s), and {missing} "
+            "not among them — the scan below is not looking at this "
+            "repository, and its success means nothing."
+        )
+
     def test_no_live_file_names_the_whisperx_module_or_class(self):
         """Catches the backend coming back under a different module path.
 

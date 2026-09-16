@@ -221,14 +221,21 @@ def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
     takes a different set, and the set is named here rather than guessed
     from the signature.
 
-    ``params.beam_size`` is passed by no branch. It was the one kwarg the
-    removed WhisperX backend took and the surviving two do not: GigaAM has
-    no such knob, and ``FasterWhisperSource.__init__`` does accept one but
-    is deliberately left on its own default here — that predates the
-    removal and is unchanged by it. The field stays on ``PipelineParams``
-    and on the CLI because taking it away is a user-visible change, and
-    because whether faster-whisper should start receiving it is a question
-    about faster-whisper, not about the backend that left.
+    ``params.beam_size`` is passed by no branch here, and that is worth
+    saying out loud because the CLI still accepts ``--beam_size``. GigaAM
+    has no such knob; ``FasterWhisperSource.__init__`` does take one
+    (``sources/speech/faster_whisper.py``) and this branch has never passed
+    it. The removed WhisperX branch was the only one that did, so the flag
+    is now inert on every CLI run.
+
+    The GUI is not in the same position: it does not come through this
+    function at all. It goes ``AppPreferences`` → ``AsrOptions`` →
+    ``core.asr.make_source``, which *does* forward ``beam_size`` to
+    faster-whisper. So the same knob works in one surface and not the
+    other — a discrepancy older than this removal, and a question about
+    faster-whisper rather than about the backend that left. Left alone
+    deliberately: wiring it up here would change pipeline output and
+    invalidate the frozen tier-2 baseline.
     """
     if cls.__name__ == "FasterWhisperSource":
         return {

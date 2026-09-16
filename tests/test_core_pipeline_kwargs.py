@@ -72,12 +72,27 @@ class TestSpeechKwargsForGigaAM:
     """
 
     def test_gigaam_kwargs_are_the_gigaam_knobs_and_not_the_whisper_ones(self):
+        """Every value here differs from its ``PipelineParams`` default.
+
+        Deliberately: ``variant`` defaults to ``"rnnt"``, ``precision`` to
+        ``"fp32"``, ``device`` to ``"cuda"``, ``num_threads`` to ``4``. A
+        test that asserted those back could not tell a pass-through from a
+        constant, and a branch that hardcoded ``device="cpu"`` — silently
+        ignoring a GigaAM user's GPU — would run green. Measured: it did.
+        """
         from core.pipeline import _speech_kwargs
         from sources.speech.gigaam import GigaAMSource
-        params = _make_params(gigaam_variant="rnnt", gigaam_precision="fp32")
+        params = _make_params(
+            gigaam_variant="e2e_rnnt",
+            gigaam_precision="int8",
+            device="cuda",
+            num_threads=7,
+        )
         kwargs = _speech_kwargs(params, GigaAMSource)
-        assert kwargs["variant"] == "rnnt"
-        assert kwargs["precision"] == "fp32"
+        assert kwargs["variant"] == "e2e_rnnt"
+        assert kwargs["precision"] == "int8"
+        assert kwargs["device"] == "cuda"
+        assert kwargs["num_threads"] == 7
         assert "model" not in kwargs
         assert "compute_type" not in kwargs
         assert "beam_size" not in kwargs
