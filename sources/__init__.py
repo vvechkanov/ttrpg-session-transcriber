@@ -1,13 +1,16 @@
 """Sources layer: извлечение Annotation из session_dir.
 
 Импортирует только ``domain``, stdlib и third-party ASR библиотеки
-(faster-whisper, whisperx CLI). Никаких зависимостей на ``core``,
+(faster-whisper, sherpa-onnx). Никаких зависимостей на ``core``,
 ``mergers``, ``renderers``, ``ui``.
 
 Registry — hardcoded dict-ы, без pip entry_points и без самописного
-plugin discovery (ADR-11). Тяжёлые зависимости (faster-whisper, whisperx)
-импортируются лениво внутри ``Source.extract()``, поэтому импорт
-``sources`` не падает на машинах без CUDA/моделей.
+plugin discovery (ADR-11). Тяжёлые зависимости (faster-whisper,
+sherpa-onnx) импортируются лениво внутри ``Source.extract()``, поэтому
+импорт ``sources`` не падает на машинах без CUDA/моделей. Сами модули
+бэкендов при этом импортируются здесь же, наверху: удаление бэкенда —
+это удаление строки импорта и строки реестра, и забыть первую нельзя,
+иначе ``import sources`` перестанет работать целиком.
 """
 
 from sources.base import Source
@@ -15,11 +18,9 @@ from sources.game_log.combat_dump import CombatDumpSource
 from sources.game_log.fvtt_chat import FvttChatSource
 from sources.speech.faster_whisper import FasterWhisperSource
 from sources.speech.gigaam import GigaAMSource
-from sources.speech.whisperx import WhisperXSource
 
 SPEECH_SOURCES: dict[str, type[Source]] = {
     "faster-whisper": FasterWhisperSource,
-    "whisperx": WhisperXSource,
     "gigaam": GigaAMSource,
 }
 

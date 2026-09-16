@@ -205,7 +205,6 @@ a = Analysis(  # noqa: F821 — PyInstaller injects Analysis
         # explicitly.
         "sources.speech.gigaam",
         "sources.speech.faster_whisper",
-        "sources.speech.whisperx",
         "sources.game_log.fvtt_chat",
         "mergers.script_merger",
         "renderers.plain_text",

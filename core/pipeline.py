@@ -217,8 +217,18 @@ def run_batch(
 def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
     """Build constructor kwargs for a speech source class.
 
-    Explicit hardcoded mapping — no ``inspect``. FasterWhisperSource does not
-    take ``beam_size``; WhisperXSource does.
+    Explicit hardcoded mapping — no ``inspect``. Each backend's constructor
+    takes a different set, and the set is named here rather than guessed
+    from the signature.
+
+    ``params.beam_size`` is passed by no branch. It was the one kwarg the
+    removed WhisperX backend took and the surviving two do not: GigaAM has
+    no such knob, and ``FasterWhisperSource.__init__`` does accept one but
+    is deliberately left on its own default here — that predates the
+    removal and is unchanged by it. The field stays on ``PipelineParams``
+    and on the CLI because taking it away is a user-visible change, and
+    because whether faster-whisper should start receiving it is a question
+    about faster-whisper, not about the backend that left.
     """
     if cls.__name__ == "FasterWhisperSource":
         return {
@@ -226,15 +236,6 @@ def _speech_kwargs(params: PipelineParams, cls: type[Source]) -> dict:
             "device": params.device,
             "compute_type": params.compute_type,
             "language": params.language,
-            "speaker_map": params.speaker_map,
-        }
-    if cls.__name__ == "WhisperXSource":
-        return {
-            "model": params.model,
-            "device": params.device,
-            "compute_type": params.compute_type,
-            "language": params.language,
-            "beam_size": params.beam_size,
             "speaker_map": params.speaker_map,
         }
     if cls.__name__ == "GigaAMSource":

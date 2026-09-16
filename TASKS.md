@@ -117,11 +117,12 @@
 > С удалением WhisperX остаётся 2 стабильных бэкенда без планов роста (B2),
 > поэтому единый реестр (F-C3) и дедуп install-флоу (F-C5) **демотированы** в
 > Фазу 3 / Отложено — текущий if/elif на 2 ветки приемлем.
-- [ ] Удалить `sources/speech/whisperx.py` + регистрацию в `sources/__init__.py`
-- [ ] Вычистить `make_source`/`_speech_kwargs`/`model_registry` от whisperx-веток
-- [ ] Удалить связанные тесты и упоминания в ARCHITECTURE/README
-- [ ] Tier-1 e2e baseline сейчас сгенерён faster-whisper — проверить, что не завязан на whisperx
-- [ ] CHANGELOG `### Removed`: WhisperX backend (legacy subprocess wrapper)
+- [x] Удалить модуль бэкенда + регистрацию в `sources/__init__.py` (имя файла здесь больше не называется: документ описывает дерево, какое оно есть, а путь к удалённому файлу ломает сторожа путей в `tests/test_docs_architecture.py`)
+- [x] Вычистить `make_source`/`_speech_kwargs`/`model_registry` от whisperx-веток. Замер: ветка была одна, в `core/pipeline.py::_speech_kwargs`. `core/asr.py::make_source` и `ui/models/model_registry.py` про whisperx не знали никогда — два из трёх пунктов оказались уже выполненными в момент написания задачи
+- [x] Удалить связанные тесты и упоминания в ARCHITECTURE/README. Взамен заведён `tests/test_whisperx_removed.py`: удаление без сторожа возвращается мержем из ветки владельца
+- [x] Tier-1 e2e baseline сейчас сгенерён faster-whisper — проверить, что не завязан на whisperx. **Не завязан.** `scripts/gen_baseline_newpipeline.py` пинит `speech_backend='faster-whisper'`; ни baseline, ни `tests/fixtures/e2e_p2/` не упоминают whisperx
+- [x] CHANGELOG `### Removed`: WhisperX backend (legacy subprocess wrapper)
+- [ ] Не входило в эту задачу и осталось открытым: `PipelineParams.beam_size` теперь не передаётся ни одной веткой `_speech_kwargs` — это был whisperx-only kwarg. `ui/cli.py --beam_size` продолжает его принимать. `FasterWhisperSource.__init__` его принимает и остаётся на своём дефолте. Выбросить поле или начать прокидывать в faster-whisper — вопрос про faster-whisper, отдельной карточкой
 
 ### 1.6 Актуализация ARCHITECTURE.md (F-A3)
 - [ ] Секция «UI-подслои»: ui/models, ui/engines (QThread-workers), ui/qml; потоки и сигналы
@@ -139,8 +140,21 @@
 ### 1.8 Удалить legacy `install_whisperx_windows.ps1` (C3)
 > Ревью рекомендует удалить вместе с WhisperX (скрипт ставит именно его).
 > Откати задачу, если нужен локальный fallback.
+
+> **Замер при выполнении 1.5 (16.09): посылка «скрипт ставит именно его»
+> неверна, и задача больше, чем выглядит.** Скрипт ставит не бэкенд, а
+> окружение целиком: venv проекта, torch (CPU или CUDA), ffmpeg в `tools/`.
+> WhisperX — последние двадцать строк из ста восьмидесяти шести.
+> `install.bat` не делает ничего, кроме вызова этого скрипта, а `run.bat`
+> отказывается стартовать без созданного им venv и посылает пользователя
+> в `install.bat`. То есть удаление скрипта убирает не легаси-хвост, а
+> единственный described путь установки под Windows, и требует сказать,
+> чем он заменяется. Поэтому 1.8 **не вошла** в PR по 1.5: это не «заодно»,
+> а своя задача с продуктовым вопросом внутри.
+- [ ] Решить, чем заменяется Windows-онбординг (`pip install -e .`?), прежде чем удалять
 - [ ] Удалить `scripts/install_whisperx_windows.ps1`
 - [ ] Убрать упоминания из `requirements-qt.txt` и `scripts/00_README.md`
+- [ ] Удалить или перенаправить `install.bat`, поправить сообщение `run.bat`
 
 ---
 
