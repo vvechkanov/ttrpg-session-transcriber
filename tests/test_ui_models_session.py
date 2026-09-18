@@ -1521,3 +1521,192 @@ def test_a_corrupt_segment_duration_cannot_overflow_the_axis(tmp_path: Path) -> 
     assert (window.t_end - window.t0).total_seconds() / 3600.0 <= 25.0, (
         "a corrupt header must not become a month of ruler"
     )
+
+
+# ─── one parse per file per folder open ─────────────────────────────────
+
+
+class TestOneParsePerCombatFile:
+    """``loadFromDir`` must read each combat dump once.
+
+    Once *in this method*, which is narrower than the card's «one parse
+    per file per folder open» and deliberately so: the coverage banner
+    reaches the same dumps by its own route, from
+    ``SessionMeta.openSession`` before this even runs, and these tests
+    neither see nor claim anything about it — they patch the name
+    ``ui.models.session`` calls, and ``core.coverage`` binds its own.
+    A real folder open still reads each dump twice; that is a separate
+    card, with the measurement on it.
+
+    ``loadFromDir`` used to walk ``combat_paths`` twice: once to
+    collect the metas ``build_window`` needs, and again to build the
+    rows, because the first walk had dropped the files that failed to
+    parse and the rows have to keep them. Two walks meant two reads
+    and two JSON parses of every dump, on the UI thread, at the one
+    moment the user is waiting for the screen to appear.
+
+    The chat log next door already keeps its single parse in a dict
+    (``chat_moments``); these tests hold the combat side to the same
+    rule, and to the reason the second walk existed — a malformed
+    dump still gets its row.
+    """
+
+    def test_each_combat_dump_is_parsed_once(self, tmp_path, monkeypatch):
+        _ensure_app()
+
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T17:21:29.274Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T17:30:00.000Z", "2026-04-09T17:45:00.000Z",
+        )
+        _write_combat(
+            session, "Бой 2.txt",
+            "2026-04-09T18:00:00.000Z", "2026-04-09T18:20:00.000Z",
+        )
+
+        from ui.models import session as session_mod
+
+        real = session_mod.parse_combat_file
+        calls: list[Path] = []
+
+        def counting(path, *args, **kwargs):
+            calls.append(Path(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(session_mod, "parse_combat_file", counting)
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        model.loadFromDir(str(session))
+
+        assert model.rowCount() == 2
+        assert len(calls) == 2, (
+            f"each dump must be parsed once per open, got {len(calls)} "
+            f"parses for 2 files: {[p.name for p in calls]}"
+        )
+        assert sorted(p.name for p in calls) == ["Бой 1.txt", "Бой 2.txt"]
+
+    def test_a_malformed_dump_is_parsed_once_and_still_gets_its_row(
+        self, tmp_path, monkeypatch
+    ):
+        """The failed parse is the case the second walk was there for.
+
+        Caching only the successes would put the broken file back on a
+        second ``parse_combat_file`` call — the bug, surviving exactly
+        where it is least visible.
+        """
+
+        _ensure_app()
+
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T17:21:29.274Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T17:30:00.000Z", "2026-04-09T17:45:00.000Z",
+        )
+        (session / "Бой 2.txt").write_text("{broken json", encoding="utf-8")
+
+        from ui.models import session as session_mod
+
+        real = session_mod.parse_combat_file
+        calls: list[Path] = []
+
+        def counting(path, *args, **kwargs):
+            calls.append(Path(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(session_mod, "parse_combat_file", counting)
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        model.loadFromDir(str(session))
+
+        assert model.rowCount() == 2, "a broken dump keeps its row"
+        broken = [
+            i for i in range(model.rowCount())
+            if model.data(model.index(i), SourceListModel.FileRole)
+            == "Бой 2.txt"
+        ]
+        assert broken, "the broken dump has to be findable by name"
+        row = broken[0]
+        assert model.data(model.index(row), SourceListModel.StartRole) == 0.0
+        assert model.data(model.index(row), SourceListModel.EndRole) == 100.0
+
+        assert len(calls) == 2, (
+            f"the file that failed to parse must not be read twice, got "
+            f"{[p.name for p in calls]}"
+        )
+
+    def test_each_row_carries_its_own_dump_in_discovery_order(self, tmp_path):
+        """Row N is file N — the correspondence the single walk now holds.
+
+        Before, ``meta`` was computed next to its ``path`` in the loop
+        that used it, so the two could not drift apart. Now the pairing
+        lives in a list built one step earlier, which is exactly the
+        kind of thing a later edit gets wrong quietly: mutation testing
+        showed that swapping the metas between two healthy dumps, or
+        reversing the rows outright, passed the whole suite.
+
+        ``Бой 1.txt`` is deliberately the *later* encounter, so a test
+        that merely sorted rows by time could not pass by accident —
+        discovery order and chronological order disagree here on
+        purpose.
+        """
+
+        _ensure_app()
+
+        session = tmp_path / "sess"
+        session.mkdir()
+        _write_info(session, "2026-04-09T17:00:00.000Z")
+        _write_combat(
+            session, "Бой 1.txt",
+            "2026-04-09T19:00:00.000Z", "2026-04-09T19:30:00.000Z",
+        )
+        _write_combat(
+            session, "Бой 2.txt",
+            "2026-04-09T17:30:00.000Z", "2026-04-09T18:00:00.000Z",
+        )
+
+        from core.file_matchers import detect_combat_logs
+
+        discovered = [p.name for p in detect_combat_logs(session)]
+        assert discovered == ["Бой 1.txt", "Бой 2.txt"], (
+            "the fixture assumes this discovery order; if it changed, the "
+            f"expectations below have to change with it: {discovered}"
+        )
+
+        meta = SessionMeta()
+        model = SourceListModel()
+        model.setSessionMeta(meta)
+        model.loadFromDir(str(session))
+
+        rows = [
+            (
+                model.data(model.index(i), SourceListModel.FileRole),
+                model.data(model.index(i), SourceListModel.StartRole),
+                model.data(model.index(i), SourceListModel.EndRole),
+            )
+            for i in range(model.rowCount())
+        ]
+        assert [r[0] for r in rows] == discovered, (
+            f"rows must follow discovery order, got {rows}"
+        )
+
+        first, second = rows
+        # `Бой 1.txt` runs 19:00–19:30, `Бой 2.txt` runs 17:30–18:00, so
+        # the row named first has to sit to the *right* of the row named
+        # second. Swap the metas and this inverts.
+        assert first[1] > second[1], (
+            f"row for {first[0]} carries the span of another file: {rows}"
+        )
+        assert first[2] > second[2], (
+            f"row for {first[0]} carries the span of another file: {rows}"
+        )
+        assert 0.0 < second[1] < first[1] < 100.0, (
+            f"both rows must land inside the window, got {rows}"
+        )
