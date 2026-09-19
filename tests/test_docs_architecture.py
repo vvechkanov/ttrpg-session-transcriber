@@ -92,8 +92,12 @@ FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
 #: lower case and `core/GONE.PY` is the same kind of claim as `core/gone.py`.
 #: `.markdown` is carried for one reason only: :func:`_markdown_documents`
 #: selects documents by that spelling too, and a vocabulary that admits a file
-#: as a document while refusing to recognise a link to it is an exception
-#: nobody wrote down — the shape this file keeps finding rot in.
+#: as a document while refusing to recognise a path pointing at it is an
+#: exception nobody wrote down — the shape this file keeps finding rot in.
+#: "Path" rather than "link", precisely: a Markdown link destination skips
+#: the shape rule altogether, so `[x](notes.markdown)` is a claim with this
+#: entry and without it. What the entry buys is the backticked and the fenced
+#: spelling.
 #:
 #: Only one of the two routes here reaches it, and the other is not worth
 #: looking for: :data:`FILE_TOKEN` caps an extension at six characters, so a
@@ -1454,10 +1458,12 @@ def test_a_link_to_a_markdown_document_is_recognised_as_one():
     """The two halves of "what counts as Markdown" have to move together.
 
     `_markdown_documents` reads a `.markdown` file as a document, so
-    `FILE_SUFFIXES` has to recognise a reference to one — a vocabulary that
-    guards a file while refusing to see the link pointing at it is an
+    `FILE_SUFFIXES` has to recognise a path naming one — a vocabulary that
+    guards a file while refusing to see the reference pointing at it is an
     exception nobody wrote down, and it is the exact shape of rot this module
-    exists to catch.
+    exists to catch. A Markdown link is not the case in question: a
+    destination skips the shape rule by construction and is a claim either
+    way. What is at stake is the backticked and the fenced spelling.
 
     Nothing in this tree is spelled that way today, which is why it needs a
     test rather than a document to hold it: drop `".markdown"` from the set
