@@ -387,6 +387,19 @@ def _claims_with_origin(
         # path still unread. The replacement is one character for one, so
         # every offset — and with it the `(planned)` marker's position —
         # survives it.
+        #
+        # What it cannot tell apart, named rather than discovered later: a
+        # backslash escaping Markdown punctuation. A backticked
+        # `docs/a\\_b.md` becomes the claim `docs/a/_b.md`, which is nobody's
+        # file and would be reported broken. No live document writes one
+        # today — the four escapes in this tree (`\\|` twice in
+        # `ARCHITECTURE.md`, `\\_` in `FEATURE_REQUESTS.md`, an escaped
+        # backtick in `docs/process.md`) each die on a space, on the `|`
+        # filter, or on sitting outside a code span — so this is the shape of
+        # the first false red rather than one. Telling the two apart means
+        # asking what follows the backslash, and punctuation is a legal first
+        # character of a filename too (`scripts\\_helper.py`), so it is a
+        # trade rather than a fix, and it is a card.
         line = raw_line.replace("\\", "/")
         stripped = line.lstrip()
         run = FENCE_MARKER.match(stripped)
@@ -1403,11 +1416,19 @@ def test_a_windows_spelling_is_the_same_claim_as_its_posix_one():
     The instructions this tree ships are dual-platform, so the Windows half of
     every pair went unchecked: `tests/fixtures/e2e_p2/README.md` tells the
     reader to run `scripts\\gen_fixtures_noprint.py` on two lines, and neither
-    produced a claim. Measured on `16e3bcf`: 16 lines across the live
-    documents write a path with a backslash, and exactly 2 of them name a file
-    of this repository — the other 14 are `venv\\Scripts\\…`, the Obsidian
-    vault, or an absolute path into somebody else's disk, all already excused
-    by their first segment.
+    produced a claim. Measured on `16e3bcf`: 20 lines across the 25 live
+    documents carry a backslash; 4 of those are Markdown escapes and 1 is a
+    shell line continued onto the next row, leaving **15 that spell a path**.
+    Exactly 2 of the 15 name a file of this repository.
+
+    The other 13 were already silent, and by two rules rather than one: 8 are
+    `venv\\Scripts\\…` or the Obsidian vault the `skill/` prompts describe,
+    excused by their first segment, while 5 are absolute paths into somebody
+    else's disk (`C:\\…`, `D:\\…`) and die one rule earlier, on the `:` that
+    makes a token a URL. Neither `C:` nor `D:` is a head in
+    `NOT_REPOSITORY_PATHS`, so saying all 13 are "excused by their first
+    segment" would be exactly the unchecked sentence this module exists to
+    catch.
 
     The separator is normalised on the *line*, before the line is split into
     tokens, and that is not a detail of where the call sits. Inside a fence a
@@ -1430,6 +1451,15 @@ def test_a_line_continuation_is_not_a_path():
     answers `True` for the empty string that is left, so the claim passes for
     the wrong reason and inflates every count built on the claim list. A
     separator with nothing on either side of it is not a path anyone wrote.
+
+    The continuation *creates* such a token; it is not where the existing
+    ones came from, and the difference is worth keeping straight. Eleven bare
+    `/` claims were already in the list on `16e3bcf`, every one of them an
+    "A or B" written with spaces — `faster-whisper / sherpa-onnx` in a README
+    diagram, `Агата / Адет` in a `skill/` prompt. Before this change a
+    backslash was not normalised at all, so no continuation could have
+    produced one. This guard removes eleven that predate it, and one that
+    arrives with it: `CONTRIBUTING.md:115`.
     """
     fence = "```bash\ncore/run.py --flag \\\n```"
 
