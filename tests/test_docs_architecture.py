@@ -94,6 +94,12 @@ FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
 #: selects documents by that spelling too, and a vocabulary that admits a file
 #: as a document while refusing to recognise a link to it is an exception
 #: nobody wrote down — the shape this file keeps finding rot in.
+#:
+#: Only one of the two routes here reaches it, and the other is not worth
+#: looking for: :data:`FILE_TOKEN` caps an extension at six characters, so a
+#: bare backticked `notes.markdown` is refused two rules earlier and the
+#: vocabulary is never consulted. What this entry changes is
+#: :func:`_is_path_shaped`, that is a token with a directory in it.
 FILE_SUFFIXES = frozenset(
     {".md", ".markdown", ".py", ".qml", ".js", ".json", ".txt", ".toml",
      ".ini", ".cfg", ".spec", ".yml", ".yaml", ".ps1", ".bat", ".sh", ".exe",
@@ -1442,6 +1448,36 @@ def test_an_uppercase_extension_still_names_a_file():
     assert _claimed_paths("see `core/GONE.PY`") == [(1, "core/GONE.PY")]
     assert _claimed_paths("see `README.MD`") == [(1, "README.MD")]
     assert not _exists("README.MD"), "the tree carries README.md, a different name"
+
+
+def test_a_link_to_a_markdown_document_is_recognised_as_one():
+    """The two halves of "what counts as Markdown" have to move together.
+
+    `_markdown_documents` reads a `.markdown` file as a document, so
+    `FILE_SUFFIXES` has to recognise a reference to one — a vocabulary that
+    guards a file while refusing to see the link pointing at it is an
+    exception nobody wrote down, and it is the exact shape of rot this module
+    exists to catch.
+
+    Nothing in this tree is spelled that way today, which is why it needs a
+    test rather than a document to hold it: drop `".markdown"` from the set
+    and the document half stays green while every backticked or fenced
+    reference to such a file quietly stops being a claim. Mutation found this
+    uncovered, and nothing else in the file reddens for it.
+
+    The assertions go through a token carrying a directory, and that is not
+    arbitrary: `FILE_TOKEN` allows at most six characters of extension, so a
+    bare `notes.markdown` is refused before the vocabulary is reached and
+    reads as green with the entry and without it.
+    """
+    assert _is_path_shaped("docs/notes.markdown")
+    assert _claimed_paths("see `docs/notes.markdown`") == [(1, "docs/notes.markdown")]
+    assert _claimed_paths("```\ndocs/notes.markdown\n```") == [
+        (2, "docs/notes.markdown")
+    ]
+    assert _claimed_paths("see `notes.markdown`") == [], (
+        "a bare name never reaches the vocabulary: FILE_TOKEN stops at six"
+    )
 
 
 def test_repository_roots_are_derived_not_listed():
