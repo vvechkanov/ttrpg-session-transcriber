@@ -152,6 +152,26 @@ The two are not the same check, though, and the difference is deliberate:
   work; do not treat a non-zero count as something your change broke. CI runs
   this too, without blocking, and prints the count in the job summary.
 
+### Layer boundaries
+
+```bash
+lint-imports
+```
+
+Contracts live in `pyproject.toml` under `[tool.importlinter]`, and CI blocks
+on them in the `layers` job. They are the machine-readable form of
+`ARCHITECTURE.md` §3: an import from `ui` straight into `mergers`, `renderers`,
+`sources` or `domain` — past `core` — fails the run and names the edge. Eight
+such edges exist already, listed one by one with the reason; a ninth is red.
+
+Two things worth knowing before it surprises you. The eight exceptions are
+matched exactly, so a *different* edge out of an already-excused module is
+still a violation. And an exception that stops matching anything is an error
+too: when the debt is repaid, the run reddens asking you to delete the line.
+
+The tool reads sources rather than importing them, so this needs neither the
+project installed nor PySide6 — `pip install -e .[dev]` is enough.
+
 There is no `pre-commit` setup here. An earlier version of this file said
 `pre-commit install` would run these checks for you; it never could, because no
 `.pre-commit-config.yaml` was ever committed. Run the two commands above
