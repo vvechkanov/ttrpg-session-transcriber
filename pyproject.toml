@@ -40,6 +40,10 @@ dev = [
     # whether the ruff gate blocks is a property of the step, not of the
     # text of the command it runs.
     "pyyaml",
+    # The layer gate. Its contracts live in [tool.importlinter] below, so
+    # a contributor who cannot run `lint-imports` cannot reproduce the
+    # check CI fails on — the same reason ruff is on this list.
+    "import-linter",
 ]
 
 [tool.setuptools.packages.find]
@@ -84,3 +88,85 @@ target-version = "py311"
 # separate, ordered piece of work with its own card: the eight bare
 # `except` clauses (BLE001) are read one by one.
 select = ["E4", "E7", "E9", "F"]
+
+# ────────────────────────────────────────────────────────────────────
+# import-linter. ARCHITECTURE.md §3 writes the layer rules as prose and
+# says so itself: "эти правила держатся дисциплиной + ревью". Measured
+# before this landed — a `from mergers.script_merger import ScriptMerger`
+# added to `ui/models/session.py` left both blocking gates green: `ruff
+# check --select F821 .` passed and the suite stayed at 952 passed. The
+# full ruff set moved by exactly one finding, F401 unused-import, which
+# would have vanished the moment the import was used.
+#
+# Two contracts, and the split is the whole point rather than tidiness.
+# ────────────────────────────────────────────────────────────────────
+[tool.importlinter]
+root_packages = ["ui", "core", "sources", "mergers", "renderers", "domain"]
+
+# The six folders of §3 and nothing else. `launcher/` is a second
+# executable with its own spec (§4.2) and imports none of the six —
+# §3 never places it in the hierarchy, so neither does this. `scripts/`
+# is not even a package (no `__init__.py`) and `pyproject.toml` already
+# excludes it from the distribution; `tests/` is "не меняет слои,
+# добавляет инфраструктуру" (ARCHITECTURE.md:567) and imports every
+# layer plus PySide6 by design.
+[[tool.importlinter.contracts]]
+name = "Шесть слоёв ARCHITECTURE.md §3"
+type = "layers"
+layers = [
+    "ui",
+    "core",
+    # Independent siblings, not peers that may see each other: §3
+    # forbids all three pairs in both directions. `|` is what says so.
+    "sources | mergers | renderers",
+    "domain",
+]
+
+# This contract, not the one above, is the one the card is about.
+#
+# A `layers` contract forbids importing *upwards* and between
+# independent siblings. Importing *downwards past a level* it allows —
+# and all eight known violations are exactly that shape. Measured: with
+# the layers contract alone the tree is `Six layers KEPT`, and the eight
+# edges §3 writes out by hand are not reported at all. Entering them as
+# `ignore_imports` there would have been dead configuration that reads
+# as if the debt were under machine watch.
+#
+# `ui` → `core` is an *adjacency* rule ("минуя core нельзя"), and that
+# needs `forbidden` with `allow_indirect_imports`. Without the flag the
+# same contract also reports the transitive chains §3 permits —
+# `ui.cli → core → core.pipeline → domain.annotations` and 28 others.
+[[tool.importlinter.contracts]]
+name = "ui ходит в нижние слои только через core"
+type = "forbidden"
+source_modules = ["ui"]
+forbidden_modules = ["sources", "mergers", "renderers", "domain"]
+allow_indirect_imports = true
+# The eight edges ARCHITECTURE.md §3 already lists in prose, now listed
+# where a machine reads them. They are debt, not permission: the cause
+# is §4.1 — the GUI does not call `core.pipeline.run`, it reproduces its
+# steps and dragged the dependencies along — and the repair is planned
+# separately as F-C1 (TASKS.md, задача 1.3, via a planned
+# `core/merge_render.py`). Card for the reason:
+# https://trello.com/c/o05Osaik
+#
+# What this buys today: a *ninth* edge is red immediately. That is the
+# whole gate — existing debt stops being invisible, new debt stops being
+# possible.
+ignore_imports = [
+    "ui.engines.asr_worker -> domain.annotations",
+    "ui.engines.merger_worker -> domain.annotations",
+    "ui.engines.merger_worker -> domain.timeline",
+    "ui.engines.merger_worker -> mergers.script_merger",
+    "ui.engines.merger_worker -> renderers",
+    "ui.engines.merger_worker -> sources.game_log.fvtt_chat",
+    "ui.engines.merger_worker -> sources.game_log.combat_dump",
+    "ui.engines.pipeline_controller -> domain.annotations",
+]
+# An `ignore_imports` entry matching nothing passes silently — the run
+# prints `KEPT (3 ignored imports)` and says nothing about the three
+# being fiction. That is precisely how this list would rot once F-C1
+# removes the edges: eight lines of decoration nobody notices. `error`
+# turns the day an edge is repaired into a red build that names the
+# stale line, which is a one-word fix and the correct moment for it.
+unmatched_ignore_imports_alerting = "error"
