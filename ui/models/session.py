@@ -1574,10 +1574,16 @@ class SourceListModel(QAbstractListModel):
             ))
 
         # Row order matches ``combat_paths`` (discovery order), and a
-        # malformed combat still gets a full-width row so the user can
-        # tell something's off — which is why this walks the parsed
-        # pairs rather than ``combat_metas``, where the failures were
-        # filtered out.
+        # malformed combat still gets a row at all — which is why this
+        # walks the parsed pairs rather than ``combat_metas``, where the
+        # failures were filtered out. What that row preserves is the
+        # file's presence on the screen, and nothing more: it carries
+        # ``span=None``, so :meth:`_rebuild_rows` draws it 0..100% —
+        # byte for byte the row a session with no window gets, and this
+        # model has no role for an error (see ``_ROLES``), no banner and
+        # no count. A user cannot tell a dump that failed to parse from
+        # one the axis simply could not place. Surfacing the failure is
+        # a behaviour change and is filed as its own card.
         for path, meta in combat_parsed:
             row_times.append(_SourceTimes(
                 parser_id="combat-log",
