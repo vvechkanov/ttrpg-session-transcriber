@@ -75,6 +75,48 @@ OUTPUT_FILE_NAMES = frozenset(
     {"merged.txt", "speaker_map.json", "settings.ini", "uninstall.exe"}
 )
 
+#: Which rule a claim earns. Three of them, deciding two things each: the shape
+#: filters a candidate has to survive, and — once it has — what "exists" means
+#: for it (see :func:`_resolves`).
+#:
+#: A string rather than the `from_link` flag this used to be, because the third
+#: case is not the negation of the second: a bare name inside a fence is
+#: neither prose nor a link, and treating it as either gets it wrong in a
+#: different direction each time.
+#:
+#: Where a claim is written mostly decides which rule it earns, but the two are
+#: not the same thing and the difference is worth naming, because the names
+#: below suggest otherwise. A token *with* a slash inside a fence is tagged
+#: :data:`FROM_PROSE`: it said its directory, so it is checkable from the root
+#: exactly as the same token in a sentence would be, and the looser resolver
+#: would be a weakening rather than a fit. :data:`FROM_FENCE_NAME` is for the
+#: case that has no directory to give.
+FROM_PROSE = "prose"
+FROM_LINK = "link"
+FROM_FENCE_NAME = "fence-name"
+
+#: The column edge of a box-drawing diagram. A token starting flush against
+#: one — no space between — is the tail of a word the box wrapped onto the next
+#: row, not a file: `script_` above, `merger.py` below, and only the second
+#: half is shaped like a name. All four false alarms the fence reader would
+#: otherwise raise in the *live* documents are that, in `ARCHITECTURE.md` §3.
+#:
+#: A continuation is flush by construction — the next row of the box starts at
+#: its own left edge — while a name the diagram meant to write is padded off
+#: it. The tell is therefore the left edge only: a token flush against the
+#: *right* edge has been cut at its end, and its tail is on the next line.
+#:
+#: The cost is real, measured, and paid on purpose: thirteen bare tokens sit
+#: flush against an edge in that diagram, seven of them shaped like filenames,
+#: and those seven are the ones this rule turns away — the four fragments
+#: above, and three whole names, `base.py` twice and `events.py`. `base.py`
+#: survives
+#: anyway, read from a third column that pads it; `events.py` is the one name
+#: this rule costs. The alternative measured was an allowlist of the fragments,
+#: which is the kind of exclusion this file spends two other comments
+#: refusing.
+COLUMN_EDGE = "│"
+
 #: What "looks like a file" means for a token with no directory in it.
 FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
 
@@ -278,6 +320,12 @@ def _exists(token: str) -> bool:
 
     Directories are matched by prefix, because git lists files and not the
     folders holding them.
+
+    This is the rule for prose and for link destinations, and it is no longer
+    the module's only one: a bare name inside a fenced diagram is resolved by
+    :func:`_exists_by_basename` instead, because a box has no room to say
+    where the file lives. :func:`_resolves` routes between the two, and the
+    boundary is the origin of the token, never its spelling.
     """
     cleaned = token.split("#")[0].rstrip("/")
     if not cleaned:
@@ -286,6 +334,60 @@ def _exists(token: str) -> bool:
     if cleaned in files:
         return True
     return any(name.startswith(f"{cleaned}/") for name in files)
+
+
+@functools.lru_cache(maxsize=None)
+def _basenames_of(files: frozenset[str]) -> frozenset[str]:
+    """The last segment of every path, cached on the file set it came from.
+
+    Keyed on the set rather than on the root so that the fixtures which swap
+    `PROJECT_ROOT` get their own answer, the same way :func:`_exists` does by
+    calling :func:`_repository_files` afresh.
+    """
+    return frozenset(name.rsplit("/", 1)[-1] for name in files)
+
+
+def _exists_by_basename(token: str) -> bool:
+    """Whether *some* file in the tree carries this name, wherever it lives.
+
+    The deliberate opposite of :func:`_exists`, and narrow on purpose: it
+    answers only for a name written bare inside a fenced block. There the
+    document had no directory to give — `mergers/` is as wide as the box gets,
+    and the names inside it are listed under that heading, not spelled out.
+    The live documents write 23 such names; 18 of them live below the root, so
+    asking for a root-relative match would paint 18 correct lines red — the
+    failure worse than a miss.
+
+    What it gives up is named rather than discovered later. Any match is
+    enough, so an ambiguous name is vouched for by whichever file answers
+    first: `base.py` resolves against three files here (`sources/`, `mergers/`
+    and `renderers/`), `README.md` against five, `00_README.md` against two.
+    Delete `mergers/base.py` and the `mergers` box naming `base.py` stays
+    green on `sources/base.py`. The strict reading was measured too and costs
+    three live lines their green, which breaks this rule's own reason for
+    existing; the ambiguity is the cheaper half.
+
+    This is why the relaxation stops at the fence. In prose the author *could*
+    have written the directory and did not, and §4.2 turns on the difference
+    between the root `build.spec` and `launcher/build.spec` — a distinction
+    this resolver cannot make and :func:`_exists` exists to keep.
+
+    It takes the token as given, where :func:`_exists` first strips a fragment
+    and a trailing slash. Neither can reach here: the only caller tags a token
+    :data:`FROM_FENCE_NAME` after :data:`FILE_TOKEN` has matched it, and that
+    pattern admits no `#` and no `/`. Copying the normalisation anyway would
+    have been the worse half of the trade — `_exists("")` answers `True`, which
+    is right for a path that normalised away to nothing and is fail-*open* for
+    a guard reached any other way.
+    """
+    return token in _basenames_of(_repository_files())
+
+
+def _resolves(token: str, origin: str) -> bool:
+    """Whether the claim holds, under the rule its origin earns."""
+    if origin == FROM_FENCE_NAME:
+        return _exists_by_basename(token)
+    return _exists(token)
 
 
 def _repository_entries() -> frozenset[str]:
@@ -321,10 +423,10 @@ def _is_planned(line: str, end_of_path: int) -> bool:
 
 def _claims_with_origin(
     text: str, document: str = ""
-) -> list[tuple[int, str, bool]]:
-    """Every claimed path, with whether it came from a Markdown link.
+) -> list[tuple[int, str, str]]:
+    """Every claimed path, with the rule it earns (see :data:`FROM_PROSE`).
 
-    The flag matters to the caller as well as here: a link destination is a
+    The origin matters to the caller as well as here: a link destination is a
     path by construction, so the "slashed paths only" boundary — which exists
     to keep *bare backticked filenames* out of scope — must not apply to it.
     `[TASKS.md](TASKS.md)` is an unambiguous claim about a root file, and
@@ -339,8 +441,27 @@ def _claims_with_origin(
     Fenced blocks are read too, because the layer diagrams live there and
     that is exactly where a stale path survived longest: `ui/gui.py` sat in
     the §3 diagram for months while every prose mention of it was corrected.
-    Inside a fence only slashed tokens count — a bare ``cli.py`` in a box has
-    no directory to check it against.
+
+    Inside a fence a bare ``cli.py`` counts as well, tagged
+    :data:`FROM_FENCE_NAME`. It has no directory to be checked against — that
+    is precisely the point, and why it is resolved by basename rather than
+    from the root (:func:`_resolves`). Requiring a slash here read as caution
+    and was not: a box is only as wide as `mergers/`, so the live documents
+    name 23 files inside fences with no directory at all, and both READMEs
+    kept drawing a deleted `merge_whisperx.py` for three nights with this
+    guard green.
+
+    A fence is a fence, though, and the diagrams are only the reason — not the
+    scope. The same rule reads a shell session and a command's output, so a
+    document writing `pip install -r requirements.txt` in a block is making a
+    claim about a file in this tree, and will be told so if that file is not
+    here. That is the direction the rule was aimed, and it is also how it
+    would produce its first false red, on a name that belongs to someone
+    else's tree. None of the live documents does this today — measured — and
+    the two escapes are the ones already in the file: an excusal with a reason
+    in :data:`NOT_REPOSITORY_PATHS`, or the `(planned)` marker. Widening a
+    guard until it reads a foreign filename is a real cost and belongs in the
+    open rather than in a surprise.
 
     A path may be marked as not-yet-existing by appending ``(planned)``:
 
@@ -360,7 +481,7 @@ def _claims_with_origin(
     # is the convention `_exists` documents, and prose says `core/pipeline.py`
     # meaning the one in this tree, wherever the sentence happens to live.
     base = posixpath.dirname(document)
-    claims: list[tuple[int, str]] = []
+    claims: list[tuple[int, str, str]] = []
     # The exact marker run that opened the block being read, or `None`. Both
     # halves of it are load-bearing, and each was found missing in turn.
     #
@@ -429,19 +550,22 @@ def _claims_with_origin(
         # Each candidate carries where its path ends in the line, so the
         # `(planned)` marker can be bound to this occurrence and not to a
         # different copy of the same path further along.
-        candidates: list[tuple[str, bool, int]] = []
+        candidates: list[tuple[str, str, int]] = []
         if in_fence:
             cursor = 0
             for token in re.split(r"[\s│┌┐└┘├┤─,;]+", line):
                 if not token:
                     continue
                 found = line.find(token, cursor)
-                cursor = (found if found >= 0 else cursor) + len(token)
+                starts_at = found if found >= 0 else cursor
+                cursor = starts_at + len(token)
                 if "/" in token:
-                    candidates.append((token, False, cursor))
+                    candidates.append((token, FROM_PROSE, cursor))
+                elif starts_at == 0 or line[starts_at - 1] != COLUMN_EDGE:
+                    candidates.append((token, FROM_FENCE_NAME, cursor))
         else:
             for match in re.finditer(r"`([^`\n]+)`", line):
-                candidates.append((match.group(1), False, match.end(1)))
+                candidates.append((match.group(1), FROM_PROSE, match.end(1)))
             # A code span shows Markdown rather than writing it: a document
             # explaining the `(planned)` escape spells out a whole link to
             # illustrate it, and read as a link that example becomes a claim
@@ -453,10 +577,11 @@ def _claims_with_origin(
                 r"`[^`\n]+`", lambda m: " " * len(m.group(0)), line
             )
             for match in MARKDOWN_LINK.finditer(outside_code):
-                candidates.append((match.group(1), True, match.end(1)))
+                candidates.append((match.group(1), FROM_LINK, match.end(1)))
             for match in MARKDOWN_REFERENCE.finditer(outside_code):
-                candidates.append((match.group(1), True, match.end(1)))
-        for token, from_link, path_ends_at in candidates:
+                candidates.append((match.group(1), FROM_LINK, match.end(1)))
+        for token, origin, path_ends_at in candidates:
+            from_link = origin == FROM_LINK
             # ``mergers/script_merger.py::ScriptMerger.merge`` — the path half
             # is what this test can check; the symbol half is section 5's job.
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
@@ -549,12 +674,12 @@ def _claims_with_origin(
                         continue  # `core.pipeline.run` is a symbol, not a file
             if _is_planned(line, path_ends_at):
                 continue
-            claims.append((line_number, token, from_link))
+            claims.append((line_number, token, origin))
     return claims
 
 
 def _claimed_paths(text: str, document: str = "") -> list[tuple[int, str]]:
-    """:func:`_claims_with_origin` without the origin flag."""
+    """:func:`_claims_with_origin` without the origin."""
     return [(line, token) for line, token, _ in _claims_with_origin(text, document)]
 
 
@@ -626,22 +751,32 @@ def _live_documents() -> list[str]:
 
 
 def _broken_paths_in(document: str) -> list[str]:
-    """Slashed paths the document names that the repository does not carry.
+    """Paths the document names that the repository does not carry.
 
-    Slashed only, *unless the path came from a Markdown link*: a bare `ci.yml`
-    in backticks names a real file without saying where it lives, which is a
-    naming policy and a separate card — 152 of them, none of them rot. A link
-    is not that case. `[TASKS.md](TASKS.md)` says exactly which file it means,
-    and skipping it for want of a slash let a rename of `TASKS.md` break the
-    links in `README.md`, `CONTRIBUTING.md` and `TASKS.md` itself while this
-    guard stayed green.
+    A slash is what makes a *backticked* token checkable, and nothing else:
+    a bare `ci.yml` in prose names a real file without saying where it lives,
+    which is a naming policy and a separate card — 152 of them, none of them
+    rot.
+
+    The other two origins carry their own warrant and need no slash.
+    `[TASKS.md](TASKS.md)` says exactly which file it means, and skipping it
+    for want of one let a rename of `TASKS.md` break the links in `README.md`,
+    `CONTRIBUTING.md` and `TASKS.md` itself while this guard stayed green. A
+    name inside a fenced diagram is the same kind of claim from the other
+    direction: the box could not have written a directory, and both READMEs
+    drew a deleted `merge_whisperx.py` for three nights because of it.
+
+    So the asymmetry is not "bare names are out of scope" — it is that a bare
+    name is checked where the document had no room to be more precise, and
+    left alone where it chose not to be.
     """
     text = (PROJECT_ROOT / document).read_text(encoding="utf-8")
     return sorted(
         {
             f"{document}:{line} -> {token}"
-            for line, token, from_link in _claims_with_origin(text, document)
-            if (from_link or "/" in token) and not _exists(token)
+            for line, token, origin in _claims_with_origin(text, document)
+            if (origin in (FROM_LINK, FROM_FENCE_NAME) or "/" in token)
+            and not _resolves(token, origin)
         }
     )
 
@@ -709,8 +844,8 @@ def test_every_path_architecture_names_exists():
     missing = sorted(
         {
             f"{ARCHITECTURE.name}:{line} -> {token}"
-            for line, token in _claimed_paths(text)
-            if not _exists(token)
+            for line, token, origin in _claims_with_origin(text)
+            if not _resolves(token, origin)
         }
     )
 
@@ -1061,6 +1196,97 @@ def test_paths_inside_fenced_blocks_are_checked():
     ]
 
 
+def test_a_bare_filename_in_a_fence_is_a_claim():
+    """Both READMEs drew a `merge_whisperx.py` deleted in the six-layer move
+    for three nights running, with this guard green the whole time.
+
+    Inside a fence only slashed tokens counted, and a diagram is drawn in
+    columns: a box wide enough for `mergers/` is not wide enough for
+    `mergers/script_merger.py`, so almost every file the layer diagrams name
+    is named without its directory. That is not an edge of the corpus — it is
+    where the guard's own subject writes its names.
+    """
+    assert _claimed_paths("```\n│ merge_whisperx.py │\n```") == [
+        (2, "merge_whisperx.py")
+    ]
+    # The extension vocabulary still decides, in a fence as everywhere else:
+    # it is the only thing telling `README.md` from `core.pipeline.run`, and
+    # this widening must not drag a bare word in with it.
+    assert _claimed_paths("```\n│ pytest │\n```") == []
+    assert _claimed_paths("```\n│ core.pipeline.run │\n```") == []
+    # And outside a fence nothing changes: a bare backticked name is the
+    # naming-policy card, 152 of them, none of them rot.
+    assert _claimed_paths("run `pytest` first") == []
+
+
+def test_a_bare_name_in_a_fence_resolves_by_basename():
+    """The two rules are different on purpose, and they do not meet.
+
+    `ui/app_qml.py` named bare is a real file drawn in a box, not a claim
+    about the root — the box has no room to say where it lives. Resolving it
+    from the root would paint 18 of the 23 live names red, which is the one
+    failure mode worse than a miss.
+    """
+    assert not _exists("app_qml.py"), "the root rule is untouched"
+    assert _resolves("app_qml.py", FROM_FENCE_NAME), "the fence rule is looser"
+    assert _exists("ui/app_qml.py")
+    # The whole point: a name no file in the tree carries is still a claim,
+    # and still broken.
+    assert not _resolves("merge_whisperx.py", FROM_FENCE_NAME)
+    # A slashed token in a fence keeps the root rule — the looser resolver is
+    # for names that had nowhere to say their directory, not for paths that
+    # said it and got it wrong.
+    assert not _resolves("scripts/merge_whisperx.py", FROM_PROSE)
+
+
+def test_a_column_fragment_is_not_a_filename():
+    """`script_` on one row and `merger.py` on the next is one word the box
+    wrapped, not two names — and `merger.py` is the half that looks like a
+    file. All four false alarms this widening would otherwise raise are that,
+    in `ARCHITECTURE.md` §3.
+
+    The tell is the column edge: a continuation starts flush against the left
+    `│`, because that is where the next row of the box begins. A name the
+    diagram meant to write is padded away from it.
+
+    The cost is named rather than hidden: a real name written flush against
+    the edge is skipped too — three of them in that same diagram.
+    """
+    wrapped = "```\n│script_   │\n│merger.py │\n│ base.py  │\n```"
+
+    assert _claimed_paths(wrapped) == [(4, "base.py")]
+    # Only bare names pay it. A slashed path is checkable wherever it sits,
+    # and `│renderers/│` is exactly how the diagram writes a real directory.
+    assert _claimed_paths("```\n│renderers/│\n```") == [(2, "renderers/")]
+    # A token in column zero has no character before it, and Python's index
+    # -1 is the *last* one — so without the guard a line that begins with a
+    # name and ends with an edge loses that name to its own right-hand border.
+    # Mutation found this: dropping the guard left all eighty-one tests green.
+    assert _claimed_paths("```\npipeline.py    │\n```") == [(2, "pipeline.py")]
+
+
+def test_the_fence_reader_finds_the_names_in_the_diagrams():
+    """A floor under the half this card added, for the reason every other
+    floor in this file exists: the widening is invisible to the suite the
+    moment it stops happening, and a guard that reads nothing is green.
+
+    Measured at 23 across the live set: 7 in `ARCHITECTURE.md` §3, 8 in the
+    two READMEs, 6 in `00_README.md`, 2 in the e2e fixture's own README. The
+    floor sits just under that, and a drop means either the fence reader
+    broke or the diagrams lost their names.
+    """
+    named = [
+        f"{document}:{line} -> {token}"
+        for document in _live_documents()
+        for line, token, origin in _claims_with_origin(
+            (PROJECT_ROOT / document).read_text(encoding="utf-8"), document
+        )
+        if origin == FROM_FENCE_NAME
+    ]
+
+    assert len(named) >= 22, f"suspiciously few names read in fences: {named}"
+
+
 def test_a_bare_filename_means_a_file_at_the_root():
     """A name with no directory is a claim about the root, and only the root.
 
@@ -1248,6 +1474,47 @@ def test_a_link_to_a_root_file_is_checked_even_without_a_slash(tmp_path, monkeyp
     assert _broken_paths_in("README.md") == ["README.md:1 -> TASKS.md"], (
         "the link names a root file that is not there; `ci.yml` is a bare "
         "backticked name and stays out of scope"
+    )
+
+
+@needs_git
+def test_a_name_in_a_fence_is_checked_even_without_a_slash(tmp_path, monkeypatch):
+    """The gate this card is about, driven through the function that holds it.
+
+    Mutation found the hole this closes: deleting `FROM_FENCE_NAME` from the
+    origin tuple in :func:`_broken_paths_in` — one line, the whole card undone
+    — left all eighty tests green, and green again with a deleted
+    `merge_whisperx.py` put back into `README.md`'s diagram, which is the
+    card's own acceptance. Every other test of this work reads the extractor
+    or the resolver directly and never crosses the gate between them; the live
+    documents cross it and are clean, so they prove nothing while they stay
+    that way.
+
+    Same reasoning, and same shape, as
+    :func:`test_a_link_to_a_root_file_is_checked_even_without_a_slash` one
+    boundary over.
+    """
+    _init_repository(tmp_path)
+    (tmp_path / "ui").mkdir()
+    (tmp_path / "ui" / "cli.py").write_text("", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "```\n│ cli.py │ merge_whisperx.py │\n```\n\nand `ci.yml`\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "add", "README.md", "ui/cli.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    assert _broken_paths_in("README.md") == [
+        "README.md:2 -> merge_whisperx.py"
+    ], (
+        "the diagram names a file the tree does not carry; `cli.py` is there "
+        "under `ui/`, and `ci.yml` is a bare backticked name in prose and "
+        "stays out of scope"
     )
 
 
@@ -1557,7 +1824,12 @@ def test_the_extractor_reads_the_real_document():
     written without a trailing slash, every one of them a real directory. A
     floor justified by a number nobody ran is the same rot this file exists to
     catch, one level up.
+
+    It went back up to 132 when the fence reader started reading bare names:
+    132 claims became 139, seven of them the file names in the §3 boxes. The
+    floor moves with the measurement, which is the whole instruction above —
+    left at 125 it would have gone on allowing a 10% loss.
     """
     claims = _claimed_paths(ARCHITECTURE.read_text(encoding="utf-8"))
 
-    assert len(claims) >= 125, f"suspiciously few paths extracted: {len(claims)}"
+    assert len(claims) >= 132, f"suspiciously few paths extracted: {len(claims)}"
