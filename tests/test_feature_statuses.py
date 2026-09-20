@@ -318,9 +318,25 @@ EVIDENCE: dict[int, tuple[Artifact, ...]] = {
         # and the GUI reaches the dumps by its own route — so evidence taken
         # only from `core/pipeline.py` would keep endorsing the ✅ after the
         # screen stopped placing combats at all.
+        # Two artifacts, because the claim has two halves and one
+        # literal only held one of them. The parse used to be anchored
+        # as `meta = parse_combat_file(`, which broke when the call
+        # moved into a comprehension — a change that took nothing away
+        # from #3. Narrowing it to the call itself survives that, and
+        # the row is added beside it rather than instead of it: dropping
+        # the parse entirely, so that the GUI places nothing, leaves the
+        # row literal untouched and this file green (measured, by
+        # mutation), while dropping the row leaves the parse untouched.
+        # Either half alone endorses the ✅ after the screen has stopped
+        # doing the thing.
         Artifact(
             "ui/models/session.py",
-            "meta = parse_combat_file(",
+            "parse_combat_file(path)",
+            "the GUI reads the dumps itself, not only the merge does",
+        ),
+        Artifact(
+            "ui/models/session.py",
+            'parser_id="combat-log"',
             "the GUI places combats on the axis, not only the merge does",
         ),
     ),

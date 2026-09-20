@@ -1527,11 +1527,29 @@ class SourceListModel(QAbstractListModel):
             first = chat_moments[chat_paths[0]]
             chat_range = (first[0], first[-1])
 
-        combat_metas: list = []
-        for combat_path in combat_paths:
-            meta = parse_combat_file(combat_path)
-            if meta is not None:
-                combat_metas.append(meta)
+        # One parse per combat dump, reused for the window and for the
+        # row. This list used to be walked twice — once filtered, for
+        # ``build_window``, and again unfiltered, for the rows, because
+        # a dump that fails to parse still has to get one. Two walks
+        # meant two reads and two JSON parses of every file, on the UI
+        # thread, at the moment the user is waiting for the screen.
+        #
+        # Pairs rather than a dict keyed by path, and the reason is that
+        # a list needs no argument at all. ``detect_combat_logs`` cannot
+        # hand back the same path twice today — it walks one
+        # ``sorted(iterdir())`` and moves on after the first branch that
+        # claims a file — so a dict would be correct; it would just be
+        # correct because of something happening two modules away. A
+        # duplicate key drops a row silently, which is the one failure
+        # this function refuses even for unreadable JSON, and no test
+        # holds that shape (checked by mutation: swapping in a dict
+        # passes the suite), so the cheaper guarantee is the structure.
+        combat_parsed: list[tuple[Path, Any]] = [
+            (path, parse_combat_file(path)) for path in combat_paths
+        ]
+        combat_metas: list = [
+            meta for _, meta in combat_parsed if meta is not None
+        ]
 
         window = build_window(
             info_start=info_start,
@@ -1555,12 +1573,18 @@ class SourceListModel(QAbstractListModel):
                 events=tuple(moments),
             ))
 
-        # Re-parse each combat file so row order matches ``combat_paths``
-        # (discovery order). ``combat_metas`` filtered failures; we want
-        # to still render a full-width row for malformed combats so the
-        # user can tell something's off.
-        for path in combat_paths:
-            meta = parse_combat_file(path)
+        # Row order matches ``combat_paths`` (discovery order), and a
+        # malformed combat still gets a row at all — which is why this
+        # walks the parsed pairs rather than ``combat_metas``, where the
+        # failures were filtered out. What that row preserves is the
+        # file's presence on the screen, and nothing more: it carries
+        # ``span=None``, so :meth:`_rebuild_rows` draws it 0..100% —
+        # byte for byte the row a session with no window gets, and this
+        # model has no role for an error (see ``_ROLES``), no banner and
+        # no count. A user cannot tell a dump that failed to parse from
+        # one the axis simply could not place. Surfacing the failure is
+        # a behaviour change and is filed as its own card.
+        for path, meta in combat_parsed:
             row_times.append(_SourceTimes(
                 parser_id="combat-log",
                 label="Боевой лог",
