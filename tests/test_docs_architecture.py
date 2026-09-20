@@ -88,9 +88,26 @@ FILE_TOKEN = re.compile(r"^[\w.\-]+\.[A-Za-z0-9]{1,6}$")
 #: reads as a symbol and is skipped. Slashed paths and Markdown links carry no
 #: such ambiguity and are checked unconditionally, which is where the bulk of
 #: the document's references live.
+#: Compared against a *case-folded* suffix, so every entry here is written in
+#: lower case and `core/GONE.PY` is the same kind of claim as `core/gone.py`.
+#: `.markdown` is carried for one reason only: :func:`_markdown_documents`
+#: selects documents by that spelling too, and a vocabulary that admits a file
+#: as a document while refusing to recognise a path pointing at it is an
+#: exception nobody wrote down — the shape this file keeps finding rot in.
+#: "Path" rather than "link", precisely: a Markdown link destination skips
+#: the shape rule altogether, so `[x](notes.markdown)` is a claim with this
+#: entry and without it. What the entry buys is the backticked and the fenced
+#: spelling.
+#:
+#: Only one of the two routes here reaches it, and the other is not worth
+#: looking for: :data:`FILE_TOKEN` caps an extension at six characters, so a
+#: bare backticked `notes.markdown` is refused two rules earlier and the
+#: vocabulary is never consulted. What this entry changes is
+#: :func:`_is_path_shaped`, that is a token with a directory in it.
 FILE_SUFFIXES = frozenset(
-    {".md", ".py", ".qml", ".js", ".json", ".txt", ".toml", ".ini", ".cfg",
-     ".spec", ".yml", ".yaml", ".ps1", ".bat", ".sh", ".exe", ".zip"}
+    {".md", ".markdown", ".py", ".qml", ".js", ".json", ".txt", ".toml",
+     ".ini", ".cfg", ".spec", ".yml", ".yaml", ".ps1", ".bat", ".sh", ".exe",
+     ".zip"}
 )
 
 #: Directories to skip when git cannot answer (see :func:`_walked_files`).
@@ -132,7 +149,7 @@ def _is_path_shaped(token: str) -> bool:
     if token.endswith("/"):
         return True
     last = token.rstrip("/").split("/")[-1]
-    return pathlib.PurePath(last).suffix in FILE_SUFFIXES
+    return pathlib.PurePath(last).suffix.lower() in FILE_SUFFIXES
 
 
 #: A relative Markdown link target: `[text](docs/adr/thing.md)`, not `[t](http…)`
@@ -357,7 +374,33 @@ def _claims_with_origin(
     # backticks exists so that a three-backtick line may sit inside it, and a
     # closing run has to be at least as long as the one that opened.
     fence: str | None = None
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        # A Windows spelling is the same claim about the same file, and the
+        # instructions in this tree are written in both: every `venv\\Scripts`
+        # line has a POSIX twin one row above it. Only the twin was read.
+        #
+        # Normalised here, on the line, *before* it is split into tokens —
+        # not on the token after it has been classified. Inside a fence a
+        # token becomes a candidate by carrying a slash at all, so a
+        # backslashed path is discarded before any rule about filenames is
+        # reached; folding later would leave that branch unchanged and the
+        # path still unread. The replacement is one character for one, so
+        # every offset — and with it the `(planned)` marker's position —
+        # survives it.
+        #
+        # What it cannot tell apart, named rather than discovered later: a
+        # backslash escaping Markdown punctuation. A backticked
+        # `docs/a\\_b.md` becomes the claim `docs/a/_b.md`, which is nobody's
+        # file and would be reported broken. No live document writes one
+        # today — the four escapes in this tree (`\\|` twice in
+        # `ARCHITECTURE.md`, `\\_` in `FEATURE_REQUESTS.md`, an escaped
+        # backtick in `docs/process.md`) each die on a space, on the `|`
+        # filter, or on sitting outside a code span — so this is the shape of
+        # the first false red rather than one. Telling the two apart means
+        # asking what follows the backslash, and punctuation is a legal first
+        # character of a filename too (`scripts\\_helper.py`), so it is a
+        # trade rather than a fix, and it is a card.
+        line = raw_line.replace("\\", "/")
         stripped = line.lstrip()
         run = FENCE_MARKER.match(stripped)
         if run is not None:
@@ -419,6 +462,16 @@ def _claims_with_origin(
             token = token.split("::")[0].strip().rstrip(".,;:)").strip()
             token = LINE_REFERENCE.sub("", token)
             if not token or " " in token:
+                continue
+            # A shell line continued onto the next row ends in a lone
+            # backslash, which the normalisation above turns into a lone
+            # slash: `CONTRIBUTING.md:115` is exactly that. It would not have
+            # been reported either — `_exists` strips a trailing slash and
+            # answers `True` for the empty string left behind — so the claim
+            # passes for the wrong reason and pads every count built on this
+            # list. A separator with nothing on either side of it is not a
+            # path anyone wrote.
+            if not token.strip("/"):
                 continue
             if from_link:
                 # A destination is a URL reference, so it can carry a query as
@@ -492,7 +545,7 @@ def _claims_with_origin(
                     # `CONTRIBUTING.md`.
                     if not FILE_TOKEN.match(token):
                         continue  # a bare word — not a repository path
-                    if pathlib.PurePath(token).suffix not in FILE_SUFFIXES:
+                    if pathlib.PurePath(token).suffix.lower() not in FILE_SUFFIXES:
                         continue  # `core.pipeline.run` is a symbol, not a file
             if _is_planned(line, path_ends_at):
                 continue
@@ -544,9 +597,17 @@ def _markdown_documents() -> list[str]:
     unpacked inside someone else's work tree, or git missing entirely — would
     raise during collection and take all of this file's tests down with it,
     including the ones that need no git at all.
+
+    The extension is matched case-blind, and `.markdown` counts as well.
+    Nothing in this tree is spelled either way today, so this is prevention
+    rather than rot — but the failure it prevents is the silent kind: a
+    document left out of the set is not reported as anything, it is simply
+    never checked, and the guard stays green while the file rots.
     """
     tracked = _tracked_files(PROJECT_ROOT) or _walked_files(PROJECT_ROOT)
-    return sorted(name for name in tracked if name.endswith(".md"))
+    return sorted(
+        name for name in tracked if name.lower().endswith((".md", ".markdown"))
+    )
 
 
 def _live_documents() -> list[str]:
@@ -1129,6 +1190,40 @@ def test_git_decides_what_the_repository_contains(tmp_path, monkeypatch):
 
 
 @needs_git
+def test_a_document_is_selected_whatever_the_case_of_its_extension(
+    tmp_path, monkeypatch
+):
+    """The document set was filtered by `name.endswith(".md")`, so a single
+    capital let a whole file out of the guard.
+
+    Nothing in this tree spells it that way today — 48 tracked `.md` files,
+    none with a capital in the extension — so this is prevention rather than
+    rot, and it is cheap enough to be worth having: the failure is silent, and
+    the symptom is a document that is never checked rather than one that fails.
+    `.markdown` is folded in for the same reason, being the other spelling
+    GitHub renders.
+    """
+    _init_repository(tmp_path)
+    (tmp_path / "GUIDE.MD").write_text("see `core/gone.py`\n", encoding="utf-8")
+    (tmp_path / "NOTE.Markdown").write_text("see `core/gone.py`\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("see `core/gone.py`\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "GUIDE.MD", "NOTE.Markdown", "notes.txt"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(sys.modules[_exists.__module__], "PROJECT_ROOT", tmp_path)
+
+    documents = _markdown_documents()
+
+    assert "GUIDE.MD" in documents
+    assert "NOTE.Markdown" in documents
+    assert "notes.txt" not in documents, "the fold is about case, not about scope"
+    assert "GUIDE.MD" in _live_documents()
+
+
+@needs_git
 def test_a_link_to_a_root_file_is_checked_even_without_a_slash(tmp_path, monkeypatch):
     """Codex on PR #29. The slashed-only boundary keeps *backticked bare
     names* out of scope — a naming policy, filed as its own card. A link is
@@ -1312,6 +1407,113 @@ def test_a_root_level_file_is_checked_too():
     the document point at a root-level file that is not there."""
     assert _claimed_paths("built by `build.spec`") == [(1, "build.spec")]
     assert _claimed_paths("writes `merged.txt`") == []
+
+
+def test_a_windows_spelling_is_the_same_claim_as_its_posix_one():
+    """`scripts\\gone.py` and `scripts/gone.py` name one file, and only the
+    second was read.
+
+    The instructions this tree ships are dual-platform, so the Windows half of
+    every pair went unchecked: `tests/fixtures/e2e_p2/README.md` tells the
+    reader to run `scripts\\gen_fixtures_noprint.py` on two lines, and neither
+    produced a claim. Measured on `16e3bcf`: 20 lines across the 25 live
+    documents carry a backslash; 4 of those are Markdown escapes and 1 is a
+    shell line continued onto the next row, leaving **15 that spell a path**.
+    Exactly 2 of the 15 name a file of this repository.
+
+    The other 13 were already silent, and by two rules rather than one: 8 are
+    `venv\\Scripts\\…` or the Obsidian vault the `skill/` prompts describe,
+    excused by their first segment, while 5 are absolute paths into somebody
+    else's disk (`C:\\…`, `D:\\…`) and die one rule earlier, on the `:` that
+    makes a token a URL. Neither `C:` nor `D:` is a head in
+    `NOT_REPOSITORY_PATHS`, so saying all 13 are "excused by their first
+    segment" would be exactly the unchecked sentence this module exists to
+    catch.
+
+    The separator is normalised on the *line*, before the line is split into
+    tokens, and that is not a detail of where the call sits. Inside a fence a
+    token earns its candidacy by carrying a slash at all, so a backslashed
+    path is dropped before any rule about filenames is consulted — which is
+    why the guard was silent rather than wrong here.
+    """
+    fence = "```bash\nvenv\\Scripts\\python scripts\\gone.py\n```"
+
+    assert _claimed_paths(fence) == [(2, "scripts/gone.py")]
+    assert _claimed_paths("run `scripts\\gone.py`") == [(1, "scripts/gone.py")]
+
+
+def test_a_line_continuation_is_not_a_path():
+    """A shell line broken across two rows ends in a lone backslash, which
+    normalisation turns into a lone slash — `CONTRIBUTING.md:115` is exactly
+    this, and the token it donates is `/`.
+
+    It would not have been reported: `_exists` strips a trailing slash and
+    answers `True` for the empty string that is left, so the claim passes for
+    the wrong reason and inflates every count built on the claim list. A
+    separator with nothing on either side of it is not a path anyone wrote.
+
+    The continuation *creates* such a token; it is not where the existing
+    ones came from, and the difference is worth keeping straight. Eleven bare
+    `/` claims were already in the list on `16e3bcf`, every one of them an
+    "A or B" written with spaces — `faster-whisper / sherpa-onnx` in a README
+    diagram, `Агата / Адет` in a `skill/` prompt. Before this change a
+    backslash was not normalised at all, so no continuation could have
+    produced one. This guard removes eleven that predate it, and one that
+    arrives with it: `CONTRIBUTING.md:115`.
+    """
+    fence = "```bash\ncore/run.py --flag \\\n```"
+
+    assert _claimed_paths(fence) == [(2, "core/run.py")]
+    assert _claimed_paths("```\n//\n```") == []
+
+
+def test_an_uppercase_extension_still_names_a_file():
+    """`FILE_SUFFIXES` is a vocabulary of file *types*, and a type is not
+    spelled differently for being shouted. The comparison was case-sensitive,
+    so `core/GONE.PY` read as prose with a slash in it and `README.MD` as a
+    dotted symbol; both went unchecked.
+
+    What is folded is the classification, not the lookup: `_exists` stays
+    exact, because this tree is read on Linux where `README.MD` and
+    `README.md` are two different files and vouching for one with the other is
+    the rot this file exists to catch.
+    """
+    assert _is_path_shaped("core/GONE.PY")
+    assert _claimed_paths("see `core/GONE.PY`") == [(1, "core/GONE.PY")]
+    assert _claimed_paths("see `README.MD`") == [(1, "README.MD")]
+    assert not _exists("README.MD"), "the tree carries README.md, a different name"
+
+
+def test_a_link_to_a_markdown_document_is_recognised_as_one():
+    """The two halves of "what counts as Markdown" have to move together.
+
+    `_markdown_documents` reads a `.markdown` file as a document, so
+    `FILE_SUFFIXES` has to recognise a path naming one — a vocabulary that
+    guards a file while refusing to see the reference pointing at it is an
+    exception nobody wrote down, and it is the exact shape of rot this module
+    exists to catch. A Markdown link is not the case in question: a
+    destination skips the shape rule by construction and is a claim either
+    way. What is at stake is the backticked and the fenced spelling.
+
+    Nothing in this tree is spelled that way today, which is why it needs a
+    test rather than a document to hold it: drop `".markdown"` from the set
+    and the document half stays green while every backticked or fenced
+    reference to such a file quietly stops being a claim. Mutation found this
+    uncovered, and nothing else in the file reddens for it.
+
+    The assertions go through a token carrying a directory, and that is not
+    arbitrary: `FILE_TOKEN` allows at most six characters of extension, so a
+    bare `notes.markdown` is refused before the vocabulary is reached and
+    reads as green with the entry and without it.
+    """
+    assert _is_path_shaped("docs/notes.markdown")
+    assert _claimed_paths("see `docs/notes.markdown`") == [(1, "docs/notes.markdown")]
+    assert _claimed_paths("```\ndocs/notes.markdown\n```") == [
+        (2, "docs/notes.markdown")
+    ]
+    assert _claimed_paths("see `notes.markdown`") == [], (
+        "a bare name never reaches the vocabulary: FILE_TOKEN stops at six"
+    )
 
 
 def test_repository_roots_are_derived_not_listed():
