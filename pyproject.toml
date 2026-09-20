@@ -90,9 +90,12 @@ target-version = "py311"
 select = ["E4", "E7", "E9", "F"]
 
 # ────────────────────────────────────────────────────────────────────
-# import-linter. ARCHITECTURE.md §3 writes the layer rules as prose and
-# says so itself: "эти правила держатся дисциплиной + ревью". Measured
-# before this landed — a `from mergers.script_merger import ScriptMerger`
+# import-linter. Until this landed, ARCHITECTURE.md §3 wrote the layer
+# rules as prose and said so itself: "эти правила держатся дисциплиной +
+# ревью + линтером (ruff import-rules в Приоритете 3)" — wrong in both
+# halves, since ruff was configured with `E4,E7,E9,F` and checked no
+# import rule at all. Measured before this landed — a
+# `from mergers.script_merger import ScriptMerger`
 # added to `ui/models/session.py` left both blocking gates green: `ruff
 # check --select F821 .` passed and the suite stayed at 952 passed. The
 # full ruff set moved by exactly one finding, F401 unused-import, which
@@ -107,9 +110,19 @@ root_packages = ["ui", "core", "sources", "mergers", "renderers", "domain"]
 # executable with its own spec (§4.2) and imports none of the six —
 # §3 never places it in the hierarchy, so neither does this. `scripts/`
 # is not even a package (no `__init__.py`) and `pyproject.toml` already
-# excludes it from the distribution; `tests/` is "не меняет слои,
-# добавляет инфраструктуру" (ARCHITECTURE.md:567) and imports every
-# layer plus PySide6 by design.
+# excludes it from the distribution; `tests/` "Не меняет слои,
+# добавляет инфраструктуру" and imports every
+# layer plus PySide6 by design (ARCHITECTURE.md:579).
+
+# Known limit, named rather than discovered later: a route through a
+# package outside this list is invisible to both contracts. `ui`
+# importing `launcher`, which imports `mergers`, is green — measured.
+# `launcher` is excluded because §3 never places it in the hierarchy
+# (§4.2 describes it as a second executable) and it imports none of the
+# six today; putting it in would mean deciding where it sits, which §3
+# does not say. Filed rather than decided here.
+# So is the other limit of any static graph: `importlib.import_module`
+# is not an edge grimp can see.
 [[tool.importlinter.contracts]]
 name = "Шесть слоёв ARCHITECTURE.md §3"
 type = "layers"
@@ -127,15 +140,18 @@ layers = [
 # A `layers` contract forbids importing *upwards* and between
 # independent siblings. Importing *downwards past a level* it allows —
 # and all eight known violations are exactly that shape. Measured: with
-# the layers contract alone the tree is `Six layers KEPT`, and the eight
-# edges §3 writes out by hand are not reported at all. Entering them as
-# `ignore_imports` there would have been dead configuration that reads
-# as if the debt were under machine watch.
+# the layers contract alone the tree reports that contract `KEPT`, and
+# the eight edges §3 writes out by hand are not reported at all.
+# Entering them as `ignore_imports` there would have been configuration
+# without effect — the entries do match real edges, so the run prints
+# `KEPT (8 ignored imports)` and looks like debt under machine watch,
+# while the contract was never going to report those edges either way.
 #
 # `ui` → `core` is an *adjacency* rule ("минуя core нельзя"), and that
 # needs `forbidden` with `allow_indirect_imports`. Without the flag the
 # same contract also reports the transitive chains §3 permits —
-# `ui.cli → core → core.pipeline → domain.annotations` and 28 others.
+# `ui.cli → core → core.pipeline → domain.annotations` and 20 others
+# (21 chains, measured by removing the flag).
 [[tool.importlinter.contracts]]
 name = "ui ходит в нижние слои только через core"
 type = "forbidden"
@@ -163,10 +179,12 @@ ignore_imports = [
     "ui.engines.merger_worker -> sources.game_log.combat_dump",
     "ui.engines.pipeline_controller -> domain.annotations",
 ]
-# An `ignore_imports` entry matching nothing passes silently — the run
-# prints `KEPT (3 ignored imports)` and says nothing about the three
-# being fiction. That is precisely how this list would rot once F-C1
-# removes the edges: eight lines of decoration nobody notices. `error`
-# turns the day an edge is repaired into a red build that names the
-# stale line, which is a one-word fix and the correct moment for it.
+# This is import-linter's own default (`forbidden.py`, `EnumField(...,
+# default=AlertLevel.ERROR)`), and it is written out anyway because the
+# list above leans on it: once F-C1 repairs an edge, its line here
+# matches nothing, and `error` turns that day into a red build naming
+# the stale line — a one-word fix at the correct moment — instead of
+# eight lines of decoration nobody notices. Spelled out so that a
+# change of the tool's default cannot disarm that quietly; it is not a
+# behaviour this adds.
 unmatched_ignore_imports_alerting = "error"

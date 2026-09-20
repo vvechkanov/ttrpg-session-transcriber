@@ -1,8 +1,10 @@
 """The layer rules have to be a gate, not a paragraph.
 
-`ARCHITECTURE.md` §3 writes the dependency rules out strictly and then says,
-in the same breath, that they are held by «дисциплиной + ревью». It is right:
-measured on the tree before this landed, a `from mergers.script_merger import
+`ARCHITECTURE.md` §3 wrote the dependency rules out strictly and then said, in
+the same breath, that they were held by «дисциплиной + ревью + линтером (ruff
+import-rules в Приоритете 3)». It was right about the first two and wrong about
+the linter, which was configured with `E4,E7,E9,F` and checked no import rule at
+all: measured on the tree before this landed, a `from mergers.script_merger import
 ScriptMerger` added to `ui/models/session.py` — an edge §3 forbids by name —
 left `ruff check --select F821 .` green and all 952 tests passing. The full
 ruff set moved by exactly one finding, `F401 unused-import`, which would have
@@ -23,8 +25,9 @@ That last group is the reason this file is longer than "we added a tool". A
 `layers` contract forbids importing upwards and between independent siblings;
 importing *downwards past a level* it allows. All eight known violations are
 that shape, so a layers-only configuration reports `KEPT` on the very debt §3
-writes out by hand. Both settings below are what close that gap, and both are
-one word long — which is exactly how they get lost.
+writes out by hand. The second contract and its `allow_indirect_imports` are
+what close that gap, and they are one line each — which is exactly how they
+get lost.
 """
 
 from __future__ import annotations
@@ -152,7 +155,9 @@ def test_the_layers_contract_holds_every_layer_the_document_names():
     `core.peaks -> ui.cli`, then passed both. That is the half of §3 the other
     contract cannot express: `forbidden` watches what `ui` reaches past `core`,
     `layers` is the only thing forbidding the layers below from reaching back
-    up at all."""
+    up at all — and with it the only thing standing between «любой циклический
+    импорт между слоями» and a green run, since a cycle across layers has to
+    contain an upward edge."""
     assert set(_tier_of_each_layer()) == _layers_named_by_architecture()
 
 
@@ -204,8 +209,14 @@ def test_the_adjacency_rule_is_checked_at_all():
     watched, and a gate that catches nothing."""
     contract = _adjacency_contract()
 
+    rules = _dependency_rules()
+
     assert contract["source_modules"] == ["ui"]
-    assert set(contract["forbidden_modules"]) == {"sources", "mergers", "renderers", "domain"}
+    # Read from §3 rather than restated: `ui` reaches the lower layers through
+    # `core`, so what it may not reach directly is exactly what `core` is
+    # allowed to import. Spelling the four names here would make this file the
+    # authority on a list §3 owns.
+    assert set(contract["forbidden_modules"]) == rules["core"]
 
 
 def test_indirect_imports_stay_allowed():
@@ -217,13 +228,18 @@ def test_indirect_imports_stay_allowed():
 
 
 def test_a_repaired_violation_cannot_leave_its_exception_behind():
-    """The eight exceptions record debt that is scheduled to be repaid
-    (F-C1). An `ignore_imports` entry matching nothing passes silently —
-    `lint-imports` prints `KEPT (8 ignored imports)` and says nothing about
-    any of them being fiction. Measured both ways: a ninth entry naming an
-    edge that does not exist fails the run with `error` and passes with
-    `none`. So the day an edge is repaired is a red build naming the stale
-    line, not eight lines of decoration nobody reads."""
+    """The exceptions record debt that is scheduled to be repaid (F-C1), and
+    the day an edge is repaired its line here matches nothing. `error` makes
+    that a red build naming the stale line rather than decoration nobody
+    reads — measured both ways: a ninth entry naming an edge that does not
+    exist fails the run with `error` and passes with `none`.
+
+    `error` is import-linter's own default (`contracts/forbidden.py`:
+    `EnumField(AlertLevel, default=AlertLevel.ERROR)`), so writing it out
+    changes nothing today, and this test guards no behaviour the tool adds.
+    It guards the tree against the tool: the list leans on that default, and
+    a release changing it would disarm the list without touching this
+    repository."""
     assert _adjacency_contract()["unmatched_ignore_imports_alerting"] == "error"
 
 
@@ -239,6 +255,22 @@ def test_the_known_violations_are_listed_rather_than_waived_wholesale():
         source, _, target = entry.partition(" -> ")
         assert source.startswith("ui.engines."), f"{entry!r} waives more than one module"
         assert "*" not in entry, f"{entry!r} is a wildcard, not a named edge"
+
+
+def test_the_number_of_exceptions_is_the_number_the_document_prints():
+    """§3 stopped hedging when the machine started counting: it now says the
+    violating edges are exactly N, and `ignore_imports` is where that N lives.
+    Nothing tied the two together, so a ninth entry — a real new violation,
+    waived — would leave every test here green while §3 went on printing the
+    old number. The digit is read from §3 rather than repeated, for the reason
+    the layer names are."""
+    stated = re.search(r"Нарушающих рёбер ровно `(\d+)`", ARCHITECTURE.read_text(encoding="utf-8"))
+
+    assert stated, "§3 no longer prints how many edges violate the rule"
+    assert len(_adjacency_contract()["ignore_imports"]) == int(stated.group(1)), (
+        f"§3 says {stated.group(1)} violating edges, the contract waives "
+        f"{len(_adjacency_contract()['ignore_imports'])}"
+    )
 
 
 def test_ci_blocks_on_the_layer_contracts():
