@@ -148,9 +148,16 @@ def test_default_value(scratch_settings, field, expected):
 
 
 def test_default_working_folder_points_at_sessions(scratch_settings):
-    # Путь зависит от домашнего каталога, поэтому проверяется хвост, а
-    # не полное совпадение.
-    assert "Sessions" in AppPreferences().workingFolder
+    """Дефолт — именно ``~/Sessions``, а не что-то, где есть это слово.
+
+    Проверка по вхождению («Sessions» in путь) зеленела бы и для
+    ``~/Sessions-old``, и для ``~/ArchivedSessions``, и для чего угодно
+    с таким родительским каталогом. Контракт же
+    ``_default_working_folder`` конкретен: ``Path.home() / "Sessions"``,
+    — так и сравнивается. Сравнение идёт через ``Path``, чтобы не
+    зависеть от разделителя платформы.
+    """
+    assert Path(AppPreferences().workingFolder) == Path.home() / "Sessions"
 
 
 def _declared_properties() -> set[str]:
@@ -218,6 +225,49 @@ def test_every_property_has_a_persistence_check(scratch_settings):
     )
 
 
+def _collision_probes() -> list[dict[str, object]]:
+    """Два набора значений, вместе различающие ЛЮБУЮ пару полей.
+
+    ``_MUTATIONS`` для этой пробы не годится, и внешнее ревью назвало
+    почему: там несколько пар делят значение — ``interfaceLanguage`` и
+    ``asrLanguage`` оба ``"en"``, ``asrComputeType`` и
+    ``gigaamPrecision`` оба ``"int8"``, булевы поля тоже совпадают. Если
+    склеятся ключи ВНУТРИ такой пары, оба поля всё равно прочитаются
+    ожидаемыми, и проба останется зелёной ровно на том случае, ради
+    которого написана.
+
+    Строкам выдаётся уникальный маркер с именем поля — этого хватает за
+    один проход. С булевыми так нельзя: значений всего два, а полей три,
+    и в любом одном проходе какая-то пара неизбежно совпадёт. Поэтому
+    проходов два, и каждому булевому полю достаётся СВОЯ пара значений
+    по проходам: (False, True), (True, False), (True, True). Любые два
+    поля различаются хотя бы в одном проходе, а склеенный ключ отдаёт
+    значение последней записи — то есть в этом проходе и попадается.
+
+    Значения намеренно не «правдоподобные»: проба проверяет адресацию
+    хранилища, а не разбор значений, и правдоподобие тут маскировало бы
+    совпадения.
+    """
+    bool_fields = [f for f, v in _MUTATIONS.items() if isinstance(v, bool)]
+    # Различные битовые пары, по одной на булево поле.
+    patterns = [(False, True), (True, False), (True, True), (False, False)]
+    assert len(bool_fields) <= len(patterns), (
+        "булевых полей стало больше, чем заготовлено различающих пар — "
+        "добавь проход или пары, иначе проба перестанет различать их"
+    )
+
+    probes: list[dict[str, object]] = []
+    for pass_index in (0, 1):
+        probe: dict[str, object] = {}
+        for field, value in _MUTATIONS.items():
+            if isinstance(value, bool):
+                probe[field] = patterns[bool_fields.index(field)][pass_index]
+            else:
+                probe[field] = f"probe{pass_index}-{field}"
+        probes.append(probe)
+    return probes
+
+
 def test_all_fields_share_one_store_without_collisions(scratch_settings):
     """Все поля пишутся в ОДИН INI и читаются оттуда же.
 
@@ -229,20 +279,22 @@ def test_all_fields_share_one_store_without_collisions(scratch_settings):
     (``asr/beam_size``, ``asr/num_threads``, ``chunking/chunk_chars``),
     так что копипаста сеттера — правдоподобная мутация.
     """
-    prefs = AppPreferences()
-    for field, value in _MUTATIONS.items():
-        setattr(prefs, field, value)
+    for pass_index, probe in enumerate(_collision_probes()):
+        prefs = AppPreferences()
+        for field, value in probe.items():
+            setattr(prefs, field, value)
 
-    restarted = AppPreferences()
-    wrong = {
-        field: (value, getattr(restarted, field))
-        for field, value in _MUTATIONS.items()
-        if getattr(restarted, field) != value
-    }
-    assert not wrong, (
-        "после записи всех полей в одно хранилище часть читается не "
-        f"своей — похоже на коллизию ключей QSettings: {wrong}"
-    )
+        restarted = AppPreferences()
+        wrong = {
+            field: (value, getattr(restarted, field))
+            for field, value in probe.items()
+            if getattr(restarted, field) != value
+        }
+        assert not wrong, (
+            f"проход {pass_index}: после записи всех полей в одно "
+            "хранилище часть читается не своей — похоже на коллизию "
+            f"ключей QSettings: {wrong}"
+        )
 
 
 @pytest.mark.parametrize(("field", "value"), sorted(_MUTATIONS.items()))
