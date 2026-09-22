@@ -1,16 +1,28 @@
-"""Integration test: ``AppPreferences`` persists through ``QSettings``.
+"""``AppPreferences`` переживает перезапуск через ``QSettings``.
 
-Uses a scratch organization so we don't stomp the user's real INI,
-writes a few keys, constructs a second instance, asserts the values
-survived. Run as::
+Файл до этого был скриптом: ``main()`` с ручными ``_assert`` и вызовом
+под ``if __name__ == "__main__"``. pytest собирал из него ноль тестов,
+то есть CI не исполнял ни одной из проверок ниже. Хуже: за блоком
+``__main__`` лежала функция ``_renderer_round_trip`` с настоящими
+``assert``, дописанная починкой по замечанию ревью (коммит ``c69203a``,
+«fix(renderers): close the holes review found in feature #8»). Её не
+собирал pytest (имя с подчёркиванием) и не звал ``main()`` — проверка не
+выполнялась вообще никаким способом. Здесь она восстановлена как
+``test_renderer_survives_restart``.
 
-    QT_QPA_PLATFORM=offscreen python tests/ui_qml_smoke/test_app_preferences.py
+Изоляция сделана строже, чем в скрипте. Тот уводил ``QSettings`` в общий
+``TempLocation`` и звал ``.clear()`` — то есть чистил тот же INI, в
+который смотрит ``tests/ui_qml_smoke/test_settings_screen_promises.py``.
+Здесь хранилище уводится в собственный ``tmp_path`` теста и путь
+возвращается на место после него.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+import pytest
 
 from PySide6.QtCore import QSettings, QStandardPaths
 from PySide6.QtGui import QGuiApplication
@@ -21,67 +33,142 @@ sys.path.insert(0, str(ROOT))
 from ui.models.app_preferences import AppPreferences, _to_bool  # noqa: E402
 
 
-def _assert(cond: bool, msg: str) -> None:
-    if not cond:
-        sys.stderr.write(f"FAIL: {msg}\n")
-        raise SystemExit(1)
-
-
-def main() -> int:
-    # Scratch org/app so we don't touch real user settings. Point
-    # QSettings at a temp dir to keep the test hermetic.
-    QSettings.setPath(
-        QSettings.Format.IniFormat,
-        QSettings.Scope.UserScope,
-        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation),
-    )
-
-    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
+def _ensure_app() -> QGuiApplication:
+    inst = QGuiApplication.instance()
+    if inst is not None:
+        return inst
+    app = QGuiApplication(sys.argv or [""])
     app.setApplicationName("Session Transcriber")
     app.setOrganizationName("Session Transcriber")
+    return app
 
-    # Clear any previous run's leftovers.
-    QSettings(
-        QSettings.Format.IniFormat,
-        QSettings.Scope.UserScope,
-        "Session Transcriber",
-        "Session Transcriber",
-    ).clear()
 
-    # _to_bool sanity
-    _assert(_to_bool(True) is True, "bool True")
-    _assert(_to_bool("true") is True, "str 'true'")
-    _assert(_to_bool("false") is False, "str 'false'")
-    _assert(_to_bool(0) is False, "int 0")
-    _assert(_to_bool("1") is True, "str '1'")
+@pytest.fixture()
+def scratch_settings(tmp_path: Path):
+    """Увести INI ``AppPreferences`` в отдельный каталог на один тест.
 
+    ``AppPreferences`` открывает хранилище, называя организацию и
+    приложение явно, поэтому имена на ``QGuiApplication`` его никуда не
+    уводят — подменять надо путь формата.
+    """
+    _ensure_app()
+    QSettings.setPath(
+        QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path)
+    )
+    try:
+        yield tmp_path
+    finally:
+        # Вернуть общий temp: соседние тесты уводят хранилище туда же
+        # сами, но полагаться на порядок запуска нельзя.
+        QSettings.setPath(
+            QSettings.Format.IniFormat,
+            QSettings.Scope.UserScope,
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.TempLocation
+            ),
+        )
+
+
+# Значения по умолчанию, объявленные ui/models/app_preferences.py.
+# Список держится полным намеренно: настройка, добавленная без строки
+# здесь, — это настройка, чей дефолт не проверяет никто.
+_DEFAULTS = {
+    "mergerMaxGap": "1.0",
+    "mergerOocMode": "skip",
+    "interfaceLanguage": "ru",
+    "showTooltips": True,
+    "soundOnDone": True,
+    "asrDevice": "cuda",
+    "asrComputeType": "float16",
+    "asrBeamSize": "5",
+    "asrLanguage": "ru",
+    "gigaamVariant": "rnnt",
+    "gigaamPrecision": "fp32",
+    "asrNumThreads": "4",
+    "chunkingEnabled": False,
+    "chunkingChunkChars": "40000",
+    "chunkingOverlapRatio": "0.20",
+    "renderer": "plain-text",
+}
+
+# Значение, отличное от дефолта, для каждого поля — ими проверяется
+# запись на диск.
+_MUTATIONS = {
+    "workingFolder": "D:/TTRPG/Sessions",
+    "mergerMaxGap": "2.5",
+    "mergerOocMode": "italic",
+    "interfaceLanguage": "en",
+    "showTooltips": False,
+    "soundOnDone": False,
+    "asrDevice": "cpu",
+    "asrComputeType": "int8",
+    "asrBeamSize": "8",
+    "asrLanguage": "en",
+    "gigaamVariant": "e2e_rnnt",
+    "gigaamPrecision": "int8",
+    "asrNumThreads": "2",
+    "chunkingEnabled": True,
+    "chunkingChunkChars": "60000",
+    "chunkingOverlapRatio": "0.35",
+    "renderer": "combat-aware",
+}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(True, True), ("true", True), ("false", False), (0, False), ("1", True)],
+)
+def test_to_bool_reads_qsettings_spellings(raw, expected):
+    """QSettings отдаёт булево строкой, и разбор — не тождество."""
+    assert _to_bool(raw) is expected
+
+
+@pytest.mark.parametrize(("field", "expected"), sorted(_DEFAULTS.items()))
+def test_default_value(scratch_settings, field, expected):
     prefs = AppPreferences()
+    assert getattr(prefs, field) == expected
 
-    # Defaults — Sessions folder in the home dir + all bool-ish true.
-    _assert("Sessions" in prefs.workingFolder, f"default folder: {prefs.workingFolder!r}")
-    _assert(prefs.mergerMaxGap == "1.0", f"default gap: {prefs.mergerMaxGap!r}")
-    _assert(prefs.mergerOocMode == "skip", f"default ooc: {prefs.mergerOocMode!r}")
-    _assert(prefs.interfaceLanguage == "ru", f"default lang: {prefs.interfaceLanguage!r}")
-    _assert(prefs.showTooltips is True, "default tooltips")
-    _assert(prefs.soundOnDone is True, "default sound")
-    _assert(prefs.asrDevice == "cuda", f"default device: {prefs.asrDevice!r}")
-    _assert(prefs.asrComputeType == "float16", f"default compute: {prefs.asrComputeType!r}")
-    _assert(prefs.asrBeamSize == "5", f"default beam: {prefs.asrBeamSize!r}")
-    _assert(prefs.asrLanguage == "ru", f"default asr lang: {prefs.asrLanguage!r}")
-    _assert(prefs.gigaamVariant == "rnnt", f"default variant: {prefs.gigaamVariant!r}")
-    _assert(prefs.gigaamPrecision == "fp32", f"default precision: {prefs.gigaamPrecision!r}")
-    _assert(prefs.asrNumThreads == "4", f"default threads: {prefs.asrNumThreads!r}")
-    _assert(prefs.chunkingEnabled is False, "default chunking enabled")
-    _assert(prefs.chunkingChunkChars == "40000", f"default chunk_chars: {prefs.chunkingChunkChars!r}")
-    _assert(prefs.chunkingOverlapRatio == "0.20", f"default overlap: {prefs.chunkingOverlapRatio!r}")
 
-    # Mutate every field.
-    prefs.workingFolder = "D:/TTRPG/Sessions"
-    prefs.mergerMaxGap = "2.5"
-    prefs.mergerOocMode = "italic"
-    prefs.interfaceLanguage = "en"
-    prefs.showTooltips = False
-    prefs.soundOnDone = False
+def test_default_working_folder_points_at_sessions(scratch_settings):
+    # Путь зависит от домашнего каталога, поэтому проверяется хвост, а
+    # не полное совпадение.
+    assert "Sessions" in AppPreferences().workingFolder
+
+
+@pytest.mark.parametrize(("field", "value"), sorted(_MUTATIONS.items()))
+def test_value_survives_restart(scratch_settings, field, value):
+    """Второй экземпляр видит запись — значит она дошла до диска.
+
+    Проверять на том же объекте бессмысленно: поле, которое только
+    держит значение в памяти и ничего не пишет, прошло бы такую
+    проверку.
+    """
+    prefs = AppPreferences()
+    assert getattr(prefs, field) != value, (
+        f"{field}: подставленное значение совпало с дефолтом — "
+        "проверка перестала различать запись и её отсутствие"
+    )
+    setattr(prefs, field, value)
+
+    assert getattr(AppPreferences(), field) == value
+
+
+def test_renderer_survives_restart(scratch_settings):
+    """Выбор рендерера переживает перезапуск, как и соседи.
+
+    Проверка восстановлена из мёртвой функции ``_renderer_round_trip``,
+    лежавшей за блоком ``__main__`` и не выполнявшейся никогда.
+    """
+    prefs = AppPreferences()
+    assert prefs.renderer == "plain-text", "по умолчанию остаётся старый формат"
+
+    prefs.renderer = "combat-aware"
+    assert AppPreferences().renderer == "combat-aware"
+
+
+def test_build_asr_options_coerces_strings(scratch_settings):
+    """Настройки хранятся строками, а ``AsrOptions`` ждёт числа."""
+    prefs = AppPreferences()
     prefs.asrDevice = "cpu"
     prefs.asrComputeType = "int8"
     prefs.asrBeamSize = "8"
@@ -89,57 +176,30 @@ def main() -> int:
     prefs.gigaamVariant = "e2e_rnnt"
     prefs.gigaamPrecision = "int8"
     prefs.asrNumThreads = "2"
+
+    opts = AppPreferences().build_asr_options()
+
+    assert opts.device == "cpu"
+    assert opts.compute_type == "int8"
+    assert opts.language == "en"
+    assert opts.gigaam_variant == "e2e_rnnt"
+    assert opts.gigaam_precision == "int8"
+    # Числа: тип проверяется отдельно от значения — строка "8" равна 8
+    # не была бы, но `int` с `str` сравнивать и не надо, а вот
+    # `beam_size == "8"` прошло бы, будь коэрция забыта.
+    assert opts.beam_size == 8 and isinstance(opts.beam_size, int)
+    assert opts.num_threads == 2 and isinstance(opts.num_threads, int)
+
+
+def test_build_chunking_options_coerces_strings(scratch_settings):
+    prefs = AppPreferences()
     prefs.chunkingEnabled = True
     prefs.chunkingChunkChars = "60000"
     prefs.chunkingOverlapRatio = "0.35"
 
-    # A second instance should pick up the persisted values.
-    prefs2 = AppPreferences()
-    _assert(prefs2.workingFolder == "D:/TTRPG/Sessions", f"round-trip folder: {prefs2.workingFolder!r}")
-    _assert(prefs2.mergerMaxGap == "2.5", f"round-trip gap: {prefs2.mergerMaxGap!r}")
-    _assert(prefs2.mergerOocMode == "italic", f"round-trip ooc: {prefs2.mergerOocMode!r}")
-    _assert(prefs2.interfaceLanguage == "en", f"round-trip lang: {prefs2.interfaceLanguage!r}")
-    _assert(prefs2.showTooltips is False, "round-trip tooltips")
-    _assert(prefs2.soundOnDone is False, "round-trip sound")
-    _assert(prefs2.asrDevice == "cpu", f"round-trip device: {prefs2.asrDevice!r}")
-    _assert(prefs2.asrComputeType == "int8", f"round-trip compute: {prefs2.asrComputeType!r}")
-    _assert(prefs2.asrBeamSize == "8", f"round-trip beam: {prefs2.asrBeamSize!r}")
-    _assert(prefs2.asrLanguage == "en", f"round-trip asr lang: {prefs2.asrLanguage!r}")
-    _assert(prefs2.gigaamVariant == "e2e_rnnt", f"round-trip variant: {prefs2.gigaamVariant!r}")
-    _assert(prefs2.gigaamPrecision == "int8", f"round-trip precision: {prefs2.gigaamPrecision!r}")
-    _assert(prefs2.asrNumThreads == "2", f"round-trip threads: {prefs2.asrNumThreads!r}")
-    _assert(prefs2.chunkingEnabled is True, "round-trip chunking enabled")
-    _assert(prefs2.chunkingChunkChars == "60000", f"round-trip chunk_chars: {prefs2.chunkingChunkChars!r}")
-    _assert(prefs2.chunkingOverlapRatio == "0.35", f"round-trip overlap: {prefs2.chunkingOverlapRatio!r}")
+    copts = AppPreferences().build_chunking_options()
 
-    # build_asr_options snapshot — strings coerced to ints, others pass through.
-    opts = prefs2.build_asr_options()
-    _assert(opts.device == "cpu", f"opts.device: {opts.device!r}")
-    _assert(opts.compute_type == "int8", f"opts.compute_type: {opts.compute_type!r}")
-    _assert(opts.beam_size == 8, f"opts.beam_size: {opts.beam_size!r}")
-    _assert(opts.language == "en", f"opts.language: {opts.language!r}")
-    _assert(opts.gigaam_variant == "e2e_rnnt", f"opts.gigaam_variant: {opts.gigaam_variant!r}")
-    _assert(opts.gigaam_precision == "int8", f"opts.gigaam_precision: {opts.gigaam_precision!r}")
-    _assert(opts.num_threads == 2, f"opts.num_threads: {opts.num_threads!r}")
-
-    # build_chunking_options — string-to-int/float coercion plus enabled bool.
-    copts = prefs2.build_chunking_options()
-    _assert(copts.enabled is True, f"copts.enabled: {copts.enabled!r}")
-    _assert(copts.chunk_chars == 60_000, f"copts.chunk_chars: {copts.chunk_chars!r}")
-    _assert(abs(copts.overlap_ratio - 0.35) < 1e-9, f"copts.overlap_ratio: {copts.overlap_ratio!r}")
-
-    print("OK: AppPreferences round-trips through QSettings(IniFormat)")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
-def _renderer_round_trip() -> None:
-    """The renderer choice must survive a restart like its neighbours."""
-    prefs = AppPreferences()
-    assert prefs.renderer == "plain-text", "default must stay the old format"
-
-    prefs.renderer = "combat-aware"
-    assert AppPreferences().renderer == "combat-aware"
+    assert copts.enabled is True
+    assert copts.chunk_chars == 60_000 and isinstance(copts.chunk_chars, int)
+    assert isinstance(copts.overlap_ratio, float)
+    assert abs(copts.overlap_ratio - 0.35) < 1e-9

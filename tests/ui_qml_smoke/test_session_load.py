@@ -1,19 +1,18 @@
-"""Integration test: ``SessionMeta.openSession`` feeds TrackList/SourceList.
+"""``SessionMeta.openSession`` наполняет обе списочные модели.
 
-Creates a temp session dir with fake audio + chat + combat files,
-invokes ``openSession``, and asserts the list models now hold rows
-sourced from ``core.file_matchers``.
-
-Run as::
-
-    QT_QPA_PLATFORM=offscreen python tests/ui_qml_smoke/test_session_load.py
+Файл был скриптом с ``main()``: pytest собирал из него ноль тестов.
+Проверяется здесь именно ПРОВОДКА — сигнал ``sessionOpened`` доходит до
+``TrackListModel.loadFromDir`` и ``SourceListModel.loadFromDir``, — а её
+не проверяет ни ``tests/test_core_file_matchers.py`` (чистый core), ни
+``tests/test_ui_models_session.py``.
 """
 
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
+
+import pytest
 
 from PySide6.QtGui import QGuiApplication
 
@@ -23,61 +22,92 @@ sys.path.insert(0, str(ROOT))
 from ui.models import SessionMeta, SourceListModel, TrackListModel  # noqa: E402
 
 
-def _assert(cond: bool, msg: str) -> None:
-    if not cond:
-        sys.stderr.write(f"FAIL: {msg}\n")
-        raise SystemExit(1)
+@pytest.fixture(scope="module")
+def app() -> QGuiApplication:
+    inst = QGuiApplication.instance()
+    if inst is not None:
+        return inst
+    created = QGuiApplication(sys.argv or [""])
+    created.setApplicationName("session-load-test")
+    created.setOrganizationName("session-load-test")
+    return created
 
 
-def main() -> int:
-    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
-    app.setApplicationName("smoke")
-    app.setOrganizationName("smoke")
+@pytest.fixture()
+def opened_session(app: QGuiApplication, tmp_path: Path):
+    """Папка сессии в стиле Craig, открытая через ``openSession``."""
+    campaign = tmp_path / "Storm King"
+    session = campaign / "Session 14"
+    session.mkdir(parents=True)
 
-    with tempfile.TemporaryDirectory() as tmp_root:
-        campaign = Path(tmp_root) / "Storm King"
-        campaign.mkdir()
-        session = campaign / "Session 14"
-        session.mkdir()
+    # Подорожечные flac плюс сведённый микс, который обязан отсеяться.
+    (session / "Andrey.flac").write_bytes(b"\x00" * 16)
+    (session / "Boris.flac").write_bytes(b"\x00" * 16)
+    (session / "craig-mix.flac").write_bytes(b"\x00" * 16)
+    (session / "fvtt-log.txt").write_text("fake fvtt log", encoding="utf-8")
+    (session / "combat-goblins.json").write_text("{}", encoding="utf-8")
 
-        # Craig-style per-speaker flacs + a mix-down that must be skipped.
-        (session / "Andrey.flac").write_bytes(b"\x00" * 16)
-        (session / "Boris.flac").write_bytes(b"\x00" * 16)
-        (session / "craig-mix.flac").write_bytes(b"\x00" * 16)  # must be filtered
-        # Chat + combat logs.
-        (session / "fvtt-log.txt").write_text("fake fvtt log", encoding="utf-8")
-        (session / "combat-goblins.json").write_text("{}", encoding="utf-8")
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    sources = SourceListModel()
+    meta.sessionOpened.connect(tracks.loadFromDir)
+    meta.sessionOpened.connect(sources.loadFromDir)
 
-        meta = SessionMeta()
-        tracks = TrackListModel()
-        sources = SourceListModel()
-        meta.sessionOpened.connect(tracks.loadFromDir)
-        meta.sessionOpened.connect(sources.loadFromDir)
-
-        meta.openSession(str(session))
-
-        _assert(meta.sessionTitle == "Session 14", f"session title: {meta.sessionTitle!r}")
-        _assert(meta.campaignTitle == "Storm King", f"campaign: {meta.campaignTitle!r}")
-
-        # 2 per-speaker tracks (craig mix filtered out).
-        _assert(tracks.rowCount() == 2, f"tracks: {tracks.rowCount()}")
-        names = {tracks.data(tracks.index(i, 0), TrackListModel.NameRole) for i in range(2)}
-        _assert(names == {"Andrey", "Boris"}, f"names: {names}")
-
-        # 2 sources (1 fvtt log + 1 combat log).
-        _assert(sources.rowCount() == 2, f"sources: {sources.rowCount()}")
-        parser_ids = [
-            sources.data(sources.index(i, 0), SourceListModel.ParserIdRole)
-            for i in range(2)
-        ]
-        _assert(
-            "foundry-chat" in parser_ids and "combat-log" in parser_ids,
-            f"parsers: {parser_ids}",
-        )
-
-    print("OK: SessionMeta.openSession populates both list models via core.file_matchers")
-    return 0
+    meta.openSession(str(session))
+    return meta, tracks, sources
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def test_titles_come_from_the_path(opened_session):
+    meta, _tracks, _sources = opened_session
+    assert meta.sessionTitle == "Session 14"
+    assert meta.campaignTitle == "Storm King"
+
+
+def test_tracks_model_is_filled_and_mixdown_filtered(opened_session):
+    """Микс-даун Craig — не дорожка игрока, и в список он попасть не должен."""
+    _meta, tracks, _sources = opened_session
+
+    assert tracks.rowCount() == 2, (
+        f"дорожек {tracks.rowCount()}, ожидалось 2 — микс-даун не отсеян "
+        "или сигнал не дошёл до модели"
+    )
+    names = {
+        tracks.data(tracks.index(i, 0), TrackListModel.NameRole)
+        for i in range(tracks.rowCount())
+    }
+    assert names == {"Andrey", "Boris"}
+
+
+def test_sources_model_is_filled_with_both_parsers(opened_session):
+    _meta, _tracks, sources = opened_session
+
+    assert sources.rowCount() == 2, (
+        f"источников {sources.rowCount()}, ожидалось 2 — сигнал не дошёл "
+        "до модели источников"
+    )
+    parser_ids = {
+        sources.data(sources.index(i, 0), SourceListModel.ParserIdRole)
+        for i in range(sources.rowCount())
+    }
+    assert parser_ids == {"foundry-chat", "combat-log"}
+
+
+def test_models_stay_empty_without_the_signal(app: QGuiApplication, tmp_path: Path):
+    """Контрольный случай: без подключения сигнала модели пусты.
+
+    Без него три теста выше зеленели бы и на модели, которая наполняется
+    сама по себе, и проводку они бы не проверяли вовсе.
+    """
+    session = tmp_path / "Camp" / "Session 1"
+    session.mkdir(parents=True)
+    (session / "Andrey.flac").write_bytes(b"\x00" * 16)
+    (session / "fvtt-log.txt").write_text("fake fvtt log", encoding="utf-8")
+
+    meta = SessionMeta()
+    tracks = TrackListModel()
+    sources = SourceListModel()
+    # Сигнал намеренно НЕ подключён.
+    meta.openSession(str(session))
+
+    assert tracks.rowCount() == 0
+    assert sources.rowCount() == 0
