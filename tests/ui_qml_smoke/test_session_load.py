@@ -1,83 +1,157 @@
-"""Integration test: ``SessionMeta.openSession`` feeds TrackList/SourceList.
+"""Открытие сессии наполняет обе списочные модели — через ПРОДАКШН-проводку.
 
-Creates a temp session dir with fake audio + chat + combat files,
-invokes ``openSession``, and asserts the list models now hold rows
-sourced from ``core.file_matchers``.
+Файл был скриптом с ``main()``: pytest собирал из него ноль тестов.
 
-Run as::
+Проводку здесь гоняет ``ui.app_qml.build_shell`` — тот самый вызов, что
+собирает объектный граф для настоящего приложения, — а не пересобранные
+в фикстуре ``connect``. Разница не стилистическая, и внешнее ревью
+поймало её первым: тест, который сам соединяет ``sessionOpened`` с
+загрузчиками, остаётся зелёным, даже если ``build_shell`` перестанет их
+соединять. То есть он проверял бы ``SessionMeta`` и загрузчики моделей,
+но не точку входа, которой служит, — ровно то, что запрещает
+``AGENTS.md`` («Фича должна доходить до точки входа»). Докстринг самого
+``build_shell`` требует того же: «every consumer … drives the same
+wiring instead of re-deriving it».
 
-    QT_QPA_PLATFORM=offscreen python tests/ui_qml_smoke/test_session_load.py
+Отдельного контрольного случая («без подключения сигнала модели пусты»)
+здесь больше нет, и он не нужен: если ``build_shell`` потеряет любой из
+двух ``connect``, соответствующая модель останется пустой и проверки
+ниже покраснеют сами.
+
+Замер: весь файл идёт 0.40 с, три прогона подряд одинаковы. Аудио в
+фикстуре — настоящие крошечные WAV, а не нулевые байты, и это про
+время: ``build_shell`` поднимает на открытие папки ``PeaksWorker``, и
+на неразбираемых файлах извлечение пиков тянуло 11 секунд.
 """
 
 from __future__ import annotations
 
+import io
 import sys
-import tempfile
+import wave
 from pathlib import Path
 
-from PySide6.QtGui import QGuiApplication
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from ui.models import SessionMeta, SourceListModel, TrackListModel  # noqa: E402
+# Как и у соседей: core.pipeline импортируется до ui.*, чтобы не поймать
+# циклический импорт через sources/__init__.
+from core.pipeline import run as _warm  # noqa: F401,E402
+
+from PySide6.QtCore import QSettings, QStandardPaths, QThread  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtQuickControls2 import QQuickStyle  # noqa: E402
+
+from ui.app_qml import build_shell  # noqa: E402
+from ui.models import SourceListModel, TrackListModel  # noqa: E402
 
 
-def _assert(cond: bool, msg: str) -> None:
-    if not cond:
-        sys.stderr.write(f"FAIL: {msg}\n")
-        raise SystemExit(1)
+def _silent_wav_bytes(duration_sec: float = 0.05, sample_rate: int = 8_000) -> bytes:
+    """Минимальный валидный моно-PCM WAV, без внешних зависимостей."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * int(duration_sec * sample_rate))
+    return buf.getvalue()
 
 
-def main() -> int:
-    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
-    app.setApplicationName("smoke")
-    app.setOrganizationName("smoke")
+@pytest.fixture(scope="module")
+def opened_session(tmp_path_factory):
+    """Настоящий shell, открывший папку сессии в стиле Craig.
 
-    with tempfile.TemporaryDirectory() as tmp_root:
-        campaign = Path(tmp_root) / "Storm King"
-        campaign.mkdir()
-        session = campaign / "Session 14"
-        session.mkdir()
+    Область module: ``build_shell`` грузит ``Main.qml`` целиком, и делать
+    это на каждую проверку незачем — ни одна из них ничего не меняет.
+    """
+    tmp_root = tmp_path_factory.mktemp("session-load")
 
-        # Craig-style per-speaker flacs + a mix-down that must be skipped.
-        (session / "Andrey.flac").write_bytes(b"\x00" * 16)
-        (session / "Boris.flac").write_bytes(b"\x00" * 16)
-        (session / "craig-mix.flac").write_bytes(b"\x00" * 16)  # must be filtered
-        # Chat + combat logs.
-        (session / "fvtt-log.txt").write_text("fake fvtt log", encoding="utf-8")
-        (session / "combat-goblins.json").write_text("{}", encoding="utf-8")
+    # QSettings уводится до build_shell: он строит AppPreferences и
+    # ModelRegistry, которые читают хранилище в конструкторе. Обратно
+    # путь не возвращается — прочитать исходный QSettings не даёт; см.
+    # ту же оговорку в test_app_preferences.py.
+    QSettings.setPath(
+        QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_root)
+    )
 
-        meta = SessionMeta()
-        tracks = TrackListModel()
-        sources = SourceListModel()
-        meta.sessionOpened.connect(tracks.loadFromDir)
-        meta.sessionOpened.connect(sources.loadFromDir)
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv or [""])
+    QQuickStyle.setStyle("Basic")
 
-        meta.openSession(str(session))
+    session = tmp_root / "Storm King" / "Session 14"
+    session.mkdir(parents=True)
+    # Подорожечные записи плюс сведённый микс, который обязан отсеяться.
+    #
+    # Файлы НАСТОЯЩИЕ, а не шестнадцать нулевых байт, и это про время:
+    # build_shell поднимает PeaksWorker на каждое открытие папки, и на
+    # неразбираемых файлах извлечение пиков тянулось 11 секунд, тогда
+    # как на валидных укладывается в доли. Замерено.
+    for name in ("Andrey.wav", "Boris.wav", "craig-mix.wav"):
+        (session / name).write_bytes(_silent_wav_bytes())
+    (session / "fvtt-log.txt").write_text("fake fvtt log", encoding="utf-8")
+    (session / "combat-goblins.json").write_text("{}", encoding="utf-8")
 
-        _assert(meta.sessionTitle == "Session 14", f"session title: {meta.sessionTitle!r}")
-        _assert(meta.campaignTitle == "Storm King", f"campaign: {meta.campaignTitle!r}")
+    shell = build_shell(app)
+    assert shell.engine.rootObjects(), "Main.qml не разобрался — сломана сама проба"
 
-        # 2 per-speaker tracks (craig mix filtered out).
-        _assert(tracks.rowCount() == 2, f"tracks: {tracks.rowCount()}")
-        names = {tracks.data(tracks.index(i, 0), TrackListModel.NameRole) for i in range(2)}
-        _assert(names == {"Andrey", "Boris"}, f"names: {names}")
-
-        # 2 sources (1 fvtt log + 1 combat log).
-        _assert(sources.rowCount() == 2, f"sources: {sources.rowCount()}")
-        parser_ids = [
-            sources.data(sources.index(i, 0), SourceListModel.ParserIdRole)
-            for i in range(2)
-        ]
-        _assert(
-            "foundry-chat" in parser_ids and "combat-log" in parser_ids,
-            f"parsers: {parser_ids}",
+    shell.session_meta.openSession(str(session))
+    try:
+        yield shell
+    finally:
+        # Дождаться PeaksWorker. Без этого Qt печатает «QThread:
+        # Destroyed while thread '' is still running» на выходе — то
+        # самое teardown-сообщение, которого в наборе и так хватает;
+        # заводить ещё одно, да ещё и своё, нельзя.
+        thread = shell.peaks_state.get("thread")
+        if isinstance(thread, QThread) and thread.isRunning():
+            thread.quit()
+            thread.wait(5000)
+        QSettings.setPath(
+            QSettings.Format.IniFormat,
+            QSettings.Scope.UserScope,
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.TempLocation
+            ),
         )
 
-    print("OK: SessionMeta.openSession populates both list models via core.file_matchers")
-    return 0
+
+def test_titles_come_from_the_path(opened_session):
+    assert opened_session.session_meta.sessionTitle == "Session 14"
+    assert opened_session.session_meta.campaignTitle == "Storm King"
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def test_tracks_model_is_filled_and_mixdown_filtered(opened_session):
+    """Микс-даун Craig — не дорожка игрока, и в список он попасть не должен.
+
+    Пустая модель здесь означает, что ``build_shell`` перестал соединять
+    ``sessionOpened`` с ``TrackListModel.loadFromDir``; про это сказано в
+    сообщении, чтобы читатель не искал дефект в отборе файлов.
+    """
+    tracks = opened_session.tracks_model
+
+    assert tracks.rowCount() == 2, (
+        f"дорожек {tracks.rowCount()}, ожидалось 2 — либо микс-даун не "
+        "отсеян, либо build_shell больше не соединяет sessionOpened с "
+        "TrackListModel.loadFromDir"
+    )
+    names = {
+        tracks.data(tracks.index(i, 0), TrackListModel.NameRole)
+        for i in range(tracks.rowCount())
+    }
+    assert names == {"Andrey", "Boris"}
+
+
+def test_sources_model_is_filled_with_both_parsers(opened_session):
+    sources = opened_session.sources_model
+
+    assert sources.rowCount() == 2, (
+        f"источников {sources.rowCount()}, ожидалось 2 — возможно, "
+        "build_shell больше не соединяет sessionOpened с "
+        "SourceListModel.loadFromDir"
+    )
+    parser_ids = {
+        sources.data(sources.index(i, 0), SourceListModel.ParserIdRole)
+        for i in range(sources.rowCount())
+    }
+    assert parser_ids == {"foundry-chat", "combat-log"}
