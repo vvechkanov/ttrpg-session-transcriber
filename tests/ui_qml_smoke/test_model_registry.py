@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from core.backend_installers import BACKENDS, BackendId  # noqa: E402
 from ui.models.model_registry import (  # noqa: E402
     _BACKEND_TO_ASR_ID,
+    _SETTINGS_KEY_ACTIVE,
     ModelRegistry,
     _format_size,
 )
@@ -47,6 +48,21 @@ def app() -> QGuiApplication:
     return created
 
 
+def _stored_active_backend():
+    """Сырое значение ключа активного бэкенда в INI.
+
+    Хранилище открывается теми же четырьмя аргументами, что и внутри
+    ``ModelRegistry`` (``model_registry.py:168``), поэтому читается
+    ровно тот файл, в который пишет он.
+    """
+    return QSettings(
+        QSettings.Format.IniFormat,
+        QSettings.Scope.UserScope,
+        "Session Transcriber",
+        "Session Transcriber",
+    ).value(_SETTINGS_KEY_ACTIVE)
+
+
 @pytest.fixture()
 def registry(app: QGuiApplication, tmp_path: Path) -> ModelRegistry:
     """Реестр поверх собственного INI.
@@ -55,6 +71,13 @@ def registry(app: QGuiApplication, tmp_path: Path) -> ModelRegistry:
     тест отказа ниже проверяет, что при отказе запись НЕ случилась.
     Без своего каталога такая проверка читала бы настоящий INI
     разработчика — и портила бы его, случись отказ сломанным.
+
+    Побочный эффект, который эта фикстура ОСТАВЛЯЕТ ПОСЛЕ СЕБЯ:
+    ``QSettings.setPath`` процессно-глобален, исходное значение
+    прочитать нельзя, поэтому ``finally`` уводит процесс в общий
+    ``TempLocation``, а не возвращает на место. Ровно то же делает
+    ``tests/ui_qml_smoke/test_app_preferences.py``; сказано в обоих,
+    потому что эффект одинаковый.
     """
     QSettings.setPath(
         QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path)
@@ -166,15 +189,29 @@ def test_set_active_refuses_an_uninstalled_backend(registry: ModelRegistry):
         )
 
     row = candidates[0]
+    stored_before = _stored_active_backend()
     registry.setActive(row)
 
+    # ГЛАВНЫЙ АССЕРТ — СЫРОЙ КЛЮЧ, и он здесь не для полноты.
+    # `setActive` пишет в QSettings ДО `_rebuild_and_reset`, а
+    # `_build_rows` затем возвращает `_active_id` на установленную
+    # строку («promote the first installed row instead»). Поэтому на
+    # машине, где установлен хотя бы один бэкенд, и `activeModelId`, и
+    # второй экземпляр читают уже вылеченное значение — обе проверки
+    # ниже проходят, пока в INI лежит неустановленный бэкенд. Замерено
+    # зондом: под мутацией `if target.active:` они зелёные, а ключ
+    # равен 'faster-whisper-large-v3-ru'. Единственное, что переживает
+    # лечение и наблюдаемо в ЛЮБОМ окружении, — сам ключ.
+    assert _stored_active_backend() == stored_before, (
+        f"setActive({row}) записал неустановленный бэкенд в QSettings: "
+        f"{stored_before!r} → {_stored_active_backend()!r}"
+    )
+    # Эти две — про то же последствие, но видимое только когда не
+    # установлено ничего (в CI именно так). Оставлены потому, что
+    # называют вред на языке пайплайна, а не ключа INI.
     assert registry.activeModelId == active_now, (
         f"setActive({row}) подменил активную модель на неустановленный "
         f"бэкенд: {active_now!r} → {registry.activeModelId!r}"
     )
-    # Второй экземпляр читает QSettings заново — так видно, дошёл ли
-    # отказ до диска или только до памяти.
-    assert ModelRegistry().activeModelId == active_now, (
-        f"setActive({row}) записал неустановленный бэкенд в QSettings"
-    )
+    assert ModelRegistry().activeModelId == active_now
     assert registry.entryAt(row)["active"] is False

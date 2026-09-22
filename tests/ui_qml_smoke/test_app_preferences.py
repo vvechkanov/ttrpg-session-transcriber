@@ -260,9 +260,10 @@ def test_build_asr_options_coerces_strings(scratch_settings):
     assert opts.language == "en"
     assert opts.gigaam_variant == "e2e_rnnt"
     assert opts.gigaam_precision == "int8"
-    # Числа: тип проверяется отдельно от значения — строка "8" равна 8
-    # не была бы, но `int` с `str` сравнивать и не надо, а вот
-    # `beam_size == "8"` прошло бы, будь коэрция забыта.
+    # Тип проверяется отдельно от значения, и не ради строки: `== 8`
+    # само по себе уже отсекает забытую коэрцию, потому что "8" != 8.
+    # isinstance ловит другое — 8.0 и True, которые равенству
+    # удовлетворяют, а в AsrOptions означают не то же самое.
     assert opts.beam_size == 8 and isinstance(opts.beam_size, int)
     assert opts.num_threads == 2 and isinstance(opts.num_threads, int)
 
