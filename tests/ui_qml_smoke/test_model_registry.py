@@ -63,35 +63,64 @@ def _stored_active_backend():
     ).value(_SETTINGS_KEY_ACTIVE)
 
 
-@pytest.fixture()
-def registry(app: QGuiApplication, tmp_path: Path) -> ModelRegistry:
-    """Реестр поверх собственного INI.
+def _scratch_settings_path(directory) -> None:
+    QSettings.setPath(
+        QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(directory)
+    )
 
-    ``ModelRegistry.setActive`` пишет выбранный бэкенд в QSettings, и
-    тест отказа ниже проверяет, что при отказе запись НЕ случилась.
-    Без своего каталога такая проверка читала бы настоящий INI
-    разработчика — и портила бы его, случись отказ сломанным.
 
-    Побочный эффект, который эта фикстура ОСТАВЛЯЕТ ПОСЛЕ СЕБЯ:
-    ``QSettings.setPath`` процессно-глобален, исходное значение
-    прочитать нельзя, поэтому ``finally`` уводит процесс в общий
-    ``TempLocation``, а не возвращает на место. Ровно то же делает
+def _release_settings_path() -> None:
+    """Увести хранилище в общий temp.
+
+    Не «вернуть на место»: ``QSettings.setPath`` процессно-глобален, а
+    исходный путь прочитать нельзя, так что возвращать нечего. Ровно тот
+    же побочный эффект создаёт
     ``tests/ui_qml_smoke/test_app_preferences.py``; сказано в обоих,
-    потому что эффект одинаковый.
+    потому что эффект одинаковый. Важно здесь одно: в temp, а не в
+    домашний каталог разработчика.
     """
     QSettings.setPath(
-        QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path)
+        QSettings.Format.IniFormat,
+        QSettings.Scope.UserScope,
+        QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation),
     )
+
+
+@pytest.fixture(scope="module")
+def registry(app: QGuiApplication, tmp_path_factory) -> ModelRegistry:
+    """Один реестр на модуль — для проверок, которые ничего не меняют.
+
+    Область module, а не function, ради цены: построение
+    ``ModelRegistry`` зовёт ``installed_size_bytes`` для установленных
+    строк, а это рекурсивный обход многогигабайтного бандла. В CI
+    бэкендов нет и обход пустой, но у разработчика с установленной
+    моделью пересборка на каждый из пяти тестов — пять одинаковых
+    обходов диска. Докстринг ``RegistryStub`` в ``tests/conftest.py``
+    записывает, что настоящий реестр в тестах уже однажды стоил
+    таймаутов в CI.
+    """
+    _scratch_settings_path(tmp_path_factory.mktemp("registry-ro"))
     try:
         yield ModelRegistry()
     finally:
-        QSettings.setPath(
-            QSettings.Format.IniFormat,
-            QSettings.Scope.UserScope,
-            QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.TempLocation
-            ),
-        )
+        _release_settings_path()
+
+
+@pytest.fixture()
+def mutable_registry(app: QGuiApplication, tmp_path: Path) -> ModelRegistry:
+    """Свежий реестр и свой INI — для теста, который пишет.
+
+    Отдельно от ``registry`` потому, что ``setActive`` пишет в QSettings,
+    и проверка «при отказе записи не случилось» требует хранилища, в
+    которое до неё никто не писал. Со своим каталогом такая проверка
+    ещё и не может испортить настоящий INI разработчика, случись отказ
+    сломанным.
+    """
+    _scratch_settings_path(tmp_path)
+    try:
+        yield ModelRegistry()
+    finally:
+        _release_settings_path()
 
 
 @pytest.mark.parametrize(
@@ -151,7 +180,7 @@ def test_at_most_one_row_is_active(registry: ModelRegistry):
     assert len(actives) <= 1, f"активных строк {len(actives)}, ожидалось не больше одной"
 
 
-def test_set_active_refuses_an_uninstalled_backend(registry: ModelRegistry):
+def test_set_active_refuses_an_uninstalled_backend(mutable_registry: ModelRegistry):
     """``setActive`` на неустановленном бэкенде — отказ, а не пометка.
 
     Экран не должен уметь сделать активным то, чего нет на диске:
@@ -170,16 +199,16 @@ def test_set_active_refuses_an_uninstalled_backend(registry: ModelRegistry):
     когда у дорожки нет своего override, и именно он подменялся на
     неустановленный бэкенд, да ещё и уезжал в QSettings.
     """
-    active_now = registry.activeModelId
+    active_now = mutable_registry.activeModelId
 
     # Нужна строка, которая при снятой защите РЕАЛЬНО подменила бы
     # activeModelId. Неустановленная строка с тем же asr id, что уже
     # активен, дала бы no-op, и тест был бы зелёным ни от чего.
     candidates = [
         r
-        for r in range(registry.rowCount())
-        if not registry.entryAt(r)["installed"]
-        and _BACKEND_TO_ASR_ID.get(BackendId(registry.entryAt(r)["backend_id"]))
+        for r in range(mutable_registry.rowCount())
+        if not mutable_registry.entryAt(r)["installed"]
+        and _BACKEND_TO_ASR_ID.get(BackendId(mutable_registry.entryAt(r)["backend_id"]))
         not in (None, active_now)
     ]
     if not candidates:
@@ -190,7 +219,7 @@ def test_set_active_refuses_an_uninstalled_backend(registry: ModelRegistry):
 
     row = candidates[0]
     stored_before = _stored_active_backend()
-    registry.setActive(row)
+    mutable_registry.setActive(row)
 
     # ГЛАВНЫЙ АССЕРТ — СЫРОЙ КЛЮЧ, и он здесь не для полноты.
     # `setActive` пишет в QSettings ДО `_rebuild_and_reset`, а
@@ -209,9 +238,9 @@ def test_set_active_refuses_an_uninstalled_backend(registry: ModelRegistry):
     # Эти две — про то же последствие, но видимое только когда не
     # установлено ничего (в CI именно так). Оставлены потому, что
     # называют вред на языке пайплайна, а не ключа INI.
-    assert registry.activeModelId == active_now, (
+    assert mutable_registry.activeModelId == active_now, (
         f"setActive({row}) подменил активную модель на неустановленный "
-        f"бэкенд: {active_now!r} → {registry.activeModelId!r}"
+        f"бэкенд: {active_now!r} → {mutable_registry.activeModelId!r}"
     )
     assert ModelRegistry().activeModelId == active_now
-    assert registry.entryAt(row)["active"] is False
+    assert mutable_registry.entryAt(row)["active"] is False

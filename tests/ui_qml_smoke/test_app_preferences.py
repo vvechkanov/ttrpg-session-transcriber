@@ -153,34 +153,68 @@ def test_default_working_folder_points_at_sessions(scratch_settings):
     assert "Sessions" in AppPreferences().workingFolder
 
 
-def test_every_property_is_covered_by_this_file(scratch_settings):
-    """Список полей проверяется машиной, а не обещанием в комментарии.
+def _declared_properties() -> set[str]:
+    """Имена ``QtCore.Property`` на классе.
 
-    Без этого теста «список держится полным» — честное слово: новое
-    ``@Property`` никто бы не заметил, и ни одна проверка не покраснела
-    бы. Ровно тот класс, против которого написан весь этот дифф.
+    Именно QtCore.Property, а не встроенный ``property``: свойства QML
+    объявлены декоратором Qt и питоновскому ``property`` не родня.
     """
-    # Именно QtCore.Property, а не встроенный property: свойства QML
-    # объявлены декоратором Qt и питоновскому property не родня.
-    declared = {
+    return {
         name
         for name in dir(AppPreferences)
         if not name.startswith("_")
         and isinstance(getattr(AppPreferences, name, None), Property)
     }
-    assert declared, "ни одного QtCore.Property не нашлось — сломана сама проверка"
-    covered = set(_DEFAULTS) | set(_MUTATIONS) | {"workingFolder"}
 
-    missing = sorted(declared - covered)
+
+def test_every_property_has_a_default_check(scratch_settings):
+    """Дефолт каждого свойства проверяется — список сверяется с классом.
+
+    Без этого «список держится полным» — честное слово: новое
+    ``@Property`` никто бы не заметил, и ни одна проверка не покраснела
+    бы. Ровно тот класс, против которого написан весь этот дифф.
+
+    ``_DEFAULTS`` и ``_MUTATIONS`` сверяются РАЗДЕЛЬНО, двумя тестами, и
+    это не педантизм. Проверка по их объединению зеленела, когда поле
+    пропадало из одной половины: замерено — убрать ``renderer`` только
+    из ``_DEFAULTS``, и набор тихо теряет ``test_default_value``
+    (44 теста становятся 43), а сторож полноты остаётся зелёным. То
+    есть он не видел ровно того дрейфа, ради которого заведён.
+
+    ``workingFolder`` исключён осознанно: его дефолт зависит от
+    домашнего каталога, поэтому проверяется отдельным тестом по
+    вхождению, а не равенством.
+    """
+    declared = _declared_properties()
+    assert declared, "ни одного QtCore.Property не нашлось — сломана сама проверка"
+
+    missing = sorted(declared - set(_DEFAULTS) - {"workingFolder"})
     assert not missing, (
-        "у этих свойств AppPreferences не проверяется ни дефолт, ни "
-        "запись — добавь их в _DEFAULTS и _MUTATIONS:\n  "
-        + "\n  ".join(missing)
+        "у этих свойств AppPreferences не проверяется дефолт — добавь их "
+        "в _DEFAULTS:\n  " + "\n  ".join(missing)
     )
-    stale = sorted(covered - declared - {"workingFolder"})
+    stale = sorted(set(_DEFAULTS) - declared)
     assert not stale, (
-        "эти имена перечислены здесь, но свойствами AppPreferences не "
-        "являются — список отстал от кода:\n  " + "\n  ".join(stale)
+        "эти имена перечислены в _DEFAULTS, но свойствами AppPreferences "
+        "не являются — список отстал от кода:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_every_property_has_a_persistence_check(scratch_settings):
+    """Запись каждого свойства проверяется — список сверяется с классом."""
+    declared = _declared_properties()
+    assert declared, "ни одного QtCore.Property не нашлось — сломана сама проверка"
+
+    missing = sorted(declared - set(_MUTATIONS))
+    assert not missing, (
+        "у этих свойств AppPreferences не проверяется запись на диск — "
+        "добавь их в _MUTATIONS:\n  " + "\n  ".join(missing)
+    )
+    stale = sorted(set(_MUTATIONS) - declared)
+    assert not stale, (
+        "эти имена перечислены в _MUTATIONS, но свойствами "
+        "AppPreferences не являются — список отстал от кода:\n  "
+        + "\n  ".join(stale)
     )
 
 

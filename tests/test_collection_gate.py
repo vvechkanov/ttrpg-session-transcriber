@@ -40,6 +40,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -71,10 +72,19 @@ def _collected_files() -> set[str]:
         "-p",
         "no:cacheprovider",
     ]
+    # PYTEST_ADDOPTS обязан быть СНЯТ, а не перекрыт: `-o addopts=`
+    # гасит только `addopts` из pytest.ini, переменную окружения он не
+    # трогает. Замерено — при `PYTEST_ADDOPTS=-q` подпроцесс получает
+    # `-q` дважды, то есть `-qq`, а на этой громкости сбор печатается
+    # как `файл: число` без единого `::`, и разбор ниже собирает пустое
+    # множество. Сторож тогда падает соседним ассертом («сломан сам
+    # сторож») — то есть красит CI на исправном дереве.
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
     try:
         proc = subprocess.run(
             argv,
             cwd=_PROJECT_ROOT,
+            env=env,
             capture_output=True,
             text=True,
             # Сбор — доли секунды (замер: 0.32 с на 1033 теста). Без
