@@ -1,10 +1,17 @@
 """``SessionMeta.openSession`` наполняет обе списочные модели.
 
 Файл был скриптом с ``main()``: pytest собирал из него ноль тестов.
-Проверяется здесь именно ПРОВОДКА — сигнал ``sessionOpened`` доходит до
-``TrackListModel.loadFromDir`` и ``SourceListModel.loadFromDir``, — а её
-не проверяет ни ``tests/test_core_file_matchers.py`` (чистый core), ни
-``tests/test_ui_models_session.py``.
+
+Проверяется здесь проводка — сигнал ``sessionOpened`` доходит до
+``TrackListModel.loadFromDir`` и ``SourceListModel.loadFromDir``.
+Единственной такой проверкой этот файл НЕ является, и говорить так
+было бы неправдой: ``tests/test_ui_models_session.py:1145`` соединяет
+``sessionOpened`` с ``SourceListModel.loadFromDir``, а
+``tests/test_integration_full_pipeline.py:109,115`` собирает обе модели
+«the same way app_qml.main() does». Не покрыт там ровно один случай —
+отсев сведённого craig-микса из списка ДОРОЖЕК при открытии через
+сигнал: у ``test_ui_models_session`` подключена только модель
+источников, у интеграционного теста в папке микса нет.
 """
 
 from __future__ import annotations

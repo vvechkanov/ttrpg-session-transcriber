@@ -10,11 +10,20 @@
 выполнялась вообще никаким способом. Здесь она восстановлена как
 ``test_renderer_survives_restart``.
 
-Изоляция сделана строже, чем в скрипте. Тот уводил ``QSettings`` в общий
+Изоляция строже, чем в скрипте: тот уводил ``QSettings`` в общий
 ``TempLocation`` и звал ``.clear()`` — то есть чистил тот же INI, в
-который смотрит ``tests/ui_qml_smoke/test_settings_screen_promises.py``.
-Здесь хранилище уводится в собственный ``tmp_path`` теста и путь
-возвращается на место после него.
+который смотрит ``tests/ui_qml_smoke/test_settings_screen_promises.py``
+(единственный такой сосед). Здесь каждый тест получает собственный
+``tmp_path``.
+
+ЧЕГО ЗДЕСЬ НЕТ И НЕ МОЖЕТ БЫТЬ — восстановления исходного пути.
+``QSettings`` не даёт его прочитать, сохранять нечего, поэтому
+``finally`` уводит процесс в общий ``TempLocation``, а не «возвращает
+на место». Это осознанный побочный эффект, а не изоляция: после этого
+файла процесс смотрит в temp, а не в настоящий каталог настроек. Тот
+же эффект уже создаёт названный выше сосед, и он его не снимает вовсе;
+здесь важно, что в temp, а не в домашний каталог разработчика, — иначе
+сломанная запись портила бы его настоящие настройки.
 """
 
 from __future__ import annotations
@@ -24,42 +33,51 @@ from pathlib import Path
 
 import pytest
 
-from PySide6.QtCore import QSettings, QStandardPaths
-from PySide6.QtGui import QGuiApplication
-
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+# Как и у соседей по каталогу: core.pipeline импортируется до ui.*,
+# чтобы не поймать циклический импорт через sources/__init__.
+from core.pipeline import run as _warm  # noqa: F401,E402
+
+from PySide6.QtCore import Property, QSettings, QStandardPaths  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
 
 from ui.models.app_preferences import AppPreferences, _to_bool  # noqa: E402
 
 
-def _ensure_app() -> QGuiApplication:
+@pytest.fixture(scope="module")
+def app() -> QGuiApplication:
+    """Держит ссылку на приложение весь модуль.
+
+    Именно ссылку: без неё единственный Python-владелец
+    ``QGuiApplication`` умирает вместе с кадром функции, если приложение
+    создано здесь (запуск одного этого файла). Соседи по каталогу держат
+    её либо module-scoped фикстурой, либо списком ``_ALIVE``.
+    """
     inst = QGuiApplication.instance()
     if inst is not None:
         return inst
-    app = QGuiApplication(sys.argv or [""])
-    app.setApplicationName("Session Transcriber")
-    app.setOrganizationName("Session Transcriber")
-    return app
+    created = QGuiApplication(sys.argv or [""])
+    created.setApplicationName("Session Transcriber")
+    created.setOrganizationName("Session Transcriber")
+    return created
 
 
 @pytest.fixture()
-def scratch_settings(tmp_path: Path):
+def scratch_settings(app: QGuiApplication, tmp_path: Path):
     """Увести INI ``AppPreferences`` в отдельный каталог на один тест.
 
     ``AppPreferences`` открывает хранилище, называя организацию и
     приложение явно, поэтому имена на ``QGuiApplication`` его никуда не
     уводят — подменять надо путь формата.
     """
-    _ensure_app()
     QSettings.setPath(
         QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path)
     )
     try:
         yield tmp_path
     finally:
-        # Вернуть общий temp: соседние тесты уводят хранилище туда же
-        # сами, но полагаться на порядок запуска нельзя.
         QSettings.setPath(
             QSettings.Format.IniFormat,
             QSettings.Scope.UserScope,
@@ -133,6 +151,64 @@ def test_default_working_folder_points_at_sessions(scratch_settings):
     # Путь зависит от домашнего каталога, поэтому проверяется хвост, а
     # не полное совпадение.
     assert "Sessions" in AppPreferences().workingFolder
+
+
+def test_every_property_is_covered_by_this_file(scratch_settings):
+    """Список полей проверяется машиной, а не обещанием в комментарии.
+
+    Без этого теста «список держится полным» — честное слово: новое
+    ``@Property`` никто бы не заметил, и ни одна проверка не покраснела
+    бы. Ровно тот класс, против которого написан весь этот дифф.
+    """
+    # Именно QtCore.Property, а не встроенный property: свойства QML
+    # объявлены декоратором Qt и питоновскому property не родня.
+    declared = {
+        name
+        for name in dir(AppPreferences)
+        if not name.startswith("_")
+        and isinstance(getattr(AppPreferences, name, None), Property)
+    }
+    assert declared, "ни одного QtCore.Property не нашлось — сломана сама проверка"
+    covered = set(_DEFAULTS) | set(_MUTATIONS) | {"workingFolder"}
+
+    missing = sorted(declared - covered)
+    assert not missing, (
+        "у этих свойств AppPreferences не проверяется ни дефолт, ни "
+        "запись — добавь их в _DEFAULTS и _MUTATIONS:\n  "
+        + "\n  ".join(missing)
+    )
+    stale = sorted(covered - declared - {"workingFolder"})
+    assert not stale, (
+        "эти имена перечислены здесь, но свойствами AppPreferences не "
+        "являются — список отстал от кода:\n  " + "\n  ".join(stale)
+    )
+
+
+def test_all_fields_share_one_store_without_collisions(scratch_settings):
+    """Все поля пишутся в ОДИН INI и читаются оттуда же.
+
+    Тесты ниже параметризованы, и у каждого свой ``tmp_path``, то есть
+    своё хранилище на одно поле. Это и есть их слепое пятно: опечатка в
+    ключе, из-за которой два свойства пишут в одну строку INI, там не
+    видна — в файле лежит ровно одно значение. Ключей у
+    ``AppPreferences`` семнадцать, и они похожи друг на друга
+    (``asr/beam_size``, ``asr/num_threads``, ``chunking/chunk_chars``),
+    так что копипаста сеттера — правдоподобная мутация.
+    """
+    prefs = AppPreferences()
+    for field, value in _MUTATIONS.items():
+        setattr(prefs, field, value)
+
+    restarted = AppPreferences()
+    wrong = {
+        field: (value, getattr(restarted, field))
+        for field, value in _MUTATIONS.items()
+        if getattr(restarted, field) != value
+    }
+    assert not wrong, (
+        "после записи всех полей в одно хранилище часть читается не "
+        f"своей — похоже на коллизию ключей QSettings: {wrong}"
+    )
 
 
 @pytest.mark.parametrize(("field", "value"), sorted(_MUTATIONS.items()))
